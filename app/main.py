@@ -1,16 +1,21 @@
-import asyncio
-from contextlib import asynccontextmanager
 import logging
-from sqlalchemy import text
-import httpx
+import sys
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
-from app.api.v1 import api_router
+from app.api import api_router
 from app.core.config import settings
 from app.db.session import engine
 from app.exceptions.app_exception import AppException
-from fastapi.responses import JSONResponse
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,52 +32,57 @@ async def lifespan(app: FastAPI):
         print(f"❌ LỖI KẾT NỐI DATABASE: {e}")
         # Nếu muốn server dừng luôn không chạy nữa nếu lỗi DB, bạn có thể raise lỗi ở đây
 
-    # Đăng ký Telegram Webhook khi server khởi động
-    if not settings.SERVER_PUBLIC_URL:
-        print("⚠️  SERVER_PUBLIC_URL chưa được cấu hình — bỏ qua đăng ký Webhook.")
-    else:
-        webhook_url = f"{settings.SERVER_PUBLIC_URL}{settings.API_V1}/telegram/webhook"
-        set_url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
-
-        max_retries = 3
-        retry_delay = 5  # giây
-
-        async with httpx.AsyncClient() as client:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    print(f"🔄 Đang đăng ký Webhook (Lần {attempt}/{max_retries})...")
-                    resp = await client.get(set_url, timeout=10)
-                    resp.raise_for_status()
-                    data = resp.json()
-
-                    if data.get("ok"):
-                        print(f"✅ Webhook đã đăng ký thành công: {webhook_url}")
-                        break  # Thoát vòng lặp khi thành công
-                    else:
-                        print(f"❌ Telegram từ chối: {data}")
-                        # Nếu Telegram từ chối (ví dụ sai URL), thường retry cũng không ích gì nên có thể break luôn hoặc đợi retry
-                        break
-
-                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-                    print(f"❌ Lỗi đăng ký Webhook (Lần {attempt}): {type(exc).__name__}")
-
-                    if attempt < max_retries:
-                        print(f"   → Thử lại sau {retry_delay} giây...")
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        print(f"‼️ Đã thử {max_retries} lần nhưng thất bại. Vui lòng kiểm tra NGROK hoặc Internet.")
+    # Tam tat Telegram: khong tu dong dang ky webhook khi server khoi dong.
+    # if not settings.SERVER_PUBLIC_URL:
+    #     print("⚠️  SERVER_PUBLIC_URL chưa được cấu hình — bỏ qua đăng ký Webhook.")
+    # else:
+    #     webhook_url = f"{settings.SERVER_PUBLIC_URL}/telegram/webhook"
+    #     set_url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
+    #
+    #     max_retries = 3
+    #     retry_delay = 5  # giây
+    #
+    #     async with httpx.AsyncClient() as client:
+    #         for attempt in range(1, max_retries + 1):
+    #             try:
+    #                 print(f"🔄 Đang đăng ký Webhook (Lần {attempt}/{max_retries})...")
+    #                 resp = await client.get(set_url, timeout=10)
+    #                 resp.raise_for_status()
+    #                 data = resp.json()
+    #
+    #                 if data.get("ok"):
+    #                     print(f"✅ Webhook đã đăng ký thành công: {webhook_url}")
+    #                     break  # Thoát vòng lặp khi thành công
+    #                 else:
+    #                     print(f"❌ Telegram từ chối: {data}")
+    #                     # Nếu Telegram từ chối (ví dụ sai URL), thường retry cũng không ích gì nên có thể break luôn hoặc đợi retry
+    #                     break
+    #
+    #             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+    #                 print(
+    #                     f"❌ Lỗi đăng ký Webhook (Lần {attempt}): {type(exc).__name__}"
+    #                 )
+    #
+    #                 if attempt < max_retries:
+    #                     print(f"   → Thử lại sau {retry_delay} giây...")
+    #                     await asyncio.sleep(retry_delay)
+    #                 else:
+    #                     print(
+    #                         f"‼️ Đã thử {max_retries} lần nhưng thất bại. Vui lòng kiểm tra NGROK hoặc Internet."
+    #                     )
 
     yield  # Server bắt đầu chạy tại đây
 
     # --- PHẦN ĐÓNG (SHUTDOWN) ---
-    from app.services.telegram_service import telegram_client
-    await telegram_client.aclose()
-    print("🛑 Đã đóng kết nối Telegram Client.")
+    # Tam tat Telegram: khong khoi tao/dong Telegram client trong lifecycle.
+    # from app.services.telegram_service import telegram_client
+    #
+    # await telegram_client.aclose()
+    # print("🛑 Đã đóng kết nối Telegram Client.")
 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1}/openapi.json",
     lifespan=lifespan,
 )
 
@@ -84,7 +94,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(api_router, prefix=settings.API_V1)
+app.include_router(api_router)
 
 
 @app.exception_handler(AppException)
@@ -95,7 +105,7 @@ async def app_exception_handler(request: Request, exc: AppException):
     """
     error_content = {
         "status_code": exc.error_code.status_code,
-        "message": exc.error_code.message
+        "message": exc.error_code.message,
     }
 
     if exc.detail_message:
@@ -106,6 +116,7 @@ async def app_exception_handler(request: Request, exc: AppException):
         content=error_content,
     )
 
+
 @app.get("/", tags=["Root"])
 async def root_check():
     """
@@ -113,6 +124,7 @@ async def root_check():
     Trả về 200 OK để nó biết container vẫn đang sống nhăn răng.
     """
     return {"message": "Hugging Face Space is running smoothly!"}
+
 
 @app.get("/health", tags=["Health"])
 async def health_check():
@@ -127,11 +139,11 @@ async def health_check():
         return {
             "status": "UP",
             "database": "CONNECTED",
-            "version": settings.PROJECT_NAME
+            "version": settings.PROJECT_NAME,
         }
     except Exception as e:
         # Trả về lỗi 503 nếu DB có vấn đề để hệ thống giám sát biết mà restart app
         return JSONResponse(
             status_code=503,
-            content={"status": "DOWN", "database": "ERROR", "detail": str(e)}
+            content={"status": "DOWN", "database": "ERROR", "detail": str(e)},
         )

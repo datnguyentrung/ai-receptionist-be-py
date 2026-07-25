@@ -8,6 +8,8 @@ services:
         value: "8000"
       - key: DATABASE_URL
         sync: false
+      - key: FACE_MATCH_THRESHOLD
+        value: "0.7"
       - key: JWT_BASE64_SECRET
         generateValue: true
       - key: TELEGRAM_BOT_TOKEN

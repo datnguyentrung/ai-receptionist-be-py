@@ -23,7 +23,6 @@ async def handle_telegram_update(request: Request):
 
     if text == "/start":
         logger.info("📩New user registered: %s (chat_id=%s)", username, chat_id)
-        await telegram_service.send_welcome_message(chat_id)
+        # await telegram_service.send_welcome_message(chat_id)  # Tam tat gui Telegram
 
     return {"status": "ok"}
-

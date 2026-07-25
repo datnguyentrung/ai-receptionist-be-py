@@ -1,9 +1,9 @@
 from enum import Enum
-from typing import Tuple
+
 
 class ErrorCode(Enum):
     # (HTTP Status, Error Message)
-    STUDENT_NOT_FOUND = (404, "Không tìm thấy thông tin học viên")
+    PERSON_NOT_FOUND = (404, "Không tìm thấy thông tin người")
     CLASS_NOT_FOUND = (404, "Lớp học không tồn tại")
     ALREADY_CHECKED_IN = (409, "Học viên đã điểm danh ca học này")
     NO_VALID_SESSION = (404, "Không tìm thấy ca học nào phù hợp đang mở")

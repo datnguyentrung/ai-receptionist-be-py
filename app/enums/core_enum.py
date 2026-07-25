@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class Belt(str, Enum):
     C10 = "C10"
     C9 = "C9"
@@ -22,7 +23,3 @@ class Belt(str, Enum):
     D9 = "D9"
     D10 = "D10"
 
-class StudentStatus(str, Enum):
-    ACTIVE = "ACTIVE"  # HOẠT ĐỘNG
-    RESERVED = "RESERVED"  # TẠM NGƯNG
-    DROPPED = "DROPPED"  # THOÁT HỌC
