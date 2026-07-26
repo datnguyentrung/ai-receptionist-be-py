@@ -36,4 +36,4 @@ RUN python download_model.py && \
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-7860} --log-level info --access-log"]

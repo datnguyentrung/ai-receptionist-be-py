@@ -1,6 +1,8 @@
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,82 +20,108 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+def configure_logging() -> None:
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    if not root_logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+    else:
+        for handler in root_logger.handlers:
+            handler.setFormatter(formatter)
+
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(logger_name)
+        uvicorn_logger.disabled = False
+        uvicorn_logger.setLevel(logging.INFO)
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- 1. KIỂM TRA KẾT NỐI DATABASE ---
     try:
-        print("🔄 Đang kiểm tra kết nối Database...")
+        logger.info("Checking database connection")
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
-        print("✅ Kết nối Database Supabase thành công!")
-    except Exception as e:
-        print(f"❌ LỖI KẾT NỐI DATABASE: {e}")
-        # Nếu muốn server dừng luôn không chạy nữa nếu lỗi DB, bạn có thể raise lỗi ở đây
+        logger.info("Database connection successful")
+    except Exception:
+        logger.exception("Database connection failed")
 
     try:
-        print("🔄 Đang khởi tạo InsightFace model...")
+        logger.info("Initializing InsightFace model")
         ensure_face_app_initialized()
-    except Exception as e:
-        print(f"❌ LỖI KHỞI TẠO INSIGHTFACE: {e}")
+        logger.info("InsightFace model initialized successfully")
+    except Exception:
+        logger.exception("InsightFace model initialization failed")
 
-    # Tam tat Telegram: khong tu dong dang ky webhook khi server khoi dong.
-    # if not settings.SERVER_PUBLIC_URL:
-    #     print("⚠️  SERVER_PUBLIC_URL chưa được cấu hình — bỏ qua đăng ký Webhook.")
-    # else:
-    #     webhook_url = f"{settings.SERVER_PUBLIC_URL}/telegram/webhook"
-    #     set_url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
-    #
-    #     max_retries = 3
-    #     retry_delay = 5  # giây
-    #
-    #     async with httpx.AsyncClient() as client:
-    #         for attempt in range(1, max_retries + 1):
-    #             try:
-    #                 print(f"🔄 Đang đăng ký Webhook (Lần {attempt}/{max_retries})...")
-    #                 resp = await client.get(set_url, timeout=10)
-    #                 resp.raise_for_status()
-    #                 data = resp.json()
-    #
-    #                 if data.get("ok"):
-    #                     print(f"✅ Webhook đã đăng ký thành công: {webhook_url}")
-    #                     break  # Thoát vòng lặp khi thành công
-    #                 else:
-    #                     print(f"❌ Telegram từ chối: {data}")
-    #                     # Nếu Telegram từ chối (ví dụ sai URL), thường retry cũng không ích gì nên có thể break luôn hoặc đợi retry
-    #                     break
-    #
-    #             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-    #                 print(
-    #                     f"❌ Lỗi đăng ký Webhook (Lần {attempt}): {type(exc).__name__}"
-    #                 )
-    #
-    #                 if attempt < max_retries:
-    #                     print(f"   → Thử lại sau {retry_delay} giây...")
-    #                     await asyncio.sleep(retry_delay)
-    #                 else:
-    #                     print(
-    #                         f"‼️ Đã thử {max_retries} lần nhưng thất bại. Vui lòng kiểm tra NGROK hoặc Internet."
-    #                     )
-
-    yield  # Server bắt đầu chạy tại đây
-
-    # --- PHẦN ĐÓNG (SHUTDOWN) ---
-    # Tam tat Telegram: khong khoi tao/dong Telegram client trong lifecycle.
-    # from app.services.telegram_service import telegram_client
-    #
-    # await telegram_client.aclose()
-    # print("🛑 Đã đóng kết nối Telegram Client.")
+    yield
 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+
+    method = request.method
+    path = request.url.path
+    client = request.client.host if request.client else "unknown"
+    start_time = time.perf_counter()
+
+    logger.info(
+        "Request started | request_id=%s | method=%s | path=%s | client=%s",
+        request_id,
+        method,
+        path,
+        client,
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.exception(
+            "Request failed | request_id=%s | method=%s | path=%s | "
+            "duration_ms=%.2f | client=%s",
+            request_id,
+            method,
+            path,
+            duration_ms,
+            client,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "Request completed | request_id=%s | method=%s | path=%s | "
+        "status=%s | duration_ms=%.2f | client=%s",
+        request_id,
+        method,
+        path,
+        response.status_code,
+        duration_ms,
+        client,
+    )
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -108,10 +136,6 @@ app.include_router(api_router)
 
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
-    """
-    Tự động bắt mọi lỗi AppException văng ra trong code
-    và trả về định dạng JSON chuẩn.
-    """
     error_content = {
         "status_code": exc.error_code.status_code,
         "message": exc.error_code.message,
@@ -128,21 +152,12 @@ async def app_exception_handler(request: Request, exc: AppException):
 
 @app.get("/", tags=["Root"])
 async def root_check():
-    """
-    Route này sinh ra chỉ để 'dỗ' hệ thống giám sát của Hugging Face.
-    Trả về 200 OK để nó biết container vẫn đang sống nhăn răng.
-    """
     return {"message": "Hugging Face Space is running smoothly!"}
 
 
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """
-    Tương đương với Actuator Health bên Java Spring Boot.
-    Kiểm tra xem Database có thực sự kết nối được không.
-    """
     try:
-        # Thực hiện một truy vấn siêu nhẹ để check DB
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
         return {
@@ -151,7 +166,6 @@ async def health_check():
             "version": settings.PROJECT_NAME,
         }
     except Exception as e:
-        # Trả về lỗi 503 nếu DB có vấn đề để hệ thống giám sát biết mà restart app
         return JSONResponse(
             status_code=503,
             content={"status": "DOWN", "database": "ERROR", "detail": str(e)},

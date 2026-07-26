@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -17,6 +18,7 @@ MODEL_DIR = os.path.abspath(
 )
 os.environ["INSIGHTFACE_HOME"] = MODEL_DIR
 face_app = None
+logger = logging.getLogger(__name__)
 
 
 def initialize_cpu_face_app():
@@ -29,7 +31,7 @@ def initialize_cpu_face_app():
             providers=["CPUExecutionProvider"],
         )
         app.prepare(ctx_id=-1, det_size=(640, 640))
-    print("InsightFace CPU initialized successfully (Model: buffalo_s).")
+    logger.info("InsightFace CPU initialized successfully (model=buffalo_s)")
     return app
 
 
