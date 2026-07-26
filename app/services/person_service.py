@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.repositories.person_repo import PersonRepository
-from app.utils.insightface_utils import get_face_embedding
+from app.exceptions.face_check_in_exception import (
+    FaceCheckInErrorCode,
+    FaceCheckInException,
+)
+from app.utils.insightface_utils import get_face_embedding, get_single_face_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,9 @@ class PersonService:
     ) -> bool:
         embedding = get_face_embedding(image_np)
         if embedding is None:
-            raise ValueError("Không tìm thấy khuôn mặt trong ảnh, vui lòng thử ảnh khác.")
+            raise ValueError(
+                "Không tìm thấy khuôn mặt trong ảnh, vui lòng thử ảnh khác."
+            )
 
         success = await self.person_repository.update_face_embedding(person_id, embedding)
         if not success:
@@ -46,10 +52,7 @@ class PersonService:
     ) -> CheckInMatch:
         logger.info("CHECK_IN_STEP before_insightface | request_id=%s", request_id)
         try:
-            if request_id is None:
-                embedding = get_face_embedding(image_np)
-            else:
-                embedding = get_face_embedding(image_np, request_id=request_id)
+            face_result = get_single_face_embedding(image_np, request_id=request_id)
         except Exception:
             logger.exception(
                 "CHECK_IN_ERROR insightface_failed | request_id=%s", request_id
@@ -59,14 +62,10 @@ class PersonService:
         logger.info(
             "CHECK_IN_STEP after_insightface | request_id=%s | embedding_present=%s",
             request_id,
-            embedding is not None,
+            face_result.embedding is not None,
         )
-        if embedding is None:
-            return CheckInMatch(
-                person_id=None,
-                confidence=0.0,
-                error="Không tìm thấy khuôn mặt trong ảnh.",
-            )
+        if face_result.embedding is None:
+            raise FaceCheckInException(FaceCheckInErrorCode.FACE_NOT_DETECTED)
 
         logger.info(
             "CHECK_IN_STEP before_database_query | request_id=%s | threshold=%.6f",
@@ -76,7 +75,7 @@ class PersonService:
         try:
             person, confidence = (
                 await self.person_repository.find_nearest_person_by_embedding(
-                    embedding,
+                    face_result.embedding,
                     settings.FACE_MATCH_THRESHOLD,
                 )
             )
@@ -94,10 +93,15 @@ class PersonService:
             confidence,
         )
         if person is None:
-            return CheckInMatch(
-                person_id=None,
-                confidence=confidence,
-                error="Không tìm thấy người phù hợp với ngưỡng nhận diện.",
+            raise FaceCheckInException(FaceCheckInErrorCode.FACE_NOT_MATCHED)
+
+        person_type = getattr(person, "person_type", None)
+        if person_type is not None and str(person_type).upper() not in {
+            "STUDENT",
+            "STUDENT_MEMBER",
+        }:
+            raise FaceCheckInException(
+                FaceCheckInErrorCode.FACE_CHECK_IN_PERSON_TYPE_INVALID
             )
 
         return CheckInMatch(person_id=person.person_id, confidence=confidence)

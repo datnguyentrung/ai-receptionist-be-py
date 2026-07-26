@@ -1,6 +1,7 @@
 import logging
 import os
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from io import StringIO
 
 import numpy as np
@@ -8,6 +9,11 @@ import numpy as np
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
 from insightface.app import FaceAnalysis
+
+from app.exceptions.face_check_in_exception import (
+    FaceCheckInErrorCode,
+    FaceCheckInException,
+)
 
 # Đồng bộ INSIGHTFACE_HOME với Docker build (download_model.py)
 MODEL_DIR = os.path.abspath(
@@ -19,6 +25,12 @@ MODEL_DIR = os.path.abspath(
 os.environ["INSIGHTFACE_HOME"] = MODEL_DIR
 face_app = None
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FaceEmbeddingResult:
+    embedding: list[float] | None
+    face_count: int
 
 
 def initialize_cpu_face_app():
@@ -70,6 +82,42 @@ def get_face_embedding(
 
         return largest_face.embedding.tolist()
 
+    except Exception as e:
+        logger.exception(
+            "CHECK_IN_ERROR face_embedding_extraction_failed | request_id=%s",
+            request_id,
+        )
+        raise RuntimeError(f"Face embedding extraction error: {e!r}") from e
+
+
+def get_single_face_embedding(
+    img_array: np.ndarray, request_id: str | None = None
+) -> FaceEmbeddingResult:
+    try:
+        app = ensure_face_app_initialized()
+        faces = app.get(img_array)
+        face_count = len(faces)
+        logger.info(
+            "CHECK_IN_STEP insightface_completed | request_id=%s | face_count=%s",
+            request_id,
+            face_count,
+        )
+        if face_count == 0:
+            return FaceEmbeddingResult(embedding=None, face_count=0)
+
+        if face_count > 1:
+            raise FaceCheckInException(
+                FaceCheckInErrorCode.MULTIPLE_FACES_DETECTED,
+                detail_message=f"Detected {face_count} faces",
+            )
+
+        return FaceEmbeddingResult(
+            embedding=faces[0].embedding.tolist(),
+            face_count=face_count,
+        )
+
+    except FaceCheckInException:
+        raise
     except Exception as e:
         logger.exception(
             "CHECK_IN_ERROR face_embedding_extraction_failed | request_id=%s",
