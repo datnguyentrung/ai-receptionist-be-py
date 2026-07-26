@@ -2,8 +2,6 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from app.services import telegram_service
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/telegram", tags=["Telegram"])

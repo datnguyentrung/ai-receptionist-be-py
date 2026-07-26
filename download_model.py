@@ -1,5 +1,5 @@
 """
-Script tải trước model buffalo_s của InsightFace vào thư mục insightface_data.
+Script tải trước model buffalo_l của InsightFace vào thư mục insightface_data.
 Chạy script này TRONG quá trình build Docker để model được nướng sẵn vào image,
 tránh tải lại mỗi khi Render restart server.
 """
@@ -12,7 +12,7 @@ from insightface.app import FaceAnalysis
 MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "insightface_data"))
 os.environ["INSIGHTFACE_HOME"] = MODEL_DIR
 
-MODEL_NAME = "buffalo_s"
+MODEL_NAME = "buffalo_l"
 
 
 def download():

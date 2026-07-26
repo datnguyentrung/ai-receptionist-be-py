@@ -33,7 +33,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY --chown=user . .
 
 RUN python download_model.py && \
-    test -d "$INSIGHTFACE_HOME/models/buffalo_s"
+    test -d "$INSIGHTFACE_HOME/models/buffalo_l"
 
 EXPOSE 7860
 

@@ -4,11 +4,6 @@ uvicorn[standard]~=0.41.0
 pydantic~=2.11.0
 pydantic-settings~=2.13.1
 
-# Database
-sqlalchemy[asyncio]~=2.0.40
-asyncpg~=0.30.0
-pgvector~=0.3.6
-
 # AI / Face Recognition
 insightface~=0.7.3
 onnxruntime~=1.21.1
@@ -21,9 +16,12 @@ httpx~=0.28.1
 # Environment
 python-dotenv~=1.1.0
 
-# Google Gemini (AI content generation)
+# Google Gemini (kept for existing utility code)
 google-genai~=1.14.0
 
+# Multipart upload support
 python-multipart
 
+# Development
+pytest
 ruff

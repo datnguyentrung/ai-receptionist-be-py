@@ -6,15 +6,18 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sqlalchemy import text
 
 from app.api import api_router
 from app.core.config import settings
-from app.db.session import engine
-from app.exceptions.app_exception import AppException
-from app.utils.insightface_utils import ensure_face_app_initialized
+from app.exceptions.exception_handler import (
+    face_embedding_exception_handler,
+    face_embedding_validation_exception_handler,
+    internal_exception_handler,
+)
+from app.exceptions.face_embedding_exception import FaceEmbeddingException
+from app.utils.insightface_utils import initialize_face_app, is_face_app_initialized
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -40,8 +43,6 @@ def configure_logging() -> None:
         for handler in root_logger.handlers:
             handler.setFormatter(formatter)
 
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uvicorn_logger = logging.getLogger(logger_name)
         uvicorn_logger.disabled = False
@@ -55,17 +56,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        logger.info("Checking database connection")
-        async with engine.begin() as conn:
-            await conn.execute(text("SELECT 1"))
-        logger.info("Database connection successful")
-    except Exception:
-        logger.exception("Database connection failed")
-
-    try:
-        logger.info("Initializing InsightFace model")
-        ensure_face_app_initialized()
-        logger.info("InsightFace model initialized successfully")
+        initialize_face_app()
     except Exception:
         logger.exception("InsightFace model initialization failed")
 
@@ -89,7 +80,7 @@ async def request_logging_middleware(request: Request, call_next):
     start_time = time.perf_counter()
 
     logger.info(
-        "Request started | request_id=%s | method=%s | path=%s | client=%s",
+        "Request started | requestId=%s | method=%s | path=%s | client=%s",
         request_id,
         method,
         path,
@@ -101,8 +92,8 @@ async def request_logging_middleware(request: Request, call_next):
     except Exception:
         duration_ms = (time.perf_counter() - start_time) * 1000
         logger.exception(
-            "Request failed | request_id=%s | method=%s | path=%s | "
-            "duration_ms=%.2f | client=%s",
+            "Request failed | requestId=%s | method=%s | path=%s | "
+            "durationMs=%.2f | client=%s",
             request_id,
             method,
             path,
@@ -114,8 +105,8 @@ async def request_logging_middleware(request: Request, call_next):
     duration_ms = (time.perf_counter() - start_time) * 1000
     response.headers["X-Request-ID"] = request_id
     logger.info(
-        "Request completed | request_id=%s | method=%s | path=%s | "
-        "status=%s | duration_ms=%.2f | client=%s",
+        "Request completed | requestId=%s | method=%s | path=%s | "
+        "status=%s | durationMs=%.2f | client=%s",
         request_id,
         method,
         path,
@@ -135,41 +126,25 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-
-
-@app.exception_handler(AppException)
-async def app_exception_handler(request: Request, exc: AppException):
-    error_content = {
-        "status_code": exc.error_code.status_code,
-        "message": exc.error_code.message,
-    }
-
-    if exc.detail_message:
-        error_content["detail"] = exc.detail_message
-
-    return JSONResponse(
-        status_code=exc.error_code.status_code,
-        content=error_content,
-    )
+app.add_exception_handler(FaceEmbeddingException, face_embedding_exception_handler)
+app.add_exception_handler(
+    RequestValidationError,
+    face_embedding_validation_exception_handler,
+)
+app.add_exception_handler(Exception, internal_exception_handler)
 
 
 @app.get("/", tags=["Root"])
 async def root_check():
-    return {"message": "Hugging Face Space is running smoothly!"}
+    return {"message": "Face embedding service is running"}
 
 
 @app.get("/health", tags=["Health"])
 async def health_check():
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {
-            "status": "UP",
-            "database": "CONNECTED",
-            "version": settings.PROJECT_NAME,
-        }
-    except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "DOWN", "database": "ERROR", "detail": str(e)},
-        )
+    model_ready = is_face_app_initialized()
+    return {
+        "status": "UP" if model_ready else "DEGRADED",
+        "modelReady": model_ready,
+        "model": settings.INSIGHTFACE_MODEL_NAME,
+        "version": settings.PROJECT_NAME,
+    }

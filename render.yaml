@@ -6,12 +6,16 @@ services:
     envVars:
       - key: PORT
         value: "8000"
-      - key: DATABASE_URL
-        sync: false
-      - key: FACE_MATCH_THRESHOLD
-        value: "0.7"
-      - key: JWT_BASE64_SECRET
-        generateValue: true
+      - key: INSIGHTFACE_MODEL_NAME
+        value: "buffalo_l"
+      - key: INSIGHTFACE_PROVIDERS
+        value: "CPUExecutionProvider"
+      - key: FACE_EMBEDDING_DIMENSION
+        value: "512"
+      - key: MAX_IMAGE_SIZE_BYTES
+        value: "5242880"
+      - key: ALLOWED_IMAGE_TYPES
+        value: "image/jpeg,image/png"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
