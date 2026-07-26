@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.repositories.person_repo import PersonRepository
 from app.utils.insightface_utils import get_face_embedding
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,8 +41,26 @@ class PersonService:
 
         return True
 
-    async def check_in_by_face(self, image_np: np.ndarray) -> CheckInMatch:
-        embedding = get_face_embedding(image_np)
+    async def check_in_by_face(
+        self, image_np: np.ndarray, request_id: str | None = None
+    ) -> CheckInMatch:
+        logger.info("CHECK_IN_STEP before_insightface | request_id=%s", request_id)
+        try:
+            if request_id is None:
+                embedding = get_face_embedding(image_np)
+            else:
+                embedding = get_face_embedding(image_np, request_id=request_id)
+        except Exception:
+            logger.exception(
+                "CHECK_IN_ERROR insightface_failed | request_id=%s", request_id
+            )
+            raise
+
+        logger.info(
+            "CHECK_IN_STEP after_insightface | request_id=%s | embedding_present=%s",
+            request_id,
+            embedding is not None,
+        )
         if embedding is None:
             return CheckInMatch(
                 person_id=None,
@@ -47,9 +68,30 @@ class PersonService:
                 error="Không tìm thấy khuôn mặt trong ảnh.",
             )
 
-        person, confidence = await self.person_repository.find_nearest_person_by_embedding(
-            embedding,
+        logger.info(
+            "CHECK_IN_STEP before_database_query | request_id=%s | threshold=%.6f",
+            request_id,
             settings.FACE_MATCH_THRESHOLD,
+        )
+        try:
+            person, confidence = (
+                await self.person_repository.find_nearest_person_by_embedding(
+                    embedding,
+                    settings.FACE_MATCH_THRESHOLD,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "CHECK_IN_ERROR database_query_failed | request_id=%s", request_id
+            )
+            raise
+
+        logger.info(
+            "CHECK_IN_STEP after_database_query | request_id=%s | found=%s | "
+            "confidence=%.6f",
+            request_id,
+            person is not None,
+            confidence,
         )
         if person is None:
             return CheckInMatch(

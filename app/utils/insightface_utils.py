@@ -45,7 +45,9 @@ def ensure_face_app_initialized():
     return face_app
 
 
-def get_face_embedding(img_array: np.ndarray) -> list[float] | None:
+def get_face_embedding(
+    img_array: np.ndarray, request_id: str | None = None
+) -> list[float] | None:
     """
     Trích xuất vector khuôn mặt to nhất trong ảnh.
     Trả về list 512 phần tử (float) để lưu vào pgvector.
@@ -53,6 +55,11 @@ def get_face_embedding(img_array: np.ndarray) -> list[float] | None:
     try:
         app = ensure_face_app_initialized()
         faces = app.get(img_array)
+        logger.info(
+            "CHECK_IN_STEP insightface_completed | request_id=%s | face_count=%s",
+            request_id,
+            len(faces),
+        )
         if not faces:
             return None  # Không tìm thấy ai
 
@@ -64,4 +71,8 @@ def get_face_embedding(img_array: np.ndarray) -> list[float] | None:
         return largest_face.embedding.tolist()
 
     except Exception as e:
+        logger.exception(
+            "CHECK_IN_ERROR face_embedding_extraction_failed | request_id=%s",
+            request_id,
+        )
         raise RuntimeError(f"Face embedding extraction error: {e!r}") from e

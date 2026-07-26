@@ -3,7 +3,7 @@ from uuid import UUID
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -16,9 +16,26 @@ router = APIRouter(tags=["Person"])
 person_router = router
 
 
-def _decode_image(contents: bytes) -> np.ndarray:
-    parser = np.frombuffer(contents, np.uint8)
-    image_np = cv2.imdecode(parser, cv2.IMREAD_COLOR)
+def _decode_image(contents: bytes, request_id: str | None = None) -> np.ndarray:
+    logger.info(
+        "CHECK_IN_STEP before_imdecode | request_id=%s | size_bytes=%s",
+        request_id,
+        len(contents),
+    )
+    try:
+        parser = np.frombuffer(contents, np.uint8)
+        image_np = cv2.imdecode(parser, cv2.IMREAD_COLOR)
+    except Exception:
+        logger.exception("CHECK_IN_ERROR imdecode_exception | request_id=%s", request_id)
+        raise
+
+    image_shape = tuple(image_np.shape) if image_np is not None else None
+    logger.info(
+        "CHECK_IN_STEP after_imdecode | request_id=%s | valid=%s | image_shape=%s",
+        request_id,
+        image_np is not None,
+        image_shape,
+    )
     if image_np is None:
         raise HTTPException(
             status_code=400,
@@ -29,32 +46,43 @@ def _decode_image(contents: bytes) -> np.ndarray:
 
 @router.post("/check-in", response_model=CheckInResponse)
 async def face_check_in(
-    file: UploadFile = File(...), db: AsyncSession = Depends(get_db)
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
 ) -> CheckInResponse:
-    contents = await file.read()
-    if not contents:
-        logger.error("CHECK_IN_ERROR error=missing_image")
-        raise HTTPException(status_code=400, detail="Thiếu ảnh tải lên.")
+    request_id = getattr(request.state, "request_id", None)
+    logger.info("CHECK_IN_STEP entered_endpoint | request_id=%s", request_id)
+
+    try:
+        contents = await file.read()
+    except Exception:
+        logger.exception("CHECK_IN_ERROR file_read_failed | request_id=%s", request_id)
+        raise
 
     logger.info(
-        "CHECK_IN_INPUT filename=%s content_type=%s size=%s",
+        "CHECK_IN_STEP file_read_completed | request_id=%s | filename=%s | "
+        "content_type=%s | size_bytes=%s",
+        request_id,
         file.filename,
         file.content_type,
         len(contents),
     )
+    if not contents:
+        logger.error("CHECK_IN_ERROR missing_image | request_id=%s", request_id)
+        raise HTTPException(status_code=400, detail="Thiếu ảnh tải lên.")
 
     try:
-        image_np = _decode_image(contents)
-    except HTTPException as exc:
-        logger.error("CHECK_IN_ERROR error=%s", exc.detail)
+        image_np = _decode_image(contents, request_id=request_id)
+    except HTTPException:
+        logger.exception("CHECK_IN_ERROR invalid_image | request_id=%s", request_id)
         raise
 
     person_service = PersonService(db)
 
     try:
-        match = await person_service.check_in_by_face(image_np)
+        match = await person_service.check_in_by_face(image_np, request_id=request_id)
     except Exception as exc:
-        logger.error("CHECK_IN_ERROR error=%s", exc)
+        logger.exception("CHECK_IN_ERROR check_in_failed | request_id=%s", request_id)
         raise HTTPException(
             status_code=500,
             detail=f"Có lỗi từ hệ thống AI nhận diện: {exc}",
@@ -66,7 +94,14 @@ async def face_check_in(
         confidence=match.confidence,
         error=match.error,
     )
-    logger.info("CHECK_IN_OUTPUT %s", response.model_dump_json(by_alias=True))
+    logger.info(
+        "CHECK_IN_STEP before_response | request_id=%s | matched=%s | "
+        "confidence=%.6f | has_error=%s",
+        request_id,
+        response.matched,
+        response.confidence,
+        response.error is not None,
+    )
     return response
 
 
