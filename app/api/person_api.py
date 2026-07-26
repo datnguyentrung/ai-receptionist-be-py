@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 import cv2
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.schemas.response import CheckInResponse
 from app.services.person_service import PersonService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Person"])
 person_router = router
@@ -30,25 +33,41 @@ async def face_check_in(
 ) -> CheckInResponse:
     contents = await file.read()
     if not contents:
+        logger.error("CHECK_IN_ERROR error=missing_image")
         raise HTTPException(status_code=400, detail="Thiếu ảnh tải lên.")
 
-    image_np = _decode_image(contents)
+    logger.info(
+        "CHECK_IN_INPUT filename=%s content_type=%s size=%s",
+        file.filename,
+        file.content_type,
+        len(contents),
+    )
+
+    try:
+        image_np = _decode_image(contents)
+    except HTTPException as exc:
+        logger.error("CHECK_IN_ERROR error=%s", exc.detail)
+        raise
+
     person_service = PersonService(db)
 
     try:
         match = await person_service.check_in_by_face(image_np)
     except Exception as exc:
+        logger.error("CHECK_IN_ERROR error=%s", exc)
         raise HTTPException(
             status_code=500,
             detail=f"Có lỗi từ hệ thống AI nhận diện: {exc}",
         ) from exc
 
-    return CheckInResponse(
+    response = CheckInResponse(
         matched=match.matched,
         person_id=match.person_id,
         confidence=match.confidence,
         error=match.error,
     )
+    logger.info("CHECK_IN_OUTPUT %s", response.model_dump_json(by_alias=True))
+    return response
 
 
 @router.post("/persons/{personId}/face-embedding")

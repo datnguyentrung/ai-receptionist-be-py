@@ -1,4 +1,6 @@
 import os
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 
 import numpy as np
 
@@ -14,37 +16,31 @@ MODEL_DIR = os.path.abspath(
     )
 )
 os.environ["INSIGHTFACE_HOME"] = MODEL_DIR
+face_app = None
 
 
 def initialize_cpu_face_app():
     """Khởi tạo model nhận diện khuôn mặt tối ưu cho CPU"""
-    try:
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        model_path = os.path.join(MODEL_DIR, "models", "buffalo_s")
-        if not os.path.isdir(model_path):
-            print(f"InsightFace model not found at: {model_path}")
-            print("Run download_model.py before using face recognition.")
-            return None
-
-        # Sử dụng model siêu nhẹ buffalo_s và chỉ định rõ dùng CPU
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
         app = FaceAnalysis(
             name="buffalo_s",
             root=MODEL_DIR,
             providers=["CPUExecutionProvider"],
         )
-        # ctx_id = -1 nghĩa là ép buộc chạy trên CPU
         app.prepare(ctx_id=-1, det_size=(640, 640))
-        print("InsightFace CPU initialized successfully (Model: buffalo_s).")
-        return app
-    except Exception as e:
-        print(f"InsightFace initialization error: {e!r}")
-        return None
+    print("InsightFace CPU initialized successfully (Model: buffalo_s).")
+    return app
 
 
-# KHỞI TẠO GLOBAL:
-# Biến này nằm ngoài hàm để model chỉ load vào RAM đúng 1 lần khi server FastAPI khởi động,
-# tránh việc mỗi lần có người điểm danh lại phải load lại model 159MB.
-face_app = initialize_cpu_face_app()
+def ensure_face_app_initialized():
+    global face_app
+    if face_app is None:
+        try:
+            face_app = initialize_cpu_face_app()
+        except Exception as e:
+            raise RuntimeError(f"InsightFace initialization error: {e!r}") from e
+    return face_app
 
 
 def get_face_embedding(img_array: np.ndarray) -> list[float] | None:
@@ -52,11 +48,9 @@ def get_face_embedding(img_array: np.ndarray) -> list[float] | None:
     Trích xuất vector khuôn mặt to nhất trong ảnh.
     Trả về list 512 phần tử (float) để lưu vào pgvector.
     """
-    if face_app is None:
-        raise RuntimeError("InsightFace model is not initialized.")
-
     try:
-        faces = face_app.get(img_array)
+        app = ensure_face_app_initialized()
+        faces = app.get(img_array)
         if not faces:
             return None  # Không tìm thấy ai
 

@@ -11,3 +11,6 @@ env/
 
 # Secrets
 .env
+
+# Local AI models
+insightface_data/

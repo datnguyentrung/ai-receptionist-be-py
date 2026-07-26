@@ -11,6 +11,7 @@ from app.api import api_router
 from app.core.config import settings
 from app.db.session import engine
 from app.exceptions.app_exception import AppException
+from app.utils.insightface_utils import ensure_face_app_initialized
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -18,6 +19,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -31,6 +34,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ LỖI KẾT NỐI DATABASE: {e}")
         # Nếu muốn server dừng luôn không chạy nữa nếu lỗi DB, bạn có thể raise lỗi ở đây
+
+    try:
+        print("🔄 Đang khởi tạo InsightFace model...")
+        ensure_face_app_initialized()
+    except Exception as e:
+        print(f"❌ LỖI KHỞI TẠO INSIGHTFACE: {e}")
 
     # Tam tat Telegram: khong tu dong dang ky webhook khi server khoi dong.
     # if not settings.SERVER_PUBLIC_URL:

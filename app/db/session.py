@@ -6,7 +6,7 @@ from app.core.config import settings
 # Thêm statement_cache_size=0 để tương thích với Supabase Pooler (PgBouncer/Supavisor)
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=True,  # Vẫn để True để bạn dễ debug SQL trong console
+    echo=False,
     connect_args={
         "statement_cache_size": 0,  # Tương đương prepareThreshold=0 của Java
         "prepared_statement_cache_size": 0,
