@@ -14,3 +14,6 @@ env/
 
 # Local AI models
 insightface_data/
+.codegraph**
+.codex**
+.gemini**
