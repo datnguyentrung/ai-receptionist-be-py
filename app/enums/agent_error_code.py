@@ -1,0 +1,1 @@
+"""Agent error code definitions."""
