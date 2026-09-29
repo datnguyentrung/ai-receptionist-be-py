@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from typing import Any
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 def initialize_face_app() -> None:
     global face_app
+    started_at = time.perf_counter()
     os.makedirs(MODEL_DIR, exist_ok=True)
     logger.info(
         "insightface_initialization_started | model=%s | providers=%s | root=%s",
@@ -39,9 +41,11 @@ def initialize_face_app() -> None:
         )
         app.prepare(ctx_id=-1, det_size=(640, 640))
     face_app = app
+    duration_ms = (time.perf_counter() - started_at) * 1000
     logger.info(
-        "insightface_initialization_completed | model=%s",
+        "insightface_initialization_completed | model=%s | durationMs=%.2f",
         settings.INSIGHTFACE_MODEL_NAME,
+        duration_ms,
     )
 
 
@@ -53,10 +57,13 @@ def detect_faces(img_array: Any, request_id: str | None = None):
     if face_app is None:
         raise RuntimeError("InsightFace model is not initialized")
 
+    started_at = time.perf_counter()
     faces = face_app.get(img_array)
+    duration_ms = (time.perf_counter() - started_at) * 1000
     logger.info(
-        "insightface_detection_completed | requestId=%s | faceCount=%s",
+        "insightface_detection_completed | requestId=%s | faceCount=%s | durationMs=%.2f",
         request_id,
         len(faces),
+        duration_ms,
     )
     return faces

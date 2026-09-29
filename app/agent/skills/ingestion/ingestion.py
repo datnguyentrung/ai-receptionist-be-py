@@ -1,0 +1,30 @@
+"""Product Sales Knowledge Graph ingestion skill."""
+
+from pathlib import Path
+
+from app.agent.skills.skill_template import (
+    load_rendered_skill_from_dir,
+)
+
+_SKILL_DIR = Path(__file__).resolve().parent
+
+
+def _build_ingestion_substitutions() -> dict[str, str]:
+    """Build dynamic values injected into ingestion SKILL.md."""
+
+    return {}
+
+
+def build_skill():
+    """Build from current files so digest invalidation refreshes instructions."""
+
+    return load_rendered_skill_from_dir(
+        _SKILL_DIR,
+        _build_ingestion_substitutions(),
+    )
+
+
+ingestion_skill = build_skill()
+
+
+__all__ = ["build_skill", "ingestion_skill"]
