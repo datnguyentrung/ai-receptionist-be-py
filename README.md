@@ -126,6 +126,46 @@ connection.
 python -m pytest
 ```
 
+## Taekwondo ingestion with ADK Web
+
+The ingestion UI is a separate process and does not add routes or lifecycle
+dependencies to the existing API on port `8000`.
+
+```powershell
+python -m pip install -r requirements-adk.txt
+python -m app.adk_web
+```
+
+ADK Web listens on `http://127.0.0.1:8001` by default. Its liveness and
+readiness endpoints are `/health/live` and `/health/ready`. Startup is
+fail-fast unless PostgreSQL has exactly one `ACTIVE` ontology version and
+Neo4j is reachable.
+
+Configure at least `GOOGLE_API_KEY` (or the project's existing Google auth),
+the `DB_*` variables, and `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`.
+Optional settings include `ADK_WEB_PORT`, `ADK_ALLOWED_ORIGINS`,
+`INGESTION_MAX_FILE_SIZE_BYTES`, `INGESTION_CHUNK_SIZE_CHARS`, and
+`INGESTION_BATCH_SIZE`.
+
+For a new database:
+
+```powershell
+python -m alembic upgrade head
+```
+
+For a database that already contains all seven ontology tables, first verify
+that its schema matches the SQLAlchemy ontology models, then run:
+
+```powershell
+python -m alembic stamp 0001_ontology_baseline
+python -m alembic upgrade head
+```
+
+Migrations are never run from application lifespan. Uploaded artifacts and ADK
+sessions are local development data; resumable ingestion state is persisted in
+PostgreSQL and Neo4j. `finalize_ingestion` only prepares a readiness fingerprint;
+graph promotion requires an explicit `fill_ingestion` call.
+
 The tests mock InsightFace for deterministic validation of image/file errors,
 face-count errors, embedding validation, and API response contracts.
 

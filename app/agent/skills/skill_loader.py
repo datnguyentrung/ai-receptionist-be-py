@@ -40,7 +40,10 @@ def discover_skill_descriptors(
 ) -> list[SkillDescriptor]:
     """Discover only frontmatter metadata; do not load full skill bodies."""
 
-    listed = skills.list_skills_in_dir(skills_dir)
+    listed = skills.list_skills_in_dir(
+        skills_dir,
+        on_error=lambda _name, _error: None,
+    )
 
     return [
         SkillDescriptor(
@@ -114,7 +117,7 @@ def _load_skill(skill_dir: Path) -> models.Skill:
     """Load a rendered Python skill when available, otherwise raw SKILL.md."""
 
     skill_code = skill_dir.name
-    module_name = f"app.skills.{skill_code}.{skill_code}"
+    module_name = f"app.agent.skills.{skill_code}.{skill_code}"
     object_name = f"{skill_code.replace('-', '_')}_skill"
 
     try:
@@ -142,7 +145,7 @@ def _load_skill(skill_dir: Path) -> models.Skill:
 def _load_skill_tools(skill_code: str) -> list[Any]:
     """Load tool callables without importing the full skill module."""
 
-    module_name = f"app.skills.{skill_code}.tools"
+    module_name = f"app.agent.skills.{skill_code}.tools"
 
     try:
         module = import_module(module_name)

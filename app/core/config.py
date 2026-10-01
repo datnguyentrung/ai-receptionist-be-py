@@ -18,6 +18,22 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
     SERVER_PUBLIC_URL: str = ""
 
+    # Standalone ADK Web / ingestion runtime
+    GOOGLE_ADK_MODEL: str = "gemini-3.5-flash-lite"
+    ADK_WEB_HOST: str = "127.0.0.1"
+    ADK_WEB_PORT: int = 8001
+    ADK_ALLOWED_ORIGINS: str = "http://localhost:8001,http://127.0.0.1:8001"
+    ADK_SESSION_DB_URI: str = "sqlite:///./.adk/sessions.db"
+    INGESTION_MAX_FILE_SIZE_BYTES: int = 20 * 1024 * 1024
+    INGESTION_CHUNK_SIZE_CHARS: int = 6000
+    INGESTION_BATCH_SIZE: int = 3
+    INGESTION_SHUTDOWN_TIMEOUT_SECONDS: float = 15.0
+
+    NEO4J_URI: str = ""
+    NEO4J_USERNAME: str = ""
+    NEO4J_PASSWORD: str = ""
+    NEO4J_DATABASE: str = "neo4j"
+
     # Database Configuration (PostgreSQL / Supabase)
     DB_HOST: str = "aws-0-ap-southeast-1.pooler.supabase.com"
     DB_PORT: int = 5432
@@ -60,6 +76,10 @@ class Settings(BaseSettings):
             for content_type in self.ALLOWED_IMAGE_TYPES.split(",")
             if content_type.strip()
         }
+
+    @property
+    def adk_allowed_origins(self) -> list[str]:
+        return [value.strip() for value in self.ADK_ALLOWED_ORIGINS.split(",") if value.strip()]
 
 
 settings = Settings()
