@@ -6,6 +6,8 @@ from pathlib import Path
 
 from google.adk.agents import Agent
 from google.adk.apps.app import App
+from google.adk.plugins.context_filter_plugin import ContextFilterPlugin
+from google.adk.plugins.save_files_as_artifacts_plugin import SaveFilesAsArtifactsPlugin
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
@@ -136,4 +138,11 @@ def _compact_ingestion_context(
 root_agent = create_root_agent()
 
 
-app = App(name="consultant_agent", root_agent=root_agent, plugins=[])
+app = App(
+    name="taekwondo_ingestion",
+    root_agent=root_agent,
+    plugins=[
+        ContextFilterPlugin(custom_filter=_compact_ingestion_context),
+        SaveFilesAsArtifactsPlugin(),
+    ],
+)

@@ -1,3 +1,11 @@
+from .ingestion import (
+    IngestionBatch,
+    IngestionChunk,
+    IngestionDocument,
+    IngestionDocumentVersion,
+    IngestionExtractionCache,
+    IngestionJob,
+)
 from .ontology_alias import (
     OntologyAlias,
     OntologyAliasSource,
@@ -23,6 +31,12 @@ from .ontology_version import (
 )
 
 __all__ = [
+    "IngestionBatch",
+    "IngestionChunk",
+    "IngestionDocument",
+    "IngestionDocumentVersion",
+    "IngestionExtractionCache",
+    "IngestionJob",
     "OntologyAlias",
     "OntologyAliasSource",
     "OntologyCompiledSnapshot",
