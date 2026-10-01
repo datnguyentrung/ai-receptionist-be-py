@@ -17,3 +17,4 @@ insightface_data/
 .codegraph**
 .codex**
 .gemini**
+.agents**
