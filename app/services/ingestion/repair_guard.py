@@ -27,14 +27,13 @@ class RepairGuard:
                     new_semantic_fragment,
                 )
             )
-            if issues:
-                logger.info(
-                    "REPAIR_DIFF previousNodes=%s newNodes=%s evidenceOnlyRejected=%s",
-                    len(previous_semantic_fragment.nodes),
-                    len(new_semantic_fragment.nodes),
-                    len(issues),
-                )
-                return issues
+            logger.info(
+                "REPAIR_DIFF previousNodes=%s newNodes=%s evidenceOnlyRejected=%s",
+                len(previous_semantic_fragment.nodes),
+                len(new_semantic_fragment.nodes),
+                len(issues),
+            )
+            return issues
         old_nodes = {node.temp_id: (index, node) for index, node in enumerate(previous_semantic_fragment.nodes)}
         new_nodes = {node.temp_id: node for node in new_semantic_fragment.nodes}
 
@@ -54,17 +53,6 @@ class RepairGuard:
             new_properties = {
                 item.property_name: item for item in new_nodes[temp_id].properties
             }
-            old_property_names = {item.property_name for item in old_node.properties}
-            added_properties = set(new_properties) - old_property_names
-            for property_name in sorted(added_properties):
-                issues.append(
-                    ValidationIssue(
-                        code="REPAIR_MUTATED_UNRELATED_NODE",
-                        message="Repair for evidence-only failures must not add properties.",
-                        location=f"nodes.{node_index}.properties.{property_name}",
-                        retryable=True,
-                    )
-                )
             for property_index, old_fact in enumerate(old_node.properties):
                 if old_fact.property_name in new_properties:
                     continue
@@ -129,6 +117,17 @@ class RepairGuard:
             new_properties = {
                 item.property_name: item for item in new_nodes[temp_id].properties
             }
+            old_property_names = {item.property_name for item in old_node.properties}
+            added_properties = set(new_properties) - old_property_names
+            for property_name in sorted(added_properties):
+                issues.append(
+                    ValidationIssue(
+                        code="REPAIR_MUTATED_UNRELATED_NODE",
+                        message="Repair for evidence-only failures must not add properties.",
+                        location=f"nodes.{node_index}.properties.{property_name}",
+                        retryable=True,
+                    )
+                )
             for property_index, old_fact in enumerate(old_node.properties):
                 new_fact = new_properties.get(old_fact.property_name)
                 if new_fact is None:
@@ -149,6 +148,16 @@ class RepairGuard:
                             retryable=True,
                         )
                     )
+        added_nodes = set(new_nodes) - set(old_nodes)
+        for temp_id in sorted(added_nodes):
+            issues.append(
+                ValidationIssue(
+                    code="REPAIR_MUTATED_UNRELATED_NODE",
+                    message="Repair for evidence-only failures must not add nodes.",
+                    location=f"nodes.{temp_id}",
+                    retryable=True,
+                )
+            )
         if cls._node_shape(previous) != cls._node_shape(new):
             issues.append(
                 ValidationIssue(

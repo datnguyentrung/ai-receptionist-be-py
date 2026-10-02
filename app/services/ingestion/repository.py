@@ -299,6 +299,21 @@ class IngestionRepository:
         workspace.job.readiness_fingerprint = None
         return self._replace_batch(workspace, updated)
 
+    async def mark_batch_for_repair(
+        self, ingestion_id: str, batch_index: int, issues: list[dict]
+    ) -> Workspace:
+        """Reopen a staged batch when a deterministic finalize-time invariant fails."""
+        workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
+        updated = replace(
+            batch,
+            status="REPAIR_REQUIRED",
+            validation_issues=issues,
+        )
+        workspace.job.status = IngestionJobStatus.BATCHING
+        workspace.job.stage = "batching"
+        workspace.job.readiness_fingerprint = None
+        return self._replace_batch(workspace, updated)
+
     async def block_batch_for_proposal(
         self, ingestion_id: str, batch_index: int, issues: list[dict]
     ) -> Workspace:
@@ -451,6 +466,7 @@ class IngestionRepository:
                     replace(
                         batch,
                         status="PENDING",
+                        validation_attempts=0,
                         graph_fragment=None,
                         semantic_fragment=None,
                         validation_issues=[],

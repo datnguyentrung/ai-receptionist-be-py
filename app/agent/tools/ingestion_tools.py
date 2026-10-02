@@ -4,7 +4,7 @@ Mỗi tool ánh xạ tới đúng một primitive deterministic. Quy trình sema
 tool thuộc quyền sở hữu của ingestion SKILL.md.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from google.adk.tools import ToolContext
 
@@ -12,6 +12,18 @@ from app.core.ingestion_runtime import get_service_container
 from app.schemas import SemanticGraphPatchFragment
 from app.services.ingestion import operations
 from app.utils.ingestion_logger import log_ingestion_event
+
+SchemaProposalTypeLiteral = Literal[
+    "NEW_ENTITY_TYPE",
+    "NEW_PROPERTY",
+    "NEW_RELATIONSHIP",
+    "NEW_ALIAS",
+    "MODIFY_ENTITY_TYPE",
+    "MODIFY_PROPERTY",
+    "MODIFY_RELATIONSHIP",
+    "NEW_SCOPE",
+    "MODIFY_SCOPE",
+]
 
 
 async def begin_ingestion(
@@ -61,9 +73,10 @@ async def begin_ingestion(
             tool_context.state["active_ingestion_id"] = result["ingestionId"]
         log_ingestion_event(f"BEGIN [{artifact_name}]", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event(f"BEGIN [{artifact_name}]", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("artifact_load", None, exc)
+        log_ingestion_event(f"BEGIN [{artifact_name}]", payload=result, request=req)
+        return result
 
 
 async def get_ingestion_batch(
@@ -81,9 +94,10 @@ async def get_ingestion_batch(
         )
         log_ingestion_event(f"GET_BATCH [idx={batch_index}]", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("batch_retrieval", ingestion_id, exc)
+        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", payload=result, request=req)
+        return result
 
 
 async def list_ontology_scopes(
@@ -96,14 +110,19 @@ async def list_ontology_scopes(
     try:
         container = await get_service_container()
         workspace = await operations.required_workspace(container.repository, ingestion_id)
+        guarded = operations.workflow_guard_payload(workspace, "list_scopes")
+        if guarded is not None:
+            log_ingestion_event("LIST_SCOPES", payload=guarded, request=req)
+            return guarded
         result = await operations.list_scopes(
             container.ontology_cache, str(workspace.job.ontology_version_id)
         )
         log_ingestion_event("LIST_SCOPES", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event("LIST_SCOPES", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("scope_catalog", ingestion_id, exc)
+        log_ingestion_event("LIST_SCOPES", payload=result, request=req)
+        return result
 
 
 async def load_ontology_scopes(
@@ -116,15 +135,23 @@ async def load_ontology_scopes(
     try:
         container = await get_service_container()
         workspace = await operations.required_workspace(container.repository, ingestion_id)
+        guarded = operations.workflow_guard_payload(workspace, "load_scopes")
+        if guarded is not None:
+            _store_checkpoint(tool_context, guarded)
+            log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", payload=guarded, request=req)
+            return guarded
         result = await operations.load_scope(
             container.ontology_cache, scope_keys, str(workspace.job.ontology_version_id)
         )
         tool_context.state["active_ontology_scopes"] = scope_keys
+        _store_checkpoint(tool_context, result)
         log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("schema_load", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", payload=result, request=req)
+        return result
 
 
 async def submit_ingestion_batch(
@@ -171,22 +198,7 @@ async def submit_ingestion_batch(
         )
 
         tool_context.state["active_ingestion_id"] = ingestion_id
-        tool_context.state["ingestion_checkpoint"] = {
-            key: result.get(key)
-            for key in (
-                "stage",
-                "nextAction",
-                "nextBatch",
-                "batchIndex",
-                "scopeKeys",
-                "snapshotHashes",
-                "mergedSchemaHash",
-                "graphFragment",
-                "errors",
-                "validationAttempts",
-            )
-            if result.get(key) is not None
-        }
+        _store_checkpoint(tool_context, result)
 
         # Đóng gói payload chi tiết cho logger: EXTRACT_RESULT + REPAIR_DIFF
         merged_payload = {
@@ -202,11 +214,13 @@ async def submit_ingestion_batch(
             request=req,
         )
         return result
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("batch_submission", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
         log_ingestion_event(
-            f"SUBMIT_BATCH [idx={batch_index}]", error=str(exc), request=req
+            f"SUBMIT_BATCH [idx={batch_index}]", payload=result, request=req
         )
-        raise
+        return result
 
 
 async def finalize_ingestion(
@@ -219,10 +233,7 @@ async def finalize_ingestion(
         container = await get_service_container()
         workspace = await operations.required_workspace(container.repository, ingestion_id)
         result = await operations.finalize(container.repository, ingestion_id)
-        tool_context.state["ingestion_checkpoint"] = {
-            "stage": result.get("stage"),
-            "repairBatchIndexes": result.get("repairBatchIndexes", []),
-        }
+        _store_checkpoint(tool_context, result)
 
         # Đóng gói danh sách batches cho MERGE_RESULT phân tích cross-batch
         merged_payload = {
@@ -237,9 +248,11 @@ async def finalize_ingestion(
         }
         log_ingestion_event("FINALIZE", payload=merged_payload, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event("FINALIZE", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("finalize", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event("FINALIZE", payload=result, request=req)
+        return result
 
 
 async def fill_ingestion(
@@ -268,16 +281,18 @@ async def fill_ingestion(
         result = await operations.fill(
             container.repository, container.graph_store, ingestion_id
         )
-        tool_context.state["ingestion_checkpoint"] = {"stage": result.get("stage")}
+        _store_checkpoint(tool_context, result)
         merged_payload = {
             **result,
             "fillPreparation": fill_prep,
         }
         log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=merged_payload, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event("FILL_COMMIT_TO_NEO4J", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("fill", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=result, request=req)
+        return result
 
 
 async def get_ingestion_status(
@@ -285,24 +300,64 @@ async def get_ingestion_status(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Truy vấn tiến độ và trạng thái hiện tại của một tiến trình nạp tài liệu."""
-    del tool_context
-    container = await get_service_container()
-    workspace = await operations.required_workspace(container.repository, ingestion_id)
-    return operations.status_payload(workspace)
+    try:
+        container = await get_service_container()
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
+        result = operations.status_payload(workspace)
+        _store_checkpoint(tool_context, result)
+        return result
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("status", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        return result
 
 
 async def create_schema_proposal(
     ingestion_id: str,
     batch_index: int,
-    proposal_type: str,
+    proposal_type: SchemaProposalTypeLiteral,
     reason: str,
-    payload: dict[str, Any],
-    evidence: dict[str, Any],
     affected_scope_keys: list[str],
     tool_context: ToolContext,
     technical_name: str | None = None,
+    payload: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Lưu bền vững đề xuất thay đổi lược đồ vào PostgreSQL và tạm chặn batch nguồn trong bộ nhớ RAM."""
+    """Lưu đề xuất mở rộng/chỉnh sửa lược đồ Ontology Schema khi gặp SCHEMA_GAP_CANDIDATE.
+
+    Args:
+        ingestion_id: ID phiên ingestion hiện tại.
+        batch_index: Số thứ tự batch đang xử lý (0-indexed).
+        proposal_type: Loại đề xuất thay đổi lược đồ. Bắt buộc chọn một trong các giá trị sau:
+            - 'NEW_RELATIONSHIP': Thêm quan hệ mới giữa hai thực thể.
+            - 'MODIFY_RELATIONSHIP': Chỉnh sửa quan hệ hiện có.
+            - 'NEW_ENTITY_TYPE': Thêm loại thực thể mới.
+            - 'NEW_PROPERTY': Thêm thuộc tính mới cho một thực thể.
+            - 'MODIFY_ENTITY_TYPE': Chỉnh sửa loại thực thể hiện có.
+            - 'MODIFY_PROPERTY': Chỉnh sửa thuộc tính hiện có.
+            - 'NEW_ALIAS': Thêm bí danh cho thực thể/thuộc tính/quan hệ.
+            - 'NEW_SCOPE': Thêm scope mới cho miền tri thức hoàn toàn tách biệt.
+            - 'MODIFY_SCOPE': Chỉnh sửa scope hiện có.
+        reason: Lý do cần thay đổi lược đồ, trích xuất từ nhu cầu tài liệu nguồn.
+        affected_scope_keys: Danh sách scope bị ảnh hưởng (ví dụ: ['core', 'fundamentals', 'training']).
+        tool_context: Context ADK tự động inject.
+        technical_name: Tên kỹ thuật của đối tượng cần tạo hoặc sửa (ví dụ: 'has_policy').
+        payload: Cấu trúc chi tiết của đề xuất (tùy theo proposal_type):
+            - Với 'NEW_RELATIONSHIP':
+                {"technicalName": "has_policy", "sourceEntityType": "organization", "targetEntityType": "policy", "displayName": "Có chính sách", "cardinality": "MANY_TO_MANY", "description": "..."}
+            - Với 'NEW_PROPERTY':
+                {"entityType": "class_program", "technicalName": "tuition", "dataType": "FLOAT", "displayName": "Học phí", "required": false}
+            - Với 'NEW_ENTITY_TYPE':
+                {"technicalName": "event", "displayName": "Sự kiện", "identityFields": ["name"]}
+            - Với 'MODIFY_RELATIONSHIP':
+                {"technicalName": "has_policy", "description": "...", "cardinality": "MANY_TO_MANY"}
+        evidence: Bằng chứng trích xuất từ tài liệu (ví dụ: {"chunkIndex": 20, "quote": "..."}).
+    """
+    safe_payload = dict(payload) if payload else {}
+    safe_evidence = dict(evidence) if evidence else {}
+    if technical_name and "technicalName" not in safe_payload:
+        safe_payload["technicalName"] = technical_name
+
     req = {
         "ingestion_id": ingestion_id,
         "batch_index": batch_index,
@@ -310,10 +365,17 @@ async def create_schema_proposal(
         "technical_name": technical_name,
         "reason": reason,
         "affected_scope_keys": affected_scope_keys,
+        "payload": safe_payload,
+        "evidence": safe_evidence,
     }
     try:
         container = await get_service_container()
         workspace = await operations.required_workspace(container.repository, ingestion_id)
+        guarded = operations.workflow_guard_payload(workspace, "create_schema_proposal")
+        if guarded is not None:
+            _store_checkpoint(tool_context, guarded)
+            log_ingestion_event("CREATE_SCHEMA_PROPOSAL", payload=guarded, request=req)
+            return guarded
         proposal = await container.ontology_lifecycle.create_proposal(
             ingestion_id=ingestion_id,
             batch_index=batch_index,
@@ -322,8 +384,8 @@ async def create_schema_proposal(
             proposal_type=proposal_type,
             technical_name=technical_name,
             reason=reason,
-            payload=payload,
-            evidence=evidence,
+            payload=safe_payload,
+            evidence=safe_evidence,
             affected_scope_keys=affected_scope_keys,
         )
         await container.repository.block_batch_for_proposal(
@@ -342,6 +404,8 @@ async def create_schema_proposal(
         result = {
             "success": True,
             "stage": "awaiting_schema_approval",
+            "terminal": False,
+            "retryRequired": False,
             "nextAction": "wait_for_user_review",
             "ingestionId": ingestion_id,
             "batchIndex": batch_index,
@@ -350,34 +414,39 @@ async def create_schema_proposal(
         }
         log_ingestion_event("CREATE_SCHEMA_PROPOSAL", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event("CREATE_SCHEMA_PROPOSAL", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("schema_proposal", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event("CREATE_SCHEMA_PROPOSAL", payload=result, request=req)
+        return result
 
 
 async def get_schema_proposal(
     proposal_id: str, tool_context: ToolContext
 ) -> dict[str, Any]:
-    """Đọc thông tin và trạng thái bền vững của đề xuất lược đồ từ PostgreSQL."""
+    """??c th?ng tin v? tr?ng th?i b?n v?ng c?a ?? xu?t l??c ?? t? PostgreSQL."""
     del tool_context
-    container = await get_service_container()
-    proposal = await container.ontology_lifecycle.get_proposal(proposal_id)
-    if proposal is None:
-        return _tool_error("schema_proposal", "PROPOSAL_NOT_FOUND", proposal_id)
-    return {
-        "success": True,
-        "stage": "schema_proposal",
-        "proposalId": str(proposal.id),
-        "proposalType": proposal.proposal_type.value,
-        "proposalStatus": proposal.status.value,
-        "reason": proposal.reason,
-        "payload": proposal.payload,
-        "evidence": proposal.evidence,
-        "affectedScopeKeys": proposal.affected_scope_keys,
-        "appliedOntologyVersionId": str(proposal.applied_ontology_version_id)
-        if proposal.applied_ontology_version_id
-        else None,
-    }
+    try:
+        container = await get_service_container()
+        proposal = await container.ontology_lifecycle.get_proposal(proposal_id)
+        if proposal is None:
+            return _tool_error("schema_proposal", "PROPOSAL_NOT_FOUND", proposal_id)
+        return {
+            "success": True,
+            "stage": "schema_proposal",
+            "proposalId": str(proposal.id),
+            "proposalType": proposal.proposal_type.value,
+            "proposalStatus": proposal.status.value,
+            "reason": proposal.reason,
+            "payload": proposal.payload,
+            "evidence": proposal.evidence,
+            "affectedScopeKeys": proposal.affected_scope_keys,
+            "appliedOntologyVersionId": str(proposal.applied_ontology_version_id)
+            if proposal.applied_ontology_version_id
+            else None,
+        }
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        return _tool_exception("schema_proposal", None, exc)
 
 
 async def review_schema_proposal(
@@ -422,9 +491,10 @@ async def review_schema_proposal(
         }
         log_ingestion_event("REVIEW_SCHEMA_PROPOSAL", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event("REVIEW_SCHEMA_PROPOSAL", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("schema_proposal_review", None, exc)
+        log_ingestion_event("REVIEW_SCHEMA_PROPOSAL", payload=result, request=req)
+        return result
 
 
 async def apply_schema_proposal(
@@ -455,9 +525,10 @@ async def apply_schema_proposal(
         }
         log_ingestion_event("APPLY_SCHEMA_PROPOSAL", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event("APPLY_SCHEMA_PROPOSAL", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("schema_proposal_apply", None, exc)
+        log_ingestion_event("APPLY_SCHEMA_PROPOSAL", payload=result, request=req)
+        return result
 
 
 async def rebase_ingestion(
@@ -472,6 +543,12 @@ async def rebase_ingestion(
     }
     try:
         container = await get_service_container()
+        current = await operations.required_workspace(container.repository, ingestion_id)
+        guarded = operations.workflow_guard_payload(current, "rebase_ingestion")
+        if guarded is not None:
+            _store_checkpoint(tool_context, guarded)
+            log_ingestion_event("REBASE_INGESTION", payload=guarded, request=req)
+            return guarded
         active = await container.ontology_cache.active_version()
         if target_ontology_version_id != active.version_id:
             return _tool_error(
@@ -481,7 +558,6 @@ async def rebase_ingestion(
             )
         catalog = await container.ontology_cache.list_scopes(target_ontology_version_id)
         hashes = {item.scope_key: item.schema_hash for item in catalog if item.schema_hash}
-        current = await operations.required_workspace(container.repository, ingestion_id)
         merged_hashes: dict[str, str] = {}
         for batch in current.batches:
             if batch.scope_keys and all(
@@ -497,11 +573,14 @@ async def rebase_ingestion(
         )
         tool_context.state["active_ingestion_id"] = ingestion_id
         res = operations.status_payload(workspace)
+        _store_checkpoint(tool_context, res)
         log_ingestion_event("REBASE_INGESTION", payload=res, request=req)
         return res
-    except Exception as exc:
-        log_ingestion_event("REBASE_INGESTION", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("ontology_rebase", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event("REBASE_INGESTION", payload=result, request=req)
+        return result
 
 
 async def delete_document(
@@ -521,9 +600,10 @@ async def delete_document(
         )
         log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", payload=result, request=req)
         return result
-    except Exception as exc:
-        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", error=str(exc), request=req)
-        raise
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("delete", None, exc)
+        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", payload=result, request=req)
+        return result
 
 
 async def rollback_document_version(
@@ -543,11 +623,12 @@ async def rollback_document_version(
             f"ROLLBACK_VERSION [{document_id} -> {version_id}]", payload=result, request=req
         )
         return result
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
+        result = _tool_exception("rollback", None, exc)
         log_ingestion_event(
-            f"ROLLBACK_VERSION [{document_id} -> {version_id}]", error=str(exc), request=req
+            f"ROLLBACK_VERSION [{document_id} -> {version_id}]", payload=result, request=req
         )
-        raise
+        return result
 
 
 # Danh sách toàn bộ các ADK Ingestion Tools được xuất bản cho Agent
@@ -573,6 +654,57 @@ INGESTION_TOOLS = (
 def get_ingestion_tools() -> list:
     """Trả về danh sách các tool phục vụ Ingestion để đăng ký vào Agent ADK."""
     return list(INGESTION_TOOLS)
+
+
+_CHECKPOINT_KEYS = (
+    "success",
+    "stage",
+    "terminal",
+    "retryRequired",
+    "nextAction",
+    "ingestionId",
+    "processedBatches",
+    "remainingBatches",
+    "nextBatch",
+    "batchIndex",
+    "scopeKeys",
+    "affectedChunkIndexes",
+    "errors",
+    "validationAttempts",
+    "attempt",
+    "maxAttempts",
+    "repairBatchIndexes",
+)
+
+
+def _store_checkpoint(tool_context: ToolContext, result: dict[str, Any]) -> None:
+    tool_context.state["ingestion_checkpoint"] = {
+        key: result.get(key)
+        for key in _CHECKPOINT_KEYS
+        if result.get(key) is not None
+    }
+
+
+def _tool_exception(
+    stage: str,
+    ingestion_id: str | None,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "stage": stage,
+        "terminal": True,
+        "retryRequired": False,
+        "ingestionId": ingestion_id,
+        "nextAction": "report_tool_failure",
+        "errors": [
+            {
+                "code": "TOOL_EXECUTION_ERROR",
+                "message": str(exc),
+                "retryable": False,
+            }
+        ],
+    }
 
 
 def _tool_error(stage: str, code: str, message: str) -> dict[str, Any]:

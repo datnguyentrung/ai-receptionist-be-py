@@ -43,6 +43,9 @@ Không tự viết SQL/Cypher, không tự bỏ qua giai đoạn, không tự th
 - Không làm mất đoạn nguồn hoặc bằng chứng khi một mẻ bị chặn.
 - Chỉ xử lý mẻ kế tiếp sau khi mẻ hiện tại đã `STAGED` hoặc đã chuyển sang trạng thái
   chờ phê duyệt có chủ đích.
+- Kết quả tool là nguồn sự thật của workflow. Nếu `terminal=true`, hoặc `nextAction`
+  là `explicit_extraction_failure` / `report_tool_failure`, dừng ingestion ngay và
+  báo lại lỗi; không gọi tiếp batch/scope/finalize/fill.
 - Trong ingestion, tác nhân gốc đồng thời là semantic mapper.
 - Tác nhân chỉ quyết định `className`, properties, edges, evidence và coverage.
 - Tác nhân KHÔNG tạo `identity`. Python dựng identity từ
@@ -137,7 +140,16 @@ Với đúng `nextBatch.batchIndex`:
 
    Các quy tắc nghiệp vụ vẫn phải được bảo đảm:
    - mọi đoạn nguồn có đúng một mục `coverage`;
-   - quyết định coverage chỉ là `MAPPED` hoặc `NOT_RELEVANT`;
+   - coverage chỉ dùng `MAPPED`, `NOT_RELEVANT` hoặc `SCHEMA_GAP`;
+   - `MAPPED` chỉ được dùng khi chính chunk đó có evidence (`chunkIndex: <index>`) trong ít nhất một
+     node/property/edge của fragment; tuyệt đối không đánh `MAPPED` nếu không có bằng chứng nào trích từ chunk đó (tránh lỗi `MAPPED_WITHOUT_MAPPING`);
+   - nếu một chunk chỉ chứa thông tin mở đầu, bối cảnh phụ trợ hoặc lịch sử tóm tắt mà không trích xuất thành node/property/edge riêng, hãy đánh dấu `NOT_RELEVANT` (kèm `reason` nêu rõ lý do). Nếu muốn đánh dấu `MAPPED`, BẮT BUỘC phải trích dẫn ít nhất một câu từ chunk đó vào thuộc tính (ví dụ: `description`, `notes`) hoặc bằng chứng thực thể;
+   - `NOT_RELEVANT` chỉ dùng khi chunk không chứa tri thức cần đưa vào graph;
+     tuyệt đối không dùng để che việc ontology thiếu khả năng biểu diễn;
+   - nếu chunk có tri thức liên quan nhưng schema đã tải không có entity/property/
+     relationship phù hợp, dùng `SCHEMA_GAP` và nêu rõ phần tri thức bị thiếu trong `reason`;
+   - nếu chunk vừa có phần map được vừa có phần không biểu diễn được, ưu tiên
+     `SCHEMA_GAP`; không được coi cả chunk là hoàn tất chỉ vì một phần đã map;
    - thuộc tính và quan hệ phải có bằng chứng nguyên văn;
    - chỉ sử dụng loại thực thể, thuộc tính và quan hệ có trong lược đồ đã tải.
    - edge endpoint được dùng tempId node mới trong fragment hiện tại hoặc `ref`
@@ -157,7 +169,7 @@ Với đúng `nextBatch.batchIndex`:
 8. Chỉ khi `submit_ingestion_batch` trả mẻ ở trạng thái `STAGED`
    mới chuyển sang mẻ kế tiếp.
 
-9. Nếu `terminal=true`, dừng ngay; không retry và không chuyển batch.
+9. Nếu `terminal=true`, dừng ngay; không retry, không gọi lại `list_ontology_scopes`, `load_ontology_scopes`, `submit_ingestion_batch`, `finalize_ingestion` hay `fill_ingestion` cho ingestion đó.
 
 ### Khi gửi mẻ thất bại
 
@@ -176,20 +188,26 @@ Ví dụ:
 
 Khi đó:
 
-1. Không gọi lại `begin_ingestion`.
-2. Không tạo phiên ingestion mới.
-3. Không chuyển sang mẻ kế tiếp.
-4. Không tạo đề xuất thay đổi bản thể.
-5. Giữ nguyên mẻ hiện tại.
-6. Giữ nguyên tập phạm vi nếu chúng vẫn hợp lệ.
-7. Giữ nguyên lược đồ đã tải nếu chúng vẫn hợp lệ.
-8. Đọc semantic fragment trước cùng validation errors, chỉ sửa đúng phần lỗi
-   và giữ mọi fact/node/edge hợp lệ không liên quan.
-9. Gửi lại đúng mẻ hiện tại bằng `submit_ingestion_batch`; không có bước
-   extract độc lập trước submit.
+1. Không gọi lại `begin_ingestion`, không tạo ingestion mới và không chuyển batch.
+2. Dùng `batchIndex`, `scopeKeys`, `affectedChunkIndexes` và `errors` từ checkpoint.
+3. Gọi lại `get_ingestion_batch(ingestion_id, batchIndex)` để lấy đúng batch cần sửa.
+4. Tải lại đúng `scopeKeys` cần thiết; không giữ hoặc khôi phục toàn bộ history batch cũ.
+5. Dựa trên source + schema + validation errors, tạo lại fragment hoàn chỉnh cho cùng batch,
+   sửa lỗi được báo và giữ các fact/node/edge hợp lệ.
+6. **QUY TẮC BẮT BUỘC KHI SỬA LỖI (REPAIR BATCH):**
+   - **BẮT BUỘC GIỮ NGUYÊN 100% `tempId`** của tất cả các node đã khai báo ở lần submit trước (ví dụ: `node.tempId` ban đầu là `org_vanquan` thì BẮT BUỘC giữ nguyên `org_vanquan`, tuyệt đối KHÔNG tự ý đổi thành `org_van_quan`, `org_vq` hay bất kỳ tên nào khác). Đổi `tempId` sẽ bị hệ thống xem là đã xóa node hợp lệ và báo lỗi `REPAIR_DROPPED_VALID_NODE`.
+   - **KHÔNG XÓA BỎ CÁC NODE, THUỘC TÍNH, QUAN HỆ HỢP LỆ**: Không xóa bỏ các thành phần hợp lệ đã submit trước đó nếu chúng không thuộc diện báo lỗi (tránh `REPAIR_DROPPED_VALID_NODE`, `REPAIR_DROPPED_VALID_FACT`, `REPAIR_DROPPED_VALID_EDGE`).
+   - **KHI SỬA LỖI TRÍCH DẪN (`EVIDENCE_NOT_GROUNDED`):**
+     + Giữ nguyên danh sách node, thuộc tính, giá trị thuộc tính, edges và coverage.
+     + Chỉ sửa duy nhất trường `evidence.text`: tìm lại đúng câu văn trong chunk nguồn, copy chính xác từng ký tự (verbatim) vào `text`.
+   - **KHI SỬA LỖI COVERAGE (`MAPPED_WITHOUT_MAPPING`):**
+     + Nếu muốn giữ chunk đó là `MAPPED`: bổ sung node mới hoặc bổ sung thuộc tính (ví dụ: `description`, `notes`) vào node hiện có mang bằng chứng trích từ chunk đó.
+     + Nếu chunk đó không có tri thức mới cần lưu: đổi quyết định của chunk đó thành `NOT_RELEVANT` với `reason` phù hợp.
+7. Gửi lại đúng batch bằng `submit_ingestion_batch`.
+8. Không tạo proposal ontology trừ khi tool phân loại rõ là schema gap.
 
-Nếu ngữ cảnh hiện tại không còn đủ dữ liệu cần thiết thì chỉ lấy lại
-những dữ liệu thiếu tối thiểu; không tự khởi động lại toàn bộ quy trình.
+Conversation history không phải bộ nhớ ingestion. Workspace Python là nguồn state;
+sau mỗi submit, fragment/chunks/schema cũ có thể đã bị compact khỏi model context.
 
 #### 2. `UNKNOWN_ENTITY_TYPE`, `UNKNOWN_PROPERTY`, `UNKNOWN_RELATIONSHIP`
 
@@ -208,22 +226,48 @@ Nếu mô hình dùng sai lược đồ:
 Chỉ khi nội dung thật sự không thể biểu diễn bằng bản thể hiện có mới đi vào
 luồng đề xuất thay đổi bản thể.
 
-#### 3. Thiếu lược đồ thật sự
+#### 3. Phân loại động lỗi ontology
+
+Ưu tiên làm theo chẩn đoán do tool trả về, không suy đoán theo tên quan hệ cụ thể:
+
+- `RELATIONSHIP_MAPPING_MISMATCH`: ontology hiện tại đã có quan hệ tương thích với
+  cặp source/target; sửa edge theo `candidateRelationships`, giữ nguyên các node/fact hợp lệ.
+- `MISSING_SCOPE`: khái niệm/quan hệ tồn tại trong scope khác của đúng ontology version
+  đã ghim; dùng `candidateScopes` nếu có, tải lại hợp scope cần thiết rồi submit lại batch.
+- `SCHEMA_GAP_CANDIDATE`: toàn bộ ontology version đã ghim không có cấu trúc tương thích;
+  khi đó mới đánh giá proposal thay đổi ontology.
+- Không hard-code cách xử lý theo tên như `has_policy`, `located_at` hay tên domain cụ thể.
+
+#### 4. Thiếu lược đồ thật sự
 
 Thực hiện theo thứ tự:
 
 1. Ưu tiên dùng phạm vi hiện có.
 2. Nếu có thể, ưu tiên mở rộng phạm vi hiện có bằng:
-   - loại thực thể;
-   - thuộc tính;
-   - quan hệ;
-   - bí danh.
+   - loại thực thể (`NEW_ENTITY_TYPE`);
+   - thuộc tính (`NEW_PROPERTY`);
+   - quan hệ (`NEW_RELATIONSHIP`);
+   - bí danh (`NEW_ALIAS`).
 3. Chỉ đề xuất `NEW_SCOPE` khi nội dung thuộc một miền khái niệm riêng
    và không phù hợp để mở rộng phạm vi hiện có.
 4. Gọi `create_schema_proposal` với:
-   - thay đổi tối thiểu cần thiết;
-   - phạm vi bị ảnh hưởng;
-   - bằng chứng nguồn.
+   - `proposal_type`: BẮT BUỘC chọn đúng 1 trong các giá trị enum sau (tuyệt đối KHÔNG tự nghĩ tên lạ như `EXTEND_RELATIONSHIP_SOURCE` hay `ADD_RELATIONSHIP`):
+     + `NEW_RELATIONSHIP`: Thêm quan hệ mới giữa hai loại thực thể (ví dụ: `organization -> policy`).
+     + `MODIFY_RELATIONSHIP`: Sửa đổi cấu trúc quan hệ hiện có.
+     + `NEW_ENTITY_TYPE`: Thêm loại thực thể mới.
+     + `NEW_PROPERTY`: Thêm thuộc tính mới cho một loại thực thể.
+     + `MODIFY_ENTITY_TYPE`: Sửa đổi loại thực thể hiện có.
+     + `MODIFY_PROPERTY`: Sửa đổi thuộc tính hiện có.
+     + `NEW_ALIAS`: Thêm bí danh.
+     + `NEW_SCOPE`, `MODIFY_SCOPE`: Tạo mới hoặc sửa scope.
+   - `technical_name`: Tên kỹ thuật của đối tượng cần tạo/sửa (ví dụ: `has_policy`).
+   - `payload`: Bắt buộc cung cấp thông tin cấu trúc chi tiết tương ứng với `proposal_type`:
+     + Với `NEW_RELATIONSHIP`: `{"technicalName": "has_policy", "sourceEntityType": "organization", "targetEntityType": "policy", "displayName": "Có chính sách", "cardinality": "MANY_TO_MANY", "description": "Quan hệ chính sách từ tổ chức"}`
+     + Với `NEW_PROPERTY`: `{"entityType": "class_program", "technicalName": "tuition", "dataType": "FLOAT", "displayName": "Học phí", "required": false}`
+     + Với `NEW_ENTITY_TYPE`: `{"technicalName": "event", "displayName": "Sự kiện", "identityFields": ["name"]}`
+   - `reason`: Lý do chi tiết tại sao cần mở rộng lược đồ dựa trên tài liệu.
+   - `evidence`: Bằng chứng trích xuất từ tài liệu (ví dụ: `{"chunkIndex": 20, "quote": "..."}`).
+   - `affected_scope_keys`: Danh sách scope bị ảnh hưởng (ví dụ: `["core", "fundamentals", "training"]`).
 5. Dừng mẻ ở `awaiting_schema_approval`.
 6. Không chuyển sang mẻ kế tiếp.
 7. Không tự phê duyệt (không tự approve) đề xuất.
@@ -261,7 +305,10 @@ Thực hiện theo thứ tự:
    - mẻ nào phải xử lý lại;
    - mẻ nào bị ảnh hưởng bởi thay đổi lược đồ.
 
-5. Lấy lại chính mẻ bị chặn và tiếp tục vòng lặp B.
+5. **TIẾP TỤC SAU KHI REBASE:**
+   - Đọc kỹ `nextBatch` trong phản hồi của `rebase_ingestion` để biết batch tiếp theo cần xử lý (ví dụ: nếu các batch trước bị vô hiệu hóa do thay đổi scope, `nextBatch` sẽ chỉ rõ `batchIndex`).
+   - Gọi `get_ingestion_batch(ingestion_id, nextBatch.batchIndex)` và tiếp tục vòng lặp B.
+   - Nếu phải xử lý lại batch đã từng trích xuất, hãy ưu tiên trích xuất đúng và đầy đủ các thực thể/quan hệ như trước, chú ý trích dẫn nguyên văn bằng chứng.
 
 ## D. Hoàn tất và ghi chính thức
 
