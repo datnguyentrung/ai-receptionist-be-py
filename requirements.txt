@@ -1,31 +1,36 @@
-# Core
+# Core Framework
 fastapi~=0.135.1
 uvicorn[standard]~=0.41.0
-pydantic~=2.11.0
+pydantic>=2.11.0,<3.0.0
 pydantic-settings~=2.13.1
 
-# Database (SQLAlchemy 2.x + PostgreSQL)
+# Database & Migrations
 sqlalchemy~=2.0.38
 asyncpg~=0.30.0
+alembic~=1.17.0
 
-# AI / Face Recognition
+# Graph Database
+neo4j~=6.0.3
+
+# Document Processing & Ingestion
+python-docx~=1.2.0
+pypdf~=6.1.1
+python-multipart>=0.0.20
+
+# Google AI & Agent Development Kit
+google-genai>=2.19,<3
+google-adk==2.10.0
+
+# Face Recognition & Computer Vision
 insightface~=0.7.3
 onnxruntime~=1.21.1
 numpy~=1.26.4
 opencv-python-headless~=4.10.0.84
 
-# HTTP Client
+# Utilities & Networking
 httpx~=0.28.1
-
-# Environment
 python-dotenv~=1.1.0
 
-# Google Gemini (kept for existing utility code)
-google-genai~=1.14.0
-
-# Multipart upload support
-python-multipart
-
-# Development
-pytest
-ruff
+# Development & Testing
+pytest>=8.0.0
+ruff>=0.9.0

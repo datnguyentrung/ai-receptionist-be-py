@@ -1,7 +1,5 @@
 """Deterministic retrieval and grounding metrics for the Taekwondo eval set."""
 
-from __future__ import annotations
-
 from typing import Any
 
 
@@ -33,7 +31,9 @@ def evaluate_cases(
 
         if not should_abstain:
             hits = expected_sources.intersection(retrieved_sources)
-            recall_total += len(hits) / len(expected_sources) if expected_sources else 0.0
+            recall_total += (
+                len(hits) / len(expected_sources) if expected_sources else 0.0
+            )
             first_rank = next(
                 (
                     rank

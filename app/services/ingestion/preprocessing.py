@@ -1,7 +1,5 @@
 """Deterministic document parsing, cleanup, validation, and chunking."""
 
-from __future__ import annotations
-
 import hashlib
 import io
 import re
@@ -14,7 +12,9 @@ from app.schemas.ingestion_schema import PreparedChunk
 SUPPORTED_SUFFIXES = frozenset({".pdf", ".docx", ".md", ".txt"})
 SUPPORTED_MIME_TYPES = {
     ".pdf": {"application/pdf"},
-    ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    ".docx": {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    },
     ".md": {"text/markdown", "text/plain"},
     ".txt": {"text/plain"},
 }
@@ -81,7 +81,9 @@ def prepare_document(
     # 2. Kiểm tra phần mở rộng file và MIME type
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
-        raise DocumentPreprocessingError(f"Unsupported document type: {suffix or '<none>'}")
+        raise DocumentPreprocessingError(
+            f"Unsupported document type: {suffix or '<none>'}"
+        )
     normalized_mime = (mime_type or "").split(";", 1)[0].strip().casefold()
     if normalized_mime and normalized_mime not in SUPPORTED_MIME_TYPES[suffix]:
         raise DocumentPreprocessingError(
@@ -94,12 +96,16 @@ def prepare_document(
     cleaned = tuple(_clean_block(block) for block in blocks if block.text.strip())
     cleaned = tuple(block for block in cleaned if block.text)
     if not cleaned:
-        raise DocumentPreprocessingError("Document contains no usable text after cleaning")
+        raise DocumentPreprocessingError(
+            "Document contains no usable text after cleaning"
+        )
 
     # 4. Kiểm tra độ nguyên vẹn bảng mã ký tự (tránh file rác / corrupted encoding)
     normalized_text = "\n\n".join(block.text for block in cleaned)
     if _valid_character_ratio(normalized_text) < 0.85:
-        raise DocumentPreprocessingError("Document text appears corrupted or badly encoded")
+        raise DocumentPreprocessingError(
+            "Document text appears corrupted or badly encoded"
+        )
 
     # 5. Chia văn bản thành các chunks có giới hạn ký tự
     chunks = _chunk(filename, cleaned, max(500, chunk_size_chars))
@@ -226,7 +232,11 @@ def _deduplicate_blocks(blocks: tuple[SourceBlock, ...]) -> tuple[SourceBlock, .
     seen: set[str] = set()
     result: list[SourceBlock] = []
     for block in blocks:
-        normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", block.text)).strip().casefold()
+        normalized = (
+            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", block.text))
+            .strip()
+            .casefold()
+        )
         digest = _sha256(normalized.encode("utf-8"))
         if normalized and digest not in seen:
             seen.add(digest)
@@ -240,10 +250,14 @@ def _clean_block(block: SourceBlock) -> SourceBlock:
     text = "\n".join(line.rstrip() for line in text.splitlines())
     text = re.sub(r"(?im)^\s*(?:page|trang)\s+\d+(?:\s+(?:of|/)\s*\d+)?\s*$", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return SourceBlock(text=text, section=block.section, page=block.page, anchor=block.anchor)
+    return SourceBlock(
+        text=text, section=block.section, page=block.page, anchor=block.anchor
+    )
 
 
-def _chunk(filename: str, blocks: tuple[SourceBlock, ...], limit: int) -> list[PreparedChunk]:
+def _chunk(
+    filename: str, blocks: tuple[SourceBlock, ...], limit: int
+) -> list[PreparedChunk]:
     groups: list[list[SourceBlock]] = []
     current: list[SourceBlock] = []
     current_size = 0

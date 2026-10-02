@@ -1,9 +1,7 @@
 """Public contracts for Taekwondo document ingestion."""
 
-from __future__ import annotations
-
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -94,11 +92,16 @@ class GraphPatchFragment(IngestionModel):
     warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def references_are_local(self) -> GraphPatchFragment:
+    def references_are_local(self) -> Self:
         node_ids = {node.temp_id for node in self.nodes}
         for edge in self.edges:
-            if edge.source_temp_id not in node_ids or edge.target_temp_id not in node_ids:
-                raise ValueError("Every edge endpoint must reference a node in the fragment")
+            if (
+                edge.source_temp_id not in node_ids
+                or edge.target_temp_id not in node_ids
+            ):
+                raise ValueError(
+                    "Every edge endpoint must reference a node in the fragment"
+                )
         return self
 
 

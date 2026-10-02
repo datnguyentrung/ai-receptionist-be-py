@@ -1,7 +1,5 @@
 """Evaluate captured GraphRAG outputs against the deterministic 30-case suite."""
 
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path

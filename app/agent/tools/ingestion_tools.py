@@ -4,14 +4,13 @@ Mỗi tool ánh xạ tới đúng một primitive deterministic. Quy trình sema
 tool thuộc quyền sở hữu của ingestion SKILL.md.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from google.adk.tools import ToolContext
 
 from app.core.ingestion_runtime import get_service_container
 from app.services.ingestion import operations
+from app.utils.ingestion_logger import log_ingestion_event
 
 
 async def begin_ingestion(
@@ -37,35 +36,46 @@ async def begin_ingestion(
     Trả về:
         Dictionary chứa thông tin phiên nạp: `ingestionId`, `stage`, `totalBatches`, `nextBatch`...
     """
-    # 1. Tải dữ liệu artifact từ phiên làm việc ADK hiện tại
-    artifact = await tool_context.load_artifact(artifact_name)
-    if artifact is None or artifact.inline_data is None or artifact.inline_data.data is None:
-        return _tool_error(
-            "artifact_load",
-            "ARTIFACT_NOT_FOUND",
-            f"Artifact is unavailable in this ADK session: {artifact_name}",
+    try:
+        # 1. Tải dữ liệu artifact từ phiên làm việc ADK hiện tại
+        artifact = await tool_context.load_artifact(artifact_name)
+        if (
+            artifact is None
+            or artifact.inline_data is None
+            or artifact.inline_data.data is None
+        ):
+            err = _tool_error(
+                "artifact_load",
+                "ARTIFACT_NOT_FOUND",
+                f"Artifact is unavailable in this ADK session: {artifact_name}",
+            )
+            log_ingestion_event(f"BEGIN [{artifact_name}]", payload=err)
+            return err
+
+        container = await get_service_container()
+        result = await operations.begin(
+            container.repository,
+            container.ontology_cache,
+            artifact_name,
+            bytes(artifact.inline_data.data),
+            max_file_size=container.max_file_size,
+            chunk_size_chars=container.chunk_size_chars,
+            batch_size=container.batch_size,
+            skill_digest=container.skill_digest,
+            model_id=container.model_id,
+            document_key=document_key,
+            scope_hint=scope_hint,
+            mime_type=artifact.inline_data.mime_type,
         )
 
-    container = await get_service_container()
-    result = await operations.begin(
-        container.repository,
-        container.ontology_cache,
-        artifact_name,
-        bytes(artifact.inline_data.data),
-        max_file_size=container.max_file_size,
-        chunk_size_chars=container.chunk_size_chars,
-        batch_size=container.batch_size,
-        skill_digest=container.skill_digest,
-        model_id=container.model_id,
-        document_key=document_key,
-        scope_hint=scope_hint,
-        mime_type=artifact.inline_data.mime_type,
-    )
-
-    # 3. Ghi nhận ID phiên nạp vào ADK State để các bước tiếp theo tự động kế thừa
-    if result.get("ingestionId"):
-        tool_context.state["active_ingestion_id"] = result["ingestionId"]
-    return result
+        # 3. Ghi nhận ID phiên nạp vào ADK State để các bước tiếp theo tự động kế thừa
+        if result.get("ingestionId"):
+            tool_context.state["active_ingestion_id"] = result["ingestionId"]
+        log_ingestion_event(f"BEGIN [{artifact_name}]", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event(f"BEGIN [{artifact_name}]", error=str(exc))
+        raise
 
 
 async def get_ingestion_batch(
@@ -75,8 +85,14 @@ async def get_ingestion_batch(
 ) -> dict[str, Any]:
     """Lấy nội dung chi tiết các đoạn văn bản (chunks) và ngữ cảnh đã có của một batch."""
     del tool_context
-    container = await get_service_container()
-    return await operations.get_batch(container.repository, ingestion_id, batch_index)
+    try:
+        container = await get_service_container()
+        result = await operations.get_batch(container.repository, ingestion_id, batch_index)
+        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", error=str(exc))
+        raise
 
 
 async def submit_ingestion_batch(
@@ -87,24 +103,29 @@ async def submit_ingestion_batch(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Xác thực và lưu tạm (stage) một mảnh đồ thị tri thức (GraphPatchFragment) cho batch."""
-    container = await get_service_container()
-    result = await operations.submit_batch(
-        container.repository,
-        container.graph_store,
-        container.ontology_cache,
-        ingestion_id,
-        batch_index,
-        scope_key,
-        graph_fragment,
-    )
+    try:
+        container = await get_service_container()
+        result = await operations.submit_batch(
+            container.repository,
+            container.graph_store,
+            container.ontology_cache,
+            ingestion_id,
+            batch_index,
+            scope_key,
+            graph_fragment,
+        )
 
-    tool_context.state["active_ingestion_id"] = ingestion_id
-    tool_context.state["ingestion_checkpoint"] = {
-        key: result.get(key)
-        for key in ("stage", "nextAction", "nextBatch")
-        if result.get(key) is not None
-    }
-    return result
+        tool_context.state["active_ingestion_id"] = ingestion_id
+        tool_context.state["ingestion_checkpoint"] = {
+            key: result.get(key)
+            for key in ("stage", "nextAction", "nextBatch")
+            if result.get(key) is not None
+        }
+        log_ingestion_event(f"SUBMIT_BATCH [idx={batch_index}, scope={scope_key}]", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event(f"SUBMIT_BATCH [idx={batch_index}]", error=str(exc))
+        raise
 
 
 async def finalize_ingestion(
@@ -112,13 +133,18 @@ async def finalize_ingestion(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Kiểm tra độ phủ toàn bộ tài liệu và tạo chữ ký sẵn sàng (readiness fingerprint)."""
-    container = await get_service_container()
-    result = await operations.finalize(container.repository, ingestion_id)
-    tool_context.state["ingestion_checkpoint"] = {
-        "stage": result.get("stage"),
-        "repairBatchIndexes": result.get("repairBatchIndexes", []),
-    }
-    return result
+    try:
+        container = await get_service_container()
+        result = await operations.finalize(container.repository, ingestion_id)
+        tool_context.state["ingestion_checkpoint"] = {
+            "stage": result.get("stage"),
+            "repairBatchIndexes": result.get("repairBatchIndexes", []),
+        }
+        log_ingestion_event("FINALIZE", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event("FINALIZE", error=str(exc))
+        raise
 
 
 async def fill_ingestion(
@@ -126,10 +152,17 @@ async def fill_ingestion(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Ghi chính thức tri thức đã hoàn tất nạp vào Neo4j và thực hiện đọc kiểm chứng (read-back)."""
-    container = await get_service_container()
-    result = await operations.fill(container.repository, container.graph_store, ingestion_id)
-    tool_context.state["ingestion_checkpoint"] = {"stage": result.get("stage")}
-    return result
+    try:
+        container = await get_service_container()
+        result = await operations.fill(
+            container.repository, container.graph_store, ingestion_id
+        )
+        tool_context.state["ingestion_checkpoint"] = {"stage": result.get("stage")}
+        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event("FILL_COMMIT_TO_NEO4J", error=str(exc))
+        raise
 
 
 async def get_ingestion_status(
@@ -162,7 +195,9 @@ async def validate_graph_patch(
     """Kiểm tra tính hợp lệ của một mảnh đồ thị với Ontology mà không lưu vào cơ sở dữ liệu."""
     del tool_context
     container = await get_service_container()
-    return await operations.validate_patch(container.ontology_cache, graph_patch, scope_key)
+    return await operations.validate_patch(
+        container.ontology_cache, graph_patch, scope_key
+    )
 
 
 async def fill_graph_patch(
@@ -188,10 +223,16 @@ async def delete_document(
     del tool_context
     if if_missing not in {"error", "ignore"}:
         return _tool_error("delete", "INVALID_IF_MISSING", "Use 'error' or 'ignore'")
-    container = await get_service_container()
-    return await operations.delete_document(
-        container.repository, container.graph_store, document_id, if_missing
-    )
+    try:
+        container = await get_service_container()
+        result = await operations.delete_document(
+            container.repository, container.graph_store, document_id, if_missing
+        )
+        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", error=str(exc))
+        raise
 
 
 async def rollback_document_version(
@@ -201,10 +242,16 @@ async def rollback_document_version(
 ) -> dict[str, Any]:
     """Khôi phục phiên bản tài liệu về một phiên bản cũ trước đó dựa trên lịch sử truy vết."""
     del tool_context
-    container = await get_service_container()
-    return await operations.rollback_version(
-        container.repository, container.graph_store, document_id, version_id
-    )
+    try:
+        container = await get_service_container()
+        result = await operations.rollback_version(
+            container.repository, container.graph_store, document_id, version_id
+        )
+        log_ingestion_event(f"ROLLBACK_VERSION [{document_id} -> {version_id}]", payload=result)
+        return result
+    except Exception as exc:
+        log_ingestion_event(f"ROLLBACK_VERSION [{document_id} -> {version_id}]", error=str(exc))
+        raise
 
 
 # Danh sách toàn bộ các ADK Ingestion Tools được xuất bản cho Agent

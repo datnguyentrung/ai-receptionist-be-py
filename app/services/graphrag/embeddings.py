@@ -1,7 +1,5 @@
 """Gemini document/query embeddings with a symmetric retrieval contract."""
 
-from __future__ import annotations
-
 import math
 from collections.abc import Sequence
 
@@ -23,7 +21,9 @@ class GeminiEmbeddingProvider:
         batch_size: int = 64,
     ) -> None:
         if not api_key.strip():
-            raise EmbeddingError("GOOGLE_API_KEY/GEMINI_API_KEY is required for GraphRAG")
+            raise EmbeddingError(
+                "GOOGLE_API_KEY/GEMINI_API_KEY is required for GraphRAG"
+            )
         if dimension <= 0:
             raise ValueError("Embedding dimension must be positive")
         self.model = model

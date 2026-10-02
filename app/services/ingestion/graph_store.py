@@ -1,7 +1,5 @@
 """Neo4j persistence and retrieval primitives for Taekwondo GraphRAG."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 from collections.abc import Iterable
@@ -90,7 +88,9 @@ class Neo4jIngestionStore:
     async def fill(self, workspace: Workspace) -> dict[str, Any]:
         """Write domain graph, source chunks, facts, embeddings, and provenance atomically."""
 
-        fragments = [item.graph_fragment for item in workspace.batches if item.graph_fragment]
+        fragments = [
+            item.graph_fragment for item in workspace.batches if item.graph_fragment
+        ]
         nodes, edges = _merge_fragments(fragments)
         payload = await _build_graphrag_payload(
             workspace,
@@ -327,7 +327,9 @@ class Neo4jIngestionStore:
             "facts": len(payload["facts"]),
         }
         if actual != expected:
-            raise RuntimeError(f"Neo4j read-back mismatch: expected {expected}, got {actual}")
+            raise RuntimeError(
+                f"Neo4j read-back mismatch: expected {expected}, got {actual}"
+            )
         return {"commitStatus": "COMMITTED", **actual, "readbackVerified": True}
 
     async def search_chunk_vector(
@@ -494,9 +496,7 @@ class Neo4jIngestionStore:
             "reconciled": True,
         }
 
-    async def is_graphrag_complete(
-        self, version_id: str, expected_chunks: int
-    ) -> bool:
+    async def is_graphrag_complete(self, version_id: str, expected_chunks: int) -> bool:
         """Verify embeddings and provenance before a resumable backfill skips a version."""
 
         rows = await self._data(
@@ -624,7 +624,9 @@ async def _build_graphrag_payload(
         }
         for item in workspace.chunks
     ]
-    chunk_vectors = await embedding_provider.embed_documents([item["text"] for item in chunks])
+    chunk_vectors = await embedding_provider.embed_documents(
+        [item["text"] for item in chunks]
+    )
     for chunk, vector in zip(chunks, chunk_vectors, strict=True):
         chunk["embedding"] = vector
 
@@ -752,7 +754,9 @@ def _merge_fragments(fragments: list[dict]) -> tuple[list[dict], list[dict]]:
                 }
                 nodes_by_key[key] = existing
             else:
-                known = {item["propertyName"] for item in existing.get("properties", [])}
+                known = {
+                    item["propertyName"] for item in existing.get("properties", [])
+                }
                 existing["properties"].extend(
                     item
                     for item in node.get("properties", [])
@@ -824,7 +828,9 @@ def _collect_mentions(
     for item in evidence:
         chunk_id = chunk_id_by_index.get(item.get("chunkIndex"))
         if chunk_id:
-            mentions.setdefault((stable_key, chunk_id), set()).add(str(item.get("text", "")))
+            mentions.setdefault((stable_key, chunk_id), set()).add(
+                str(item.get("text", ""))
+            )
 
 
 def _stable_entity_key(node: dict[str, Any], version_id: str) -> str:
@@ -842,7 +848,9 @@ def _stable_entity_key(node: dict[str, Any], version_id: str) -> str:
     ).hexdigest()
 
 
-def _search_text(class_name: str, identity: dict[str, Any], properties: dict[str, Any]) -> str:
+def _search_text(
+    class_name: str, identity: dict[str, Any], properties: dict[str, Any]
+) -> str:
     values = [class_name]
     values.extend(_flatten_text(identity))
     values.extend(_flatten_text(properties))

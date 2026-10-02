@@ -5,8 +5,6 @@ module implements one durable operation per tool call; it never loops over
 batches or decides which semantic step the agent should run next.
 """
 
-from __future__ import annotations
-
 import hashlib
 import re
 from pathlib import Path
@@ -79,9 +77,14 @@ async def get_batch(
     batch_index: int,
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
-    if workspace.job.status in {IngestionJobStatus.COMMITTED, IngestionJobStatus.FAILED}:
+    if workspace.job.status in {
+        IngestionJobStatus.COMMITTED,
+        IngestionJobStatus.FAILED,
+    }:
         return status_payload(workspace)
-    batch = next((item for item in workspace.batches if item.batch_index == batch_index), None)
+    batch = next(
+        (item for item in workspace.batches if item.batch_index == batch_index), None
+    )
     if batch is None:
         return error_payload(
             "batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index)
@@ -112,7 +115,9 @@ async def submit_batch(
     graph_fragment: dict[str, Any],
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
-    batch = next((item for item in workspace.batches if item.batch_index == batch_index), None)
+    batch = next(
+        (item for item in workspace.batches if item.batch_index == batch_index), None
+    )
     if batch is None:
         return error_payload(
             "batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index)
@@ -168,9 +173,13 @@ async def submit_batch(
     return result
 
 
-async def finalize(repository: IngestionRepository, ingestion_id: str) -> dict[str, Any]:
+async def finalize(
+    repository: IngestionRepository, ingestion_id: str
+) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
-    incomplete = [item.batch_index for item in workspace.batches if item.status != "STAGED"]
+    incomplete = [
+        item.batch_index for item in workspace.batches if item.status != "STAGED"
+    ]
     if incomplete:
         return {
             "success": False,
@@ -372,7 +381,9 @@ def status_payload(
     resumed: bool = False,
     idempotent: bool = False,
 ) -> dict[str, Any]:
-    pending = next((item for item in workspace.batches if item.status != "STAGED"), None)
+    pending = next(
+        (item for item in workspace.batches if item.status != "STAGED"), None
+    )
     if workspace.job.status == IngestionJobStatus.COMMITTED:
         stage, terminal, next_action = "committed", True, None
     elif workspace.job.status == IngestionJobStatus.FAILED:
@@ -476,7 +487,9 @@ def _chunks_from_evidence(fragment: GraphPatchFragment) -> list[PreparedChunk]:
             token_count=max(1, len("\n".join(texts.get(index, []))) // 4),
             source_anchor=f"direct-patch#chunk-{index}",
         )
-        for index in sorted({item.chunk_index for item in fragment.coverage} | set(texts))
+        for index in sorted(
+            {item.chunk_index for item in fragment.coverage} | set(texts)
+        )
     ]
 
 

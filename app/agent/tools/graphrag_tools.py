@@ -1,7 +1,5 @@
 """ADK tools for source-grounded Taekwondo GraphRAG retrieval."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from google.adk.tools import ToolContext
