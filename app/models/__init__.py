@@ -17,6 +17,7 @@ from .ontology_schema_proposal import (
     SchemaProposalStatus,
     SchemaProposalType,
 )
+from .ontology_scope import OntologyEntityTypeScope, OntologyScope
 from .ontology_version import (
     OntologyVersion,
     OntologyVersionStatus,
@@ -27,10 +28,12 @@ __all__ = [
     "OntologyAliasSource",
     "OntologyCompiledSnapshot",
     "OntologyEntityType",
+    "OntologyEntityTypeScope",
     "OntologyProperty",
     "OntologyPropertyDataType",
     "OntologyRelationship",
     "OntologySchemaProposal",
+    "OntologyScope",
     "OntologyVersion",
     "OntologyVersionStatus",
     "RelationshipCardinality",

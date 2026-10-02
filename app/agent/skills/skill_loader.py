@@ -40,10 +40,13 @@ def discover_skill_descriptors(
 ) -> list[SkillDescriptor]:
     """Discover only frontmatter metadata; do not load full skill bodies."""
 
-    listed = skills.list_skills_in_dir(
-        skills_dir,
-        on_error=lambda _name, _error: None,
-    )
+    try:
+        listed = skills.list_skills_in_dir(
+            skills_dir,
+            on_error=lambda _name, _error: None,
+        )
+    except TypeError:  # ADK < 2.10 compatibility for local tooling
+        listed = skills.list_skills_in_dir(skills_dir)
 
     return [
         SkillDescriptor(

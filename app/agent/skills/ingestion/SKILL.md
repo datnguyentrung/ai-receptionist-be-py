@@ -1,157 +1,327 @@
 ---
 name: ingestion
 description: >
-  Nạp và trích xuất tài liệu (PDF, DOCX, Markdown, TXT) cho trung tâm Taekwondo vào Knowledge Graph
-  có nguồn gốc xác thực (source-grounded) thông qua xử lý theo batch bền vững, xác thực ontology,
-  ghi dữ liệu tường minh, quản lý vòng đời tài liệu, xóa và khôi phục (rollback).
+  Nạp tài liệu vào Knowledge Graph theo từng mẻ, chọn phạm vi bản thể động, giữ bằng chứng nguồn,
+  và điều phối phê duyệt thay đổi bản thể trước khi ghi Neo4j.
 metadata:
   adk_additional_tools:
     - begin_ingestion
     - get_ingestion_batch
+    - list_ontology_scopes
+    - load_ontology_scopes
     - submit_ingestion_batch
+    - create_schema_proposal
+    - get_schema_proposal
+    - review_schema_proposal
+    - apply_schema_proposal
+    - rebase_ingestion
     - finalize_ingestion
     - fill_ingestion
     - get_ingestion_status
-    - load_ontology_scope
-    - validate_graph_patch
-    - fill_graph_patch
     - delete_document
     - rollback_document_version
 ---
 
-# Quy trình Nạp và Trích xuất Tri thức Tài liệu Taekwondo (Ingestion Skill)
+# Ingestion với bản thể động
 
-Bạn (LLM Agent) đóng vai trò điều phối việc **trích xuất ngữ nghĩa** (Semantic Mapping). Các công cụ Python và tầng Service trong hệ thống chịu trách nhiệm phân tích văn bản (Deterministic Parsing), kiểm tra tính hợp lệ (Validation), quản lý định danh (Identity), lưu trữ tạm thời (Staging), ghi dữ liệu bền vững (Persistence vào Neo4j/PostgreSQL), truy vết nguồn gốc (Provenance) và đọc kiểm chứng (Read-back Verification). 
-**Tuyệt đối không tự bịa đặt câu lệnh SQL hoặc Cypher.**
+Skill này là nguồn điều khiển thứ tự nghiệp vụ của toàn bộ quá trình ingestion.
 
-Skill này là nguồn sự thật duy nhất của control flow ingestion. Python tools chỉ cung cấp
-từng primitive deterministic và không tự chạy vòng lặp batch. Không dùng skill này để trả
-lời câu hỏi từ Knowledge Graph; hãy dùng `graph-qa` cho việc hỏi đáp.
+Các công cụ Python chỉ thực hiện từng thao tác xác định, có đầu vào và đầu ra rõ ràng.
+Không tự viết SQL/Cypher, không tự bỏ qua giai đoạn, không tự thay đổi thứ tự xử lý đã quy định ở đây.
 
----
+## Quy tắc bất biến
 
-## 1. Quy tắc an toàn (Safety Rules)
+- `scope_hint` chỉ là gợi ý; không coi nó là lựa chọn cuối cùng.
+- Không mặc định bất kỳ phạm vi nào và không hiểu `core` là toàn bộ bản thể.
+- Mỗi mẻ có thể chọn một hoặc nhiều scope (phạm vi).
+- Chỉ dùng bản chụp lược đồ thuộc `ontologyVersionId` đã ghim cho phiên ingestion hiện tại.
+- Không tạo hoặc sử dụng phạm vi/lược đồ mới trước khi người dùng phê duyệt.
+- Không gọi `fill_ingestion` nếu người dùng chưa yêu cầu ghi/lưu/import rõ ràng.
+- Không gọi `review_schema_proposal`, `apply_schema_proposal`, xóa hay rollback nếu người dùng
+  chưa đưa ra quyết định tường minh.
+- Bằng chứng phải trích nguyên văn từ đúng đoạn nguồn.
+- Không làm mất đoạn nguồn hoặc bằng chứng khi một mẻ bị chặn.
+- Chỉ xử lý mẻ kế tiếp sau khi mẻ hiện tại đã `STAGED` hoặc đã chuyển sang trạng thái
+  chờ phê duyệt có chủ đích.
+- Tác nhân gốc không được tự sinh `GraphPatchFragment`.
+- Mọi `GraphPatchFragment` phải được tạo bởi `ingestion_batch_extractor`
+  với `output_schema=GraphPatchFragment`.
+- Không được đổi tên trường, thêm trường, bỏ trường hoặc dựng lại một cấu trúc khác
+  từ kết quả của `ingestion_batch_extractor`.
 
-- **Không tự ý ghi dữ liệu**: Tuyệt đối KHÔNG gọi tool `fill_ingestion` trừ khi người dùng yêu cầu rõ ràng việc lưu trữ, ghi dữ liệu, nạp, hoặc nhập tri thức đã trích xuất vào hệ thống (các từ khóa như: *lưu, ghi vào DB, import, persist, save, write*).
-- **Không tự ý xóa / rollback**: Tuyệt đối KHÔNG gọi `delete_document` hoặc `rollback_document_version` trừ khi người dùng có yêu cầu tường minh.
-- **Không nhầm lẫn trạng thái**: Tuyệt đối KHÔNG thông báo các dữ liệu đang ở trạng thái lưu tạm (`staged`) là dữ liệu đã được ghi chính thức vào Knowledge Graph (`committed`).
-- **Trung thực với dữ liệu nguồn**: Tuyệt đối KHÔNG tự suy diễn hoặc bịa đặt cấp đai, huấn luyện viên, lịch học, học phí, ngày tháng, cơ sở vật chất, quy định hoặc các mối quan hệ không có trong văn bản.
-- **Bằng chứng trích dẫn nguyên văn**: Thuộc tính `evidence.text` phải được sao chép nguyên văn (verbatim) từng từ từ đoạn văn bản (`chunk`) được tham chiếu.
-- **Xử lý tuần tự**: Không chuyển sang batch tiếp theo cho đến khi batch hiện tại được gửi và lưu tạm (`staged`) thành công.
+## Thứ tự xử lý bắt buộc cho mỗi mẻ
 
----
+1. `get_ingestion_batch`
+2. Nếu mẻ chưa có phạm vi phù hợp:
+   - `list_ontology_scopes`
+   - chọn tập phạm vi phù hợp
+3. `load_ontology_scopes`
+4. `ingestion_batch_extractor`
+5. `submit_ingestion_batch`
 
-## 2. Chi tiết các Tools (Công cụ) và Tầng Service liên quan
+Không được bỏ qua bước 4.
 
-| Tên Tool | Công dụng & Trách nhiệm | Tầng Service / Hàm xử lý backend |
-| :--- | :--- | :--- |
-| `begin_ingestion` | Chuẩn bị tài liệu, chunks/batches và workspace bền vững. | Preprocessing + PostgreSQL repository |
-| `get_ingestion_batch` | Trả nội dung batch và canonical context. | PostgreSQL repository |
-| `load_ontology_scope` | Tải ontology projection cho batch hiện tại. | Ontology cache |
-| `submit_ingestion_batch` | Validate theo `scope_key` của batch và stage fragment. | Ontology registry + stores |
-| `finalize_ingestion` | Kiểm tra coverage và tạo readiness fingerprint. | PostgreSQL repository |
-| `fill_ingestion` | Commit domain graph, chunks, facts, embeddings và provenance. | Neo4j graph store |
-| `get_ingestion_status` | Trả trạng thái workspace bền vững. | PostgreSQL repository |
-| `validate_graph_patch` | Xác thực graph patch mà không lưu. | Ontology registry |
-| `fill_graph_patch` | **Chặn ghi trực tiếp không có nguồn**: Ngăn chặn hành động ghi trực tiếp vào Graph DB mà không có tài liệu nguồn chứng minh. | Trả về lỗi `SOURCE_DOCUMENT_REQUIRED`. |
-| `delete_document` | Vô hiệu hóa tài liệu và gỡ tri thức không còn nguồn active. | Repository + Neo4j graph store |
-| `rollback_document_version` | Vô hiệu hóa phiên bản được chỉ định theo provenance. | Repository + Neo4j graph store |
+Không được để tác nhân gốc tự tạo `GraphPatchFragment`.
 
----
+Không được gọi `submit_ingestion_batch` nếu chưa có kết quả từ
+`ingestion_batch_extractor`.
 
-## 3. Quy trình thực thi chuẩn (Step-by-Step Workflow)
+## A. Bắt đầu và chuẩn bị tài liệu
 
-1. **Khởi tạo quy trình**:
-   - Gọi `begin_ingestion(artifact_name, document_key?, scope_hint?)`.
-   - Lưu lại `ingestionId` nhận được. Nếu phiên làm việc được tiếp tục lại (resume), hệ thống sẽ duy trì tiến độ trước đó.
+1. Gọi `begin_ingestion(artifact_name, document_key?, scope_hint?)`.
+2. Lưu `ingestionId` và `ontologyVersionId` trả về.
+3. Phía Python tự thực hiện các thao tác chuẩn bị tài liệu:
+   - kiểm tra tệp;
+   - phân tích nội dung;
+   - khử trùng lặp;
+   - làm sạch;
+   - kiểm tra chất lượng;
+   - chia đoạn;
+   - gom các đoạn thành từng mẻ.
+4. Không tải lược đồ chi tiết của một phạm vi cụ thể trong bước này.
+5. Trạng thái làm việc của ingestion (workspace, batches, chunks) được lưu tạm trong bộ nhớ RAM của tiến trình hiện tại.
+   PostgreSQL chỉ chịu trách nhiệm quản lý ontology/schema (phiên bản, scopes, compiled snapshots) và các đề xuất schema proposal, không lưu trạng thái ingestion job.
+6. Nếu `begin_ingestion` trả về một workspace ingestion đang tồn tại trong tiến trình hiện tại (tái sử dụng phiên ingestion còn tồn tại trong tiến trình hiện tại / in-process reuse),
+   tiếp tục từ `nextBatch`; không tự tạo phiên mới khi không cần thiết.
 
-2. **Lấy dữ liệu batch**:
-   - Dựa vào `nextBatch.batchIndex`, gọi `get_ingestion_batch(ingestion_id, batch_index)` và đọc kỹ toàn bộ nội dung của từng `chunk` trong batch.
+## B. Vòng lặp cho từng mẻ
 
-3. **Tải Ontology phù hợp**:
-   - Chọn phạm vi ontology hẹp nhất phù hợp với nội dung batch và gọi `load_ontology_scope(scope_key)`.
-   - Các phạm vi hợp lệ bao gồm: `core`, `course`, `training`, `belt`, `facility`, `finance`, `event`.
+Với đúng `nextBatch.batchIndex`:
 
-4. **Tạo mảnh đồ thị (`GraphPatchFragment`) duy nhất cho batch**:
-   - `ontologyVersion`: Phải khớp với phiên bản ontology đã tải.
-   - Mỗi nút (`node`): Sử dụng đúng `className` từ ontology và có đầy đủ các trường định danh (`identity`).
-   - Mỗi thuộc tính (`property`): Bắt buộc phải có bằng chứng trích xuất (`evidence`) đính kèm.
-   - Mỗi quan hệ (`edge`): Bằng chứng phải chứng minh rõ mối quan hệ thực tế giữa hai thực thể, không chỉ đơn thuần là cùng xuất hiện chung trong câu.
-   - Độ phủ (`coverage`): Mọi `chunkIndex` trong batch đều phải có quyết định rõ ràng là `MAPPED` (đã trích xuất) hoặc `NOT_RELEVANT` (không liên quan / không chứa tri thức).
+1. Gọi `get_ingestion_batch` và đọc toàn bộ các đoạn thuộc mẻ hiện tại.
 
-5. **Gửi và sửa lỗi batch**:
-   - Gọi `submit_ingestion_batch(ingestion_id, batch_index, scope_key, graph_fragment)`.
-   - Nếu kết quả trả về các lỗi cấu trúc (`validation issues`), chỉ sửa chữa các dữ kiện bị ảnh hưởng và gửi lại đúng batch đó. **Không khởi động lại toàn bộ quy trình ingestion khi đang sửa lỗi.**
+2. Gọi `list_ontology_scopes(ingestion_id)` để lấy danh mục phạm vi động gồm:
+   - `scopeKey`
+   - `description`
+   - `summary`
+   - `schemaHash`
 
-6. **Lặp lại cho đến khi sẵn sàng hoàn tất**:
-   - Lặp lại các bước 2 đến 5 cho đến khi hệ thống báo `stage = "ready_to_finalize"`.
-   - Sau đó gọi `finalize_ingestion(ingestion_id)`.
+   Không suy đoán phạm vi ngoài danh mục được trả về.
 
-7. **Xử lý khi cần sửa chữa sau finalize**:
-   - Nếu `finalize_ingestion` trả về `repair_required`, lấy lại và sửa chữa các batch có trong danh sách yêu cầu (`repairBatchIndexes`), sau đó gọi lại `finalize_ingestion`.
+3. Dựa trên:
+   - nội dung của mẻ;
+   - danh mục phạm vi;
+   - `scope_hint` nếu có, nhưng chỉ coi là gợi ý;
 
-8. **Giai đoạn sẵn sàng ghi (`stage = "ready_to_fill"`)**:
-   - **Nếu người dùng chỉ yêu cầu trích xuất/kiểm tra**: Dừng lại và báo cáo kết quả trích xuất đã sẵn sàng (Graph chưa bị thay đổi).
-   - **Nếu người dùng có yêu cầu ghi/lưu chính thức**: Gọi `fill_ingestion(ingestion_id)` và báo cáo chi tiết số lượng node/edge thực tế đã ghi và kết quả đọc kiểm chứng.
+   chọn tập phạm vi nhỏ nhất nhưng đủ bao phủ các khái niệm trong mẻ.
 
----
+   Một mẻ có thể sử dụng một hoặc nhiều phạm vi.
 
-## 4. Cấu trúc mẫu của `GraphPatchFragment`
+4. Gọi:
 
-```json
-{
-  "ontologyVersion": "v1",
-  "nodes": [
-    {
-      "tempId": "course-1",
-      "className": "Course",
-      "identity": {
-        "name": "Lớp Taekwondo nâng cao"
-      },
-      "properties": [
-        {
-          "propertyName": "monthlyTuition",
-          "value": 1000000,
-          "evidence": [
-            {
-              "source": "chuong-trinh.docx",
-              "chunkIndex": 0,
-              "section": "Học phí",
-              "text": "Học phí: 1.000.000 đồng/tháng"
-            }
-          ]
-        }
-      ],
-      "evidence": [
-        {
-          "source": "chuong-trinh.docx",
-          "chunkIndex": 0,
-          "text": "Lớp Taekwondo nâng cao"
-        }
-      ]
-    }
-  ],
-  "edges": [],
-  "coverage": [
-    {
-      "chunkIndex": 0,
-      "decision": "MAPPED",
-      "reason": "Khóa học Taekwondo và thông tin học phí"
-    }
-  ],
-  "warnings": []
-}
-```
+   `load_ontology_scopes(ingestion_id, scope_keys)`
 
----
+   để tải các bản chụp lược đồ đã biên dịch và lược đồ hợp nhất tương ứng.
 
-## 5. Định dạng phản hồi cuối cùng (Final Response)
+   Nếu phát hiện:
+   - bản chụp không tồn tại;
+   - mã băm không hợp lệ;
+   - xung đột khi hợp nhất;
+   - phiên bản không khớp với `ontologyVersionId` đã ghim;
 
-Chỉ báo cáo các thông tin thực tế đã được công cụ (Tool) xác nhận:
-- `ingestionId` (Mã định danh tiến trình nạp).
-- Số lượng batch đã được lưu tạm (`staged batch count`).
-- Các cảnh báo hoặc vấn đề sẵn sàng (`readiness issues`) nếu có.
-- Trạng thái commit (`commit status`).
-- Số lượng Node / Edge đã được ghi vào Neo4j (`persisted node/edge counts`) và kết quả kiểm chứng đọc ngược (`read-back result`).
+   thì dừng mẻ và báo lỗi dữ liệu bản thể.
 
-*Lưu ý: Nếu người dùng không yêu cầu ghi dữ liệu, hãy nêu rõ rằng quá trình trích xuất đã sẵn sàng nhưng Knowledge Graph chưa bị thay đổi.*
+5. BẮT BUỘC gọi `ingestion_batch_extractor`.
+
+   Không được tự tạo `GraphPatchFragment` trong tác nhân gốc.
+
+   Truyền cho `ingestion_batch_extractor` đúng dữ liệu đầu vào theo
+   `BatchExtractionInput`, gồm:
+
+   - `ontologyVersion`: phiên bản bản thể đã ghim cho ingestion hiện tại;
+   - `scopeKeys`: chính xác tập phạm vi đã chọn ở bước 3;
+   - `chunks`: toàn bộ các đoạn của mẻ hiện tại;
+   - `ontology`: lược đồ hợp nhất trả về từ `load_ontology_scopes`.
+
+6. `ingestion_batch_extractor` là nguồn duy nhất được phép tạo
+   `GraphPatchFragment`.
+
+   Đầu ra của nó đã được ràng buộc bởi:
+
+   `output_schema=GraphPatchFragment`
+
+   Tác nhân gốc không được:
+   - tự viết lại cấu trúc đầu ra;
+   - tự đổi tên trường;
+   - tạo một JSON mới dựa trên kết quả;
+   - đổi `nodes` thành `entities`;
+   - đổi `edges` thành `relationships`;
+   - đổi `coverage` thành `chunkCoverages`, `chunks` hoặc tên khác;
+   - thêm trường ngoài lược đồ;
+   - bỏ trường bắt buộc.
+
+7. Kết quả có cấu trúc trả về từ `ingestion_batch_extractor`
+   phải được dùng nguyên trạng làm `graph_fragment`.
+
+   Không tự kiểm tra lại bằng cách suy đoán tên trường.
+
+   Các quy tắc nghiệp vụ vẫn phải được bảo đảm:
+   - mọi đoạn nguồn có đúng một mục `coverage`;
+   - quyết định coverage chỉ là `MAPPED` hoặc `NOT_RELEVANT`;
+   - thuộc tính và quan hệ phải có bằng chứng nguyên văn;
+   - chỉ sử dụng loại thực thể, thuộc tính và quan hệ có trong lược đồ đã tải.
+
+8. Gọi:
+
+   `submit_ingestion_batch(
+       ingestion_id,
+       batch_index,
+       scope_keys,
+       graph_fragment
+   )`
+
+   Trong đó `graph_fragment` là nguyên kết quả của
+   `ingestion_batch_extractor`.
+
+   Không biến đổi `graph_fragment` trước khi gửi.
+
+9. Chỉ khi `submit_ingestion_batch` trả mẻ ở trạng thái `STAGED`
+   mới chuyển sang mẻ kế tiếp.
+
+### Khi gửi mẻ thất bại
+
+Phải phân biệt lỗi cấu trúc/lỗi kiểm tra với thiếu lược đồ thật sự.
+
+#### 1. Lỗi cấu trúc hoặc lỗi kiểm tra dữ liệu
+
+Ví dụ:
+- sai kiểu dữ liệu;
+- thiếu trường bắt buộc;
+- thừa trường;
+- coverage không hợp lệ;
+- bằng chứng không hợp lệ;
+- đầu mút quan hệ không tồn tại;
+- dùng sai tên đã có trong lược đồ.
+
+Khi đó:
+
+1. Không gọi lại `begin_ingestion`.
+2. Không tạo phiên ingestion mới.
+3. Không chuyển sang mẻ kế tiếp.
+4. Không tạo đề xuất thay đổi bản thể.
+5. Giữ nguyên mẻ hiện tại.
+6. Giữ nguyên tập phạm vi nếu chúng vẫn hợp lệ.
+7. Giữ nguyên lược đồ đã tải nếu chúng vẫn hợp lệ.
+8. Gọi lại `ingestion_batch_extractor` để tạo lại
+   `GraphPatchFragment` đúng cấu trúc.
+9. Gửi lại đúng mẻ hiện tại bằng `submit_ingestion_batch`.
+
+Nếu ngữ cảnh hiện tại không còn đủ dữ liệu cần thiết thì chỉ lấy lại
+những dữ liệu thiếu tối thiểu; không tự khởi động lại toàn bộ quy trình.
+
+#### 2. `UNKNOWN_ENTITY_TYPE`, `UNKNOWN_PROPERTY`, `UNKNOWN_RELATIONSHIP`
+
+Trước tiên phải xác định đây là:
+
+- mô hình dùng sai lược đồ hiện có; hoặc
+- tài liệu thật sự chứa khái niệm chưa biểu diễn được trong bản thể.
+
+Nếu mô hình dùng sai lược đồ:
+
+1. Không tạo đề xuất.
+2. Giữ nguyên phạm vi/lược đồ hiện tại nếu vẫn phù hợp.
+3. Gọi lại `ingestion_batch_extractor`.
+4. Gửi lại đúng mẻ hiện tại.
+
+Chỉ khi nội dung thật sự không thể biểu diễn bằng bản thể hiện có mới đi vào
+luồng đề xuất thay đổi bản thể.
+
+#### 3. Thiếu lược đồ thật sự
+
+Thực hiện theo thứ tự:
+
+1. Ưu tiên dùng phạm vi hiện có.
+2. Nếu có thể, ưu tiên mở rộng phạm vi hiện có bằng:
+   - loại thực thể;
+   - thuộc tính;
+   - quan hệ;
+   - bí danh.
+3. Chỉ đề xuất `NEW_SCOPE` khi nội dung thuộc một miền khái niệm riêng
+   và không phù hợp để mở rộng phạm vi hiện có.
+4. Gọi `create_schema_proposal` với:
+   - thay đổi tối thiểu cần thiết;
+   - phạm vi bị ảnh hưởng;
+   - bằng chứng nguồn.
+5. Dừng mẻ ở `awaiting_schema_approval`.
+6. Không chuyển sang mẻ kế tiếp.
+7. Không tự phê duyệt (không tự approve) đề xuất.
+
+## C. Người dùng phê duyệt thay đổi bản thể
+
+1. Dùng `get_schema_proposal` để trình bày đề xuất và bằng chứng cho người dùng.
+
+2. Chờ quyết định tường minh.
+
+   Nếu người dùng từ chối:
+   - gọi `review_schema_proposal(..., approved=false, ...)`;
+   - sau đó trích xuất lại theo lược đồ cũ, đánh `NOT_RELEVANT`,
+     hoặc dừng theo chỉ dẫn của người dùng.
+
+   Nếu người dùng duyệt:
+   - gọi `review_schema_proposal(..., approved=true, ...)`.
+
+3. Chỉ sau trạng thái `APPROVED` (chỉ sau khi đề xuất ở trạng thái `APPROVED` được người dùng phê duyệt tường minh) mới gọi
+   `apply_schema_proposal` với mã phiên bản mới.
+
+   Phía Python chịu trách nhiệm:
+   - tạo phiên bản bản thể mới từ phiên bản hiện hành;
+   - áp dụng thay đổi đã duyệt;
+   - biên dịch lại các bản chụp lược đồ cần thiết;
+   - kích hoạt phiên bản mới theo quy tắc hệ thống;
+   - làm mới bộ nhớ đệm phạm vi/bản chụp.
+
+4. Sau khi bản thể thay đổi, gọi `rebase_ingestion` tường minh.
+
+   Không âm thầm đổi `ontologyVersionId` giữa chừng.
+
+   `rebase_ingestion` phải xác định rõ:
+   - mẻ nào vẫn còn hợp lệ;
+   - mẻ nào phải xử lý lại;
+   - mẻ nào bị ảnh hưởng bởi thay đổi lược đồ.
+
+5. Lấy lại chính mẻ bị chặn và tiếp tục vòng lặp B.
+
+## D. Hoàn tất và ghi chính thức
+
+1. Khi mọi mẻ đều `STAGED`, gọi `finalize_ingestion`.
+
+2. Nếu còn mẻ lỗi hoặc đề xuất đang chờ:
+   - xử lý đúng mẻ;
+   - không ép hoàn tất.
+
+3. Khi trạng thái là `ready_to_fill`:
+   - nếu người dùng chỉ yêu cầu trích xuất/kiểm tra:
+     dừng và nói rõ Neo4j chưa thay đổi;
+   - nếu người dùng đã yêu cầu ghi:
+     gọi `fill_ingestion` đúng một lần.
+
+4. `fill_ingestion` mới thực hiện:
+   - tạo embedding;
+   - ghi dữ liệu chính thức vào Neo4j (nơi lưu trữ dữ liệu Knowledge Graph cuối cùng);
+   - đọc lại để kiểm chứng;
+   - cập nhật trạng thái hoàn tất (COMMITTED) cho workspace trong bộ nhớ RAM của tiến trình hiện tại.
+
+5. Chỉ báo thành công khi công cụ trả về:
+
+   `readbackVerified=true`
+
+PostgreSQL chỉ quản lý ontology/schema và các đề xuất thay đổi lược đồ. Toàn bộ trạng thái ingestion (workspace/job) được giữ trong RAM của tiến trình hiện tại và dữ liệu tri thức sau khi nạp được ghi bền vững vào Neo4j.
+
+## Báo cáo cuối
+
+Báo cáo tối thiểu:
+
+- `ingestionId`;
+- phiên bản bản thể đã dùng;
+- số mẻ `STAGED`;
+- số mẻ bị chặn nếu có;
+- đề xuất thay đổi bản thể và quyết định của người dùng nếu có;
+- trạng thái hoàn tất;
+- trạng thái ghi Neo4j;
+- số node;
+- số edge;
+- số chunk;
+- số fact;
+- kết quả đọc lại kiểm chứng.
+
+Không gọi dữ liệu đang ở trạng thái tạm là đã được ghi chính thức.

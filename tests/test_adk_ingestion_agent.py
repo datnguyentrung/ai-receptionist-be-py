@@ -5,7 +5,7 @@ from app.adk_web import liveness, readiness
 from app.agent.agent import app as agent_app
 from app.agent.skills.skill_loader import discover_skill_descriptors
 from app.agent.tools.graphrag_tools import retrieve_taekwondo_knowledge
-from app.agent.tools.ingestion_tools import INGESTION_TOOLS, fill_graph_patch
+from app.agent.tools.ingestion_tools import INGESTION_TOOLS
 
 
 def test_agent_and_ingestion_tools_are_discoverable() -> None:
@@ -18,9 +18,14 @@ def test_agent_and_ingestion_tools_are_discoverable() -> None:
         "finalize_ingestion",
         "fill_ingestion",
         "get_ingestion_status",
-        "load_ontology_scope",
+        "list_ontology_scopes",
+        "load_ontology_scopes",
         "validate_graph_patch",
-        "fill_graph_patch",
+        "create_schema_proposal",
+        "get_schema_proposal",
+        "review_schema_proposal",
+        "apply_schema_proposal",
+        "rebase_ingestion",
         "delete_document",
         "rollback_document_version",
     }
@@ -34,10 +39,7 @@ def test_skill_discovery_ignores_cache_directories() -> None:
     assert "__pycache__" not in names
 
 
-def test_direct_fill_is_blocked_and_health_defaults_not_ready() -> None:
-    result = asyncio.run(fill_graph_patch({}, None))
-    assert result["success"] is False
-    assert result["errors"][0]["code"] == "SOURCE_DOCUMENT_REQUIRED"
+def test_health_defaults_not_ready() -> None:
     assert asyncio.run(liveness()) == {"status": "UP"}
     assert asyncio.run(readiness()) == {"status": "DOWN", "ready": False}
 

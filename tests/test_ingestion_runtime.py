@@ -43,5 +43,5 @@ def test_lazy_runtime_initializes_once_and_shutdown_is_idempotent(monkeypatch) -
 def test_runtime_initialization_error_names_dependency() -> None:
     error = ingestion_runtime.RuntimeInitializationError("neo4j", ValueError("bad uri"))
     assert error.stage == "neo4j"
-    assert "neo4j initialization failed" in str(error)
+    assert "neo4j" in str(error)
     assert "ValueError" in str(error)

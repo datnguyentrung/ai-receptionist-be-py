@@ -1,8 +1,10 @@
 """Deterministic primitives exposed by the ingestion ADK tools.
 
-The semantic control flow intentionally lives in the ingestion SKILL.md.  This
-module implements one durable operation per tool call; it never loops over
-batches or decides which semantic step the agent should run next.
+The semantic control flow intentionally lives in the ingestion SKILL.md.
+Phân định vai trò lưu trữ:
+- PostgreSQL: Lưu trữ bền vững ontology/schema, compiled snapshots và schema proposals.
+- RAM (IngestionRepository): Quản lý trạng thái workspace, job, batches và chunks trong tiến trình hiện tại.
+- Neo4j: Lưu trữ bền vững đồ thị tri thức (Knowledge Graph) sau khi nạp chính thức.
 """
 
 import hashlib
@@ -32,8 +34,6 @@ from app.services.ingestion.repository import (
     workspace_fingerprint,
 )
 
-MAX_BATCH_VALIDATION_ATTEMPTS = 2
-
 
 async def begin(
     repository: IngestionRepository,
@@ -50,7 +50,7 @@ async def begin(
     scope_hint: str | None = None,
     mime_type: str | None = None,
 ) -> dict[str, Any]:
-    projection = await ontology_cache.get("core")
+    """Chuẩn bị tài liệu và khởi tạo mới hoặc tái sử dụng workspace ingestion trong RAM của tiến trình hiện tại."""
     prepared = prepare_document(
         artifact_name,
         data,
@@ -58,9 +58,10 @@ async def begin(
         chunk_size_chars=chunk_size_chars,
         mime_type=mime_type,
     )
+    ontology = await ontology_cache.active_version()
     workspace, resumed, committed = await repository.create_or_resume(
         prepared,
-        projection,
+        ontology,
         document_key=document_key or _document_key(artifact_name),
         scope_hint=scope_hint,
         skill_digest=skill_digest,
@@ -90,15 +91,20 @@ async def get_batch(
             "batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index)
         )
     chunks = workspace_chunks(workspace, batch.chunk_indexes)
+
+    # Không chọn lại scope nếu đã chọn rồi.
+    next_action = "load_scopes" if batch.scope_keys else "list_scopes"
+
     return {
         "success": True,
         "stage": "batch_retrieved",
         "terminal": False,
-        "nextAction": "load_schema",
+        "nextAction": next_action,
         "ingestionId": ingestion_id,
         "batch": {
             "batchIndex": batch.batch_index,
-            "scopeKey": batch.scope_key,
+            "scopeHint": workspace.job.scope_hint,
+            "selectedScopeKeys": batch.scope_keys,
             "chunks": [item.model_dump(by_alias=True, mode="json") for item in chunks],
             "canonicalGraphContext": _canonical_context(workspace, batch_index),
         },
@@ -107,12 +113,11 @@ async def get_batch(
 
 async def submit_batch(
     repository: IngestionRepository,
-    graph_store: Neo4jIngestionStore,
     ontology_cache: OntologyCache,
     ingestion_id: str,
     batch_index: int,
-    scope_key: str,
-    graph_fragment: dict[str, Any],
+    scope_keys: list[str],
+    graph_fragment: GraphPatchFragment,
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
     batch = next(
@@ -122,18 +127,38 @@ async def submit_batch(
         return error_payload(
             "batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index)
         )
+
     if (
-        batch.validation_attempts >= MAX_BATCH_VALIDATION_ATTEMPTS
-        and batch.status == "REPAIR_REQUIRED"
+        batch.status == "REPAIR_REQUIRED"
+        and batch.scope_keys
+        and set(scope_keys) != set(batch.scope_keys)
     ):
-        failed = await repository.mark_failed(
-            ingestion_id,
+        return error_payload(
             "batch_validation",
-            f"Batch {batch_index} exceeded the validation retry limit",
+            ingestion_id,
+            "REPAIR_SCOPE_MISMATCH",
+            "Repair must reuse the previously selected scope set unless "
+            "the workflow explicitly reselects scopes.",
         )
-        return status_payload(failed)
+
+    projection = await ontology_cache.get_many(
+        scope_keys, str(workspace.job.ontology_version_id)
+    )
+    bindings = [
+        {
+            "scopeKey": key,
+            "schemaHash": (
+                await ontology_cache.get(key, str(workspace.job.ontology_version_id))
+            ).digest,
+        }
+        for key in projection.scope_keys
+    ]
     try:
-        fragment = GraphPatchFragment.model_validate(graph_fragment)
+        fragment = (
+            graph_fragment
+            if isinstance(graph_fragment, GraphPatchFragment)
+            else GraphPatchFragment.model_validate(graph_fragment)
+        )
     except ValidationError as exc:
         issues = [
             {
@@ -145,11 +170,10 @@ async def submit_batch(
             for item in exc.errors()
         ]
         workspace = await repository.store_batch_result(
-            ingestion_id, batch_index, scope_key, None, issues
+            ingestion_id, batch_index, bindings, projection.digest, None, issues
         )
         return batch_failure_payload(workspace, batch_index, issues)
 
-    projection = await ontology_cache.get(scope_key)
     issues = [
         item.model_dump(by_alias=True, mode="json")
         for item in OntologyRegistry(projection).validate_fragment(
@@ -158,18 +182,25 @@ async def submit_batch(
     ]
     if issues:
         workspace = await repository.store_batch_result(
-            ingestion_id, batch_index, scope_key, None, issues
+            ingestion_id, batch_index, bindings, projection.digest, fragment, issues
         )
-        return batch_failure_payload(workspace, batch_index, issues)
+        result = batch_failure_payload(workspace, batch_index, issues)
+        if any(
+            item["code"]
+            in {"UNKNOWN_ENTITY_TYPE", "UNKNOWN_PROPERTY", "UNKNOWN_RELATIONSHIP"}
+            for item in issues
+        ):
+            result["stage"] = "schema_gap_candidate"
+            result["nextAction"] = "assess_schema_gap"
+        return result
 
-    payload = fragment.model_dump(by_alias=True, mode="json")
-    await graph_store.stage_batch(ingestion_id, batch_index, payload)
     workspace = await repository.store_batch_result(
-        ingestion_id, batch_index, scope_key, fragment, []
+        ingestion_id, batch_index, bindings, projection.digest, fragment, []
     )
     result = status_payload(workspace)
     result["submittedBatchIndex"] = batch_index
-    result["scopeKey"] = scope_key
+    result["scopeKeys"] = projection.scope_keys
+    result["mergedSchemaHash"] = projection.digest
     return result
 
 
@@ -181,17 +212,24 @@ async def finalize(
         item.batch_index for item in workspace.batches if item.status != "STAGED"
     ]
     if incomplete:
+        blocked = [
+            item.batch_index
+            for item in workspace.batches
+            if item.status == "BLOCKED_SCHEMA"
+        ]
         return {
             "success": False,
-            "stage": "repair_required",
+            "stage": "awaiting_schema_approval" if blocked else "repair_required",
             "terminal": False,
-            "nextAction": "repair_batches",
+            "nextAction": "wait_for_schema_review" if blocked else "repair_batches",
             "ingestionId": ingestion_id,
             "repairBatchIndexes": incomplete,
             "errors": [
                 {
                     "code": "INCOMPLETE_BATCHES",
-                    "message": f"Batches require repair: {incomplete}",
+                    "message": f"Batches require schema review: {blocked}"
+                    if blocked
+                    else f"Batches require repair: {incomplete}",
                     "location": "batches",
                     "retryable": True,
                 }
@@ -207,6 +245,7 @@ async def fill(
     graph_store: Neo4jIngestionStore,
     ingestion_id: str,
 ) -> dict[str, Any]:
+    """Ghi chính thức tri thức vào Neo4j và cập nhật trạng thái COMMITTED cho workspace trong bộ nhớ RAM."""
     workspace = await required_workspace(repository, ingestion_id)
     if workspace.job.status == IngestionJobStatus.COMMITTED:
         return status_payload(workspace, idempotent=True)
@@ -230,13 +269,11 @@ async def fill(
                 str(previous_version_id), "SUPERSEDED"
             )
         committed = await repository.mark_committed(ingestion_id, result)
-        await graph_store.purge_staging(ingestion_id)
         return {**status_payload(committed), **result}
     except Exception as exc:  # noqa: BLE001 - reconcile cross-store commit
         reconciled = await graph_store.committed_summary(str(workspace.version.id))
         if reconciled is not None:
             committed = await repository.mark_committed(ingestion_id, reconciled)
-            await graph_store.purge_staging(ingestion_id)
             return {**status_payload(committed), **reconciled}
         await repository.mark_failed(ingestion_id, "persistence_failure", str(exc))
         return error_payload(
@@ -244,8 +281,29 @@ async def fill(
         )
 
 
-async def load_scope(ontology_cache: OntologyCache, scope_key: str) -> dict[str, Any]:
-    projection = await ontology_cache.get(scope_key)
+async def list_scopes(
+    ontology_cache: OntologyCache, ontology_version_id: str | None = None
+) -> dict[str, Any]:
+    ontology = await ontology_cache.active_version()
+    version_id = ontology_version_id or ontology.version_id
+    scopes = await ontology_cache.list_scopes(version_id)
+    return {
+        "success": True,
+        "stage": "scope_catalog_loaded",
+        "ontologyVersionId": version_id,
+        "ontologyVersion": ontology.version
+        if version_id == ontology.version_id
+        else None,
+        "scopes": [item.model_dump(by_alias=True, mode="json") for item in scopes],
+    }
+
+
+async def load_scope(
+    ontology_cache: OntologyCache,
+    scope_keys: list[str],
+    ontology_version_id: str,
+) -> dict[str, Any]:
+    projection = await ontology_cache.get_many(scope_keys, ontology_version_id)
     return {
         "success": True,
         "stage": "schema_loaded",
@@ -259,7 +317,8 @@ async def load_scope(ontology_cache: OntologyCache, scope_key: str) -> dict[str,
 async def validate_patch(
     ontology_cache: OntologyCache,
     graph_patch: dict[str, Any],
-    scope_key: str = "core",
+    scope_keys: list[str],
+    ontology_version_id: str,
 ) -> dict[str, Any]:
     try:
         fragment = GraphPatchFragment.model_validate(graph_patch)
@@ -272,7 +331,7 @@ async def validate_patch(
             "nextAction": None,
             "errors": exc.errors(include_url=False),
         }
-    projection = await ontology_cache.get(scope_key)
+    projection = await ontology_cache.get_many(scope_keys, ontology_version_id)
     issues = OntologyRegistry(projection).validate_fragment(
         fragment, _chunks_from_evidence(fragment)
     )
@@ -283,7 +342,7 @@ async def validate_patch(
         "ingestionId": None,
         "nextAction": None,
         "valid": not issues,
-        "scopeKey": scope_key,
+        "scopeKeys": projection.scope_keys,
         "errors": [item.model_dump(by_alias=True, mode="json") for item in issues],
     }
 
@@ -358,20 +417,20 @@ async def required_workspace(
 def batch_failure_payload(
     workspace: Workspace, batch_index: int, issues: list[dict]
 ) -> dict[str, Any]:
+    batch = next(item for item in workspace.batches if item.batch_index == batch_index)
     return {
         "success": False,
-        "stage": "batch_validation",
+        "stage": "repair_required",
         "terminal": False,
         "nextAction": "repair_batch",
         "ingestionId": str(workspace.job.id),
         "batchIndex": batch_index,
+        "scopeKeys": getattr(batch, "scope_keys", []),  # phạm vi đã dùng
+        "snapshotHashes": getattr(batch, "snapshot_hashes", {}),  # snapshot đã dùng
+        "mergedSchemaHash": getattr(batch, "merged_schema_hash", None),  # lược đồ hợp nhất đã dùng
+        "graphFragment": getattr(batch, "graph_fragment", None),
         "errors": issues,
-        "validationAttempts": next(
-            item.validation_attempts
-            for item in workspace.batches
-            if item.batch_index == batch_index
-        ),
-        "maxValidationAttempts": MAX_BATCH_VALIDATION_ATTEMPTS,
+        "validationAttempts": getattr(batch, "validation_attempts", 0),
     }
 
 
@@ -392,6 +451,12 @@ def status_payload(
         stage, terminal, next_action = "ready_to_fill", False, "fill"
     elif pending is None:
         stage, terminal, next_action = "ready_to_finalize", False, "finalize"
+    elif pending.status == "BLOCKED_SCHEMA":
+        stage, terminal, next_action = (
+            "awaiting_schema_approval",
+            False,
+            "wait_for_schema_review",
+        )
     elif pending.status == "REPAIR_REQUIRED":
         stage, terminal, next_action = "repair_required", False, "repair_batch"
     else:
@@ -417,7 +482,7 @@ def status_payload(
         result["nextBatch"] = {
             "batchIndex": pending.batch_index,
             "chunkIndexes": pending.chunk_indexes,
-            "scopeKey": pending.scope_key,
+            "selectedScopeKeys": pending.scope_keys,
         }
     if workspace.job.error_message:
         result["errors"] = [
@@ -494,13 +559,13 @@ def _chunks_from_evidence(fragment: GraphPatchFragment) -> list[PreparedChunk]:
 
 
 __all__ = [
-    "MAX_BATCH_VALIDATION_ATTEMPTS",
     "begin",
     "delete_document",
     "error_payload",
     "fill",
     "finalize",
     "get_batch",
+    "list_scopes",
     "load_scope",
     "required_workspace",
     "rollback_version",

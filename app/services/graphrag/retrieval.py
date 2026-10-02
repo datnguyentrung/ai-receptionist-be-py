@@ -172,7 +172,11 @@ def _filter_scope(
     return [
         item
         for item in items
-        if str(item.get("scopeKey") or "core").casefold() == normalized
+        if normalized in {
+            str(value).casefold()
+            for value in (item.get("scopeKeys") or [item.get("scopeKey")])
+            if value
+        }
     ]
 
 

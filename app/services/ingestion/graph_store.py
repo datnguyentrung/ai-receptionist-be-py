@@ -62,29 +62,6 @@ class Neo4jIngestionStore:
             for statement in statements:
                 await (await session.run(statement)).consume()
 
-    async def stage_batch(
-        self, ingestion_id: str, batch_index: int, fragment: dict
-    ) -> None:
-        payload = json.dumps(fragment, ensure_ascii=False, sort_keys=True)
-        async with self._driver.session(database=self._database) as session:
-
-            async def write_staging(tx: Any) -> None:
-                result = await tx.run(
-                    """
-                    MERGE (b:TaekwondoIngestionBatch {
-                      ingestionId: $ingestion_id, batchIndex: $batch_index
-                    })
-                    SET b.fragmentJson = $payload, b.status = 'STAGED',
-                        b.updatedAt = datetime()
-                    """,
-                    ingestion_id=ingestion_id,
-                    batch_index=batch_index,
-                    payload=payload,
-                )
-                await result.consume()
-
-            await session.execute_write(write_staging)
-
     async def fill(self, workspace: Workspace) -> dict[str, Any]:
         """Write domain graph, source chunks, facts, embeddings, and provenance atomically."""
 
@@ -141,6 +118,7 @@ class Neo4jIngestionStore:
                     c.pageEnd = chunk.pageEnd,
                     c.sourceAnchor = chunk.sourceAnchor,
                     c.scopeKey = chunk.scopeKey,
+                    c.scopeKeys = chunk.scopeKeys,
                     c.embedding = chunk.embedding,
                     c.embeddingModel = $embedding_model,
                     c.embeddingVersion = $embedding_model,
@@ -226,9 +204,9 @@ class Neo4jIngestionStore:
                       targetKey: edge.targetKey
                     }]->(t)
                     SET r.propertiesJson = edge.propertiesJson,
-                        r.evidenceJson = edge.evidenceJson,
-                        r.factText = edge.factText,
-                        r.updatedAt = datetime()
+                    r.evidenceJson = edge.evidenceJson,
+                    r.factText = edge.factText,
+                    r.updatedAt = datetime()
                     """,
                     edges=payload["edges"],
                     version_id=payload["version_id"],
@@ -335,6 +313,8 @@ class Neo4jIngestionStore:
     async def search_chunk_vector(
         self, embedding: list[float], limit: int
     ) -> list[dict[str, Any]]:
+        if not embedding or limit <= 0:
+            return []
         return await self._data(
             """
             CALL db.index.vector.queryNodes($index, $limit, $embedding)
@@ -345,8 +325,10 @@ class Neo4jIngestionStore:
                    node.chunkIndex AS chunkIndex, node.text AS text,
                    node.section AS section, node.pageStart AS pageStart,
                    node.pageEnd AS pageEnd, node.sourceAnchor AS sourceAnchor,
-                   node.scopeKey AS scopeKey, node.embedding AS embedding, score
+                   node.scopeKey AS scopeKey, node.scopeKeys AS scopeKeys,
+                   node.embedding AS embedding, score
             ORDER BY score DESC
+            LIMIT $limit
             """,
             index=CHUNK_VECTOR_INDEX,
             limit=limit,
@@ -356,6 +338,8 @@ class Neo4jIngestionStore:
     async def search_fact_vector(
         self, embedding: list[float], limit: int
     ) -> list[dict[str, Any]]:
+        if not embedding or limit <= 0:
+            return []
         return await self._data(
             """
             CALL db.index.vector.queryNodes($index, $limit, $embedding)
@@ -366,6 +350,7 @@ class Neo4jIngestionStore:
                    node.factType AS factType, score,
                    collect(DISTINCT chunk.chunkId) AS chunkIds
             ORDER BY score DESC
+            LIMIT $limit
             """,
             index=FACT_VECTOR_INDEX,
             limit=limit,
@@ -375,6 +360,8 @@ class Neo4jIngestionStore:
     async def search_chunk_fulltext(
         self, query: str, limit: int
     ) -> list[dict[str, Any]]:
+        if not query or not query.strip() or limit <= 0:
+            return []
         return await self._data(
             """
             CALL db.index.fulltext.queryNodes($index, $query, {limit: $limit})
@@ -385,8 +372,10 @@ class Neo4jIngestionStore:
                    node.chunkIndex AS chunkIndex, node.text AS text,
                    node.section AS section, node.pageStart AS pageStart,
                    node.pageEnd AS pageEnd, node.sourceAnchor AS sourceAnchor,
-                   node.scopeKey AS scopeKey, node.embedding AS embedding, score
+                   node.scopeKey AS scopeKey, node.scopeKeys AS scopeKeys,
+                   node.embedding AS embedding, score
             ORDER BY score DESC
+            LIMIT $limit
             """,
             index=CHUNK_FULLTEXT_INDEX,
             query=query,
@@ -396,6 +385,8 @@ class Neo4jIngestionStore:
     async def search_entity_fulltext(
         self, query: str, limit: int
     ) -> list[dict[str, Any]]:
+        if not query or not query.strip() or limit <= 0:
+            return []
         return await self._data(
             """
             CALL db.index.fulltext.queryNodes($index, $query, {limit: $limit})
@@ -406,6 +397,7 @@ class Neo4jIngestionStore:
             RETURN node.stableKey AS stableKey, node.entityType AS entityType,
                    node.searchText AS searchText, score
             ORDER BY score DESC
+            LIMIT $limit
             """,
             index=ENTITY_FULLTEXT_INDEX,
             query=query,
@@ -415,7 +407,7 @@ class Neo4jIngestionStore:
     async def chunks_for_entities(
         self, stable_keys: list[str], limit: int
     ) -> list[dict[str, Any]]:
-        if not stable_keys:
+        if not stable_keys or limit <= 0:
             return []
         return await self._data(
             """
@@ -433,7 +425,8 @@ class Neo4jIngestionStore:
                    chunk.chunkIndex AS chunkIndex, chunk.text AS text,
                    chunk.section AS section, chunk.pageStart AS pageStart,
                    chunk.pageEnd AS pageEnd, chunk.sourceAnchor AS sourceAnchor,
-                   chunk.scopeKey AS scopeKey, chunk.embedding AS embedding,
+                   chunk.scopeKey AS scopeKey, chunk.scopeKeys AS scopeKeys,
+                   chunk.embedding AS embedding,
                    1.0 / (1.0 + length(path)) AS score
             ORDER BY score DESC
             LIMIT $limit
@@ -459,14 +452,15 @@ class Neo4jIngestionStore:
                    chunk.chunkIndex AS chunkIndex, chunk.text AS text,
                    chunk.section AS section, chunk.pageStart AS pageStart,
                    chunk.pageEnd AS pageEnd, chunk.sourceAnchor AS sourceAnchor,
-                   chunk.scopeKey AS scopeKey, chunk.embedding AS embedding, 1.0 AS score
+                   chunk.scopeKey AS scopeKey, chunk.scopeKeys AS scopeKeys,
+                   chunk.embedding AS embedding, 1.0 AS score
             """,
             chunk_ids=chunk_ids,
         )
 
-    async def _data(self, query: str, **parameters: Any) -> list[dict[str, Any]]:
+    async def _data(self, cypher: str, **parameters: Any) -> list[dict[str, Any]]:
         async with self._driver.session(database=self._database) as session:
-            return await (await session.run(query, **parameters)).data()
+            return await (await session.run(cypher, **parameters)).data()
 
     async def deactivate_version(self, version_id: str, status: str) -> dict[str, Any]:
         async with self._driver.session(database=self._database) as session:
@@ -565,9 +559,9 @@ class Neo4jIngestionStore:
                 OPTIONAL MATCH (v)-[a:ASSERTS_ENTITY]->(n:TaekwondoKnowledgeEntity)
                 DELETE a
                 WITH v, collect(DISTINCT n) AS candidates
-                UNWIND candidates AS candidate
+                UNWIND (CASE WHEN size(candidates) = 0 THEN [null] ELSE candidates END) AS candidate
                 WITH candidate
-                WHERE NOT (:TaekwondoSourceVersion {status: 'COMMITTED'})
+                WHERE candidate IS NOT NULL AND NOT (:TaekwondoSourceVersion {status: 'COMMITTED'})
                           -[:ASSERTS_ENTITY]->(candidate)
                 DETACH DELETE candidate
                 RETURN count(candidate) AS removedNodes
@@ -604,10 +598,10 @@ async def _build_graphrag_payload(
     version_id = str(workspace.version.id)
     document_id = str(workspace.document.id)
     chunk_id_by_index = {item.chunk_index: item.chunk_id for item in workspace.chunks}
-    scope_by_chunk_index = {
-        chunk_index: batch.scope_key
-        for batch in workspace.batches
-        for chunk_index in batch.chunk_indexes
+    scopes_by_chunk_index = {
+        chunk_index: (getattr(batch, "scope_keys", None) or [])
+        for batch in getattr(workspace, "batches", ())
+        for chunk_index in getattr(batch, "chunk_indexes", ())
     }
     chunks = [
         {
@@ -620,7 +614,8 @@ async def _build_graphrag_payload(
             "pageStart": item.page_start,
             "pageEnd": item.page_end,
             "sourceAnchor": item.source_anchor,
-            "scopeKey": scope_by_chunk_index.get(item.chunk_index, "core"),
+            "scopeKeys": scopes_by_chunk_index.get(item.chunk_index, []),
+            "scopeKey": ",".join(scopes_by_chunk_index.get(item.chunk_index, [])),
         }
         for item in workspace.chunks
     ]
@@ -719,8 +714,8 @@ async def _build_graphrag_payload(
     return {
         "version_id": version_id,
         "document_id": document_id,
-        "document_name": workspace.document.name,
-        "ontology_version_id": str(workspace.version.ontology_version_id),
+        "document_name": getattr(workspace.document, "name", ""),
+        "ontology_version_id": str(getattr(workspace.version, "ontology_version_id", "")),
         "embedding_model": embedding_provider.model,
         "chunks": ordered_chunks,
         "chunk_links": [
@@ -737,10 +732,19 @@ async def _build_graphrag_payload(
     }
 
 
-def _merge_fragments(fragments: list[dict]) -> tuple[list[dict], list[dict]]:
+def _merge_fragments(
+    fragments: list[dict | Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     nodes_by_key: dict[tuple[str, str], dict] = {}
     fragment_temp_maps: list[dict[str, str]] = []
-    for fragment in fragments:
+    dict_fragments: list[dict[str, Any]] = []
+    for raw_fragment in fragments:
+        fragment = (
+            raw_fragment.model_dump(by_alias=True, mode="json")
+            if hasattr(raw_fragment, "model_dump")
+            else (raw_fragment if isinstance(raw_fragment, dict) else {})
+        )
+        dict_fragments.append(fragment)
         temp_map: dict[str, str] = {}
         for node in fragment.get("nodes", []):
             identity_json = _json(node.get("identity") or {"tempId": node["tempId"]})
@@ -767,7 +771,7 @@ def _merge_fragments(fragments: list[dict]) -> tuple[list[dict], list[dict]]:
         fragment_temp_maps.append(temp_map)
     nodes = list(nodes_by_key.values())
     edges_by_key: dict[tuple[str, str, str], dict] = {}
-    for fragment, temp_map in zip(fragments, fragment_temp_maps, strict=True):
+    for fragment, temp_map in zip(dict_fragments, fragment_temp_maps, strict=True):
         for edge in fragment.get("edges", []):
             source = temp_map.get(edge["sourceTempId"], edge["sourceTempId"])
             target = temp_map.get(edge["targetTempId"], edge["targetTempId"])

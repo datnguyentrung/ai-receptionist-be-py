@@ -1,6 +1,5 @@
 import uuid
 from collections.abc import Sequence
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,39 +47,6 @@ class OntologyCompiledSnapshotService:
         )
         return result.scalars().all()
 
-    async def create_or_update(
-        self,
-        ontology_version_id: uuid.UUID,
-        scope_key: str,
-        schema_hash: str,
-        compiled_schema: dict[str, Any],
-        expires_at: Any = None,
-    ) -> OntologyCompiledSnapshot:
-        """Tạo mới hoặc cập nhật (upsert) bản Snapshot biên dịch cho LLM Prompt / Engine."""
-        snapshot = await self.get_by_version_and_scope(ontology_version_id, scope_key)
-        if snapshot:
-            snapshot.schema_hash = schema_hash
-            snapshot.compiled_schema = compiled_schema
-            snapshot.expires_at = expires_at
-        else:
-            snapshot = OntologyCompiledSnapshot(
-                ontology_version_id=ontology_version_id,
-                scope_key=scope_key,
-                schema_hash=schema_hash,
-                compiled_schema=compiled_schema,
-                expires_at=expires_at,
-            )
-            self.db.add(snapshot)
-
-        await self.db.flush()
-        await self.db.refresh(snapshot)
-        return snapshot
-
-    async def delete(self, snapshot_id: uuid.UUID) -> bool:
-        """Xóa Snapshot theo ID."""
-        db_obj = await self.get_by_id(snapshot_id)
-        if not db_obj:
-            return False
-        await self.db.delete(db_obj)
-        await self.db.flush()
-        return True
+    # Snapshot writes intentionally live only in OntologySnapshotCompiler.  Keeping
+    # this service read-only prevents callers from publishing a schema that did not
+    # pass the canonical compiler and hashing path.

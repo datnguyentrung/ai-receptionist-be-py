@@ -53,6 +53,8 @@ class OntologyVersionService:
 
     async def create(self, obj_in: dict[str, Any]) -> OntologyVersion:
         """Tạo mới phiên bản Ontology."""
+        if obj_in.get("status") == OntologyVersionStatus.ACTIVE:
+            raise ValueError("Publish ACTIVE ontology versions through OntologyLifecycle")
         db_obj = OntologyVersion(**obj_in)
         self.db.add(db_obj)
         await self.db.flush()
@@ -63,6 +65,8 @@ class OntologyVersionService:
         self, db_obj: OntologyVersion, obj_in: dict[str, Any]
     ) -> OntologyVersion:
         """Cập nhật phiên bản Ontology."""
+        if "status" in obj_in:
+            raise ValueError("Change ontology status through OntologyLifecycle")
         for field, value in obj_in.items():
             if hasattr(db_obj, field):
                 setattr(db_obj, field, value)

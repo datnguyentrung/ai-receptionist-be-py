@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -59,6 +60,12 @@ class OntologyCompiledSnapshot(Base):
         index=True,
     )
 
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    compiler_version: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="ontology-compiler-v2"
+    )
+
     # Mã băm SHA256 của schema nhằm phát hiện thay đổi dữ liệu để re-compile
     schema_hash: Mapped[str] = mapped_column(
         String(64),
@@ -77,6 +84,13 @@ class OntologyCompiledSnapshot(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     # Thời điểm hết hạn cache snapshot (nếu có cấu hình TTL)

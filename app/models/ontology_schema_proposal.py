@@ -1,14 +1,9 @@
 import uuid
 from datetime import datetime
 from enum import Enum
+from typing import ClassVar
 
-from sqlalchemy import (
-    DateTime,
-    ForeignKey,
-    String,
-    Text,
-    func,
-)
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy import (
     Enum as SQLEnum,
 )
@@ -28,6 +23,8 @@ class SchemaProposalType(str, Enum):
     MODIFY_ENTITY_TYPE = "MODIFY_ENTITY_TYPE"  # Đề xuất chỉnh sửa thực thể hiện có
     MODIFY_PROPERTY = "MODIFY_PROPERTY"  # Đề xuất chỉnh sửa thuộc tính hiện có
     MODIFY_RELATIONSHIP = "MODIFY_RELATIONSHIP"  # Đề xuất chỉnh sửa quan hệ hiện có
+    NEW_SCOPE = "NEW_SCOPE"
+    MODIFY_SCOPE = "MODIFY_SCOPE"
 
 
 class SchemaProposalStatus(str, Enum):
@@ -47,7 +44,7 @@ class OntologySchemaProposal(Base):
     """
 
     __tablename__ = "ontology_schema_proposal"
-    __table_args__ = {"schema": "ontology"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "ontology"}
 
     # Khóa chính định danh đề xuất (UUID v4)
     id: Mapped[uuid.UUID] = mapped_column(
@@ -65,6 +62,26 @@ class OntologySchemaProposal(Base):
         ),
         nullable=False,
         index=True,
+    )
+
+    applied_ontology_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ontology_version.id"), nullable=True, index=True
+    )
+
+    source_ingestion_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+
+    source_batch_index: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+
+    affected_scope_keys: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+
+    proposal_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
     )
 
     # Loại đề xuất (NEW_ENTITY_TYPE, NEW_PROPERTY, v.v.)
