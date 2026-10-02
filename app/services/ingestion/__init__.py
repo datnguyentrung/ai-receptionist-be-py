@@ -1,5 +1,1 @@
-"""Taekwondo ingestion application services."""
-
-from app.services.ingestion.orchestrator import IngestionOrchestrator
-
-__all__ = ["IngestionOrchestrator"]
+"""Deterministic services used by ingestion and GraphRAG tools."""

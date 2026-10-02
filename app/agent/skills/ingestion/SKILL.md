@@ -24,6 +24,10 @@ metadata:
 Bạn (LLM Agent) đóng vai trò điều phối việc **trích xuất ngữ nghĩa** (Semantic Mapping). Các công cụ Python và tầng Service trong hệ thống chịu trách nhiệm phân tích văn bản (Deterministic Parsing), kiểm tra tính hợp lệ (Validation), quản lý định danh (Identity), lưu trữ tạm thời (Staging), ghi dữ liệu bền vững (Persistence vào Neo4j/PostgreSQL), truy vết nguồn gốc (Provenance) và đọc kiểm chứng (Read-back Verification). 
 **Tuyệt đối không tự bịa đặt câu lệnh SQL hoặc Cypher.**
 
+Skill này là nguồn sự thật duy nhất của control flow ingestion. Python tools chỉ cung cấp
+từng primitive deterministic và không tự chạy vòng lặp batch. Không dùng skill này để trả
+lời câu hỏi từ Knowledge Graph; hãy dùng `graph-qa` cho việc hỏi đáp.
+
 ---
 
 ## 1. Quy tắc an toàn (Safety Rules)
@@ -41,17 +45,17 @@ Bạn (LLM Agent) đóng vai trò điều phối việc **trích xuất ngữ ng
 
 | Tên Tool | Công dụng & Trách nhiệm | Tầng Service / Hàm xử lý backend |
 | :--- | :--- | :--- |
-| `begin_ingestion` | **Khởi tạo quy trình nạp tài liệu**: Đọc artifact tải lên (PDF, DOCX, MD, TXT), tính toán mã băm (SHA256), băm nhỏ văn bản thành các chunks/batches, tạo bản ghi `IngestionJob` trong PostgreSQL, và trả về `ingestionId`. | `Orchestrator.begin()`<br>• `PreprocessingService.parse_and_chunk()`<br>• `PostgresIngestionRepository.create_job()` |
-| `get_ingestion_batch` | **Lấy nội dung batch**: Trả về toàn bộ nội dung các chunks văn bản thuộc batch cần xử lý cùng ngữ cảnh tri thức chuẩn hóa trước đó để LLM đọc và trích xuất. | `Orchestrator.get_batch()`<br>• `PostgresIngestionRepository.get_batch_chunks()` |
-| `load_ontology_scope` | **Tải phạm vi Ontology**: Lấy định nghĩa schema ontology rút gọn theo ngữ cảnh (`core`, `course`, `training`, `belt`, `facility`, `finance`, `event`) để đảm bảo các thực thể, thuộc tính và quan hệ trích xuất tuân thủ đúng chuẩn. | `Orchestrator.load_scope()`<br>• `OntologyService.load_scope()` |
-| `submit_ingestion_batch` | **Gửi kết quả trích xuất của batch**: Nhận `GraphPatchFragment` do LLM tạo ra, kiểm tra tính hợp lệ với ontology, và lưu tạm (stage) vào PostgreSQL. Nếu có lỗi cấu trúc hoặc vi phạm ontology, tool trả về danh sách lỗi cụ thể để LLM sửa chữa. | `Orchestrator.submit_batch()`<br>• `OntologyService.validate_patch()`<br>• `PostgresIngestionRepository.save_batch_fragment()` |
-| `finalize_ingestion` | **Hoàn tất kiểm tra toàn tài liệu**: Kiểm tra độ phủ (toàn bộ các chunk đều có quyết định `MAPPED` hoặc `NOT_RELEVANT`), đối chiếu tính nhất quán giữa các batch, và sinh ra chữ ký sẵn sàng (`readiness_fingerprint`). | `Orchestrator.finalize()`<br>• `PostgresIngestionRepository.check_readiness()` |
-| `fill_ingestion` | **Ghi tri thức chính thức vào Knowledge Graph**: Chuyển toàn bộ các fragments đã được xác thực từ PostgreSQL sang cơ sở dữ liệu đồ thị Neo4j và thực hiện truy vấn đọc ngược (read-back) để kiểm chứng tính toàn vẹn. | `Orchestrator.fill()`<br>• `Neo4jGraphStore.commit_fragment()`<br>• `Neo4jGraphStore.verify_readback()` |
-| `get_ingestion_status` | **Kiểm tra tiến độ nạp**: Trả về trạng thái bền vững của tiến trình nạp (ngay cả khi server bị khởi động lại). | `Orchestrator.status()` |
-| `validate_graph_patch` | **Kiểm tra tính hợp lệ đồ thị độc lập**: Xác thực một graph patch tùy ý với ontology mà không thực hiện lưu trữ. | `Orchestrator.validate_patch()` |
+| `begin_ingestion` | Chuẩn bị tài liệu, chunks/batches và workspace bền vững. | Preprocessing + PostgreSQL repository |
+| `get_ingestion_batch` | Trả nội dung batch và canonical context. | PostgreSQL repository |
+| `load_ontology_scope` | Tải ontology projection cho batch hiện tại. | Ontology cache |
+| `submit_ingestion_batch` | Validate theo `scope_key` của batch và stage fragment. | Ontology registry + stores |
+| `finalize_ingestion` | Kiểm tra coverage và tạo readiness fingerprint. | PostgreSQL repository |
+| `fill_ingestion` | Commit domain graph, chunks, facts, embeddings và provenance. | Neo4j graph store |
+| `get_ingestion_status` | Trả trạng thái workspace bền vững. | PostgreSQL repository |
+| `validate_graph_patch` | Xác thực graph patch mà không lưu. | Ontology registry |
 | `fill_graph_patch` | **Chặn ghi trực tiếp không có nguồn**: Ngăn chặn hành động ghi trực tiếp vào Graph DB mà không có tài liệu nguồn chứng minh. | Trả về lỗi `SOURCE_DOCUMENT_REQUIRED`. |
-| `delete_document` | **Vô hiệu hóa tài liệu**: Đánh dấu hủy kích hoạt tài liệu và gỡ bỏ các tri thức liên quan trong Graph. | `Orchestrator.delete_document()` |
-| `rollback_document_version` | **Khôi phục phiên bản tài liệu**: Hoàn nguyên tài liệu về phiên bản trước dựa trên lịch sử truy vết (provenance). | `Orchestrator.rollback_version()` |
+| `delete_document` | Vô hiệu hóa tài liệu và gỡ tri thức không còn nguồn active. | Repository + Neo4j graph store |
+| `rollback_document_version` | Vô hiệu hóa phiên bản được chỉ định theo provenance. | Repository + Neo4j graph store |
 
 ---
 
@@ -76,7 +80,7 @@ Bạn (LLM Agent) đóng vai trò điều phối việc **trích xuất ngữ ng
    - Độ phủ (`coverage`): Mọi `chunkIndex` trong batch đều phải có quyết định rõ ràng là `MAPPED` (đã trích xuất) hoặc `NOT_RELEVANT` (không liên quan / không chứa tri thức).
 
 5. **Gửi và sửa lỗi batch**:
-   - Gọi `submit_ingestion_batch(ingestion_id, batch_index, graph_fragment)`.
+   - Gọi `submit_ingestion_batch(ingestion_id, batch_index, scope_key, graph_fragment)`.
    - Nếu kết quả trả về các lỗi cấu trúc (`validation issues`), chỉ sửa chữa các dữ kiện bị ảnh hưởng và gửi lại đúng batch đó. **Không khởi động lại toàn bộ quy trình ingestion khi đang sửa lỗi.**
 
 6. **Lặp lại cho đến khi sẵn sàng hoàn tất**:

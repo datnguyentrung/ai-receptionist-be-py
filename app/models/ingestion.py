@@ -108,6 +108,7 @@ class IngestionBatch(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ingestion_job.id", ondelete="CASCADE"), nullable=False, index=True)
     batch_index: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_indexes: Mapped[list[int]] = mapped_column(JSONB, nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(50), nullable=False, default="core")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING", index=True)
     graph_fragment: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     validation_issues: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)

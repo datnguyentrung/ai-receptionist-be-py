@@ -17,6 +17,7 @@ from app.agent.skills.skill_loader import (
     discover_skill_descriptors,
     discover_skill_tools,
 )
+from app.core.ingestion_runtime import IngestionRuntimePlugin
 
 BASE_DIR = Path(__file__).resolve().parent
 SKILLS_DIR = BASE_DIR / "skills"
@@ -142,6 +143,7 @@ app = App(
     name="taekwondo_ingestion",
     root_agent=root_agent,
     plugins=[
+        IngestionRuntimePlugin(),
         ContextFilterPlugin(custom_filter=_compact_ingestion_context),
         SaveFilesAsArtifactsPlugin(),
     ],

@@ -162,6 +162,7 @@ class IngestionRepository:
                     IngestionBatch(
                         job_id=job.id,
                         batch_index=batch_index,
+                        scope_key=scope_hint or "core",
                         chunk_indexes=[
                             item.chunk_index for item in prepared.chunks[start : start + batch_size]
                         ],
@@ -177,10 +178,37 @@ class IngestionRepository:
                 return None
             return await self._workspace_in_session(session, job_id)
 
+    async def list_committed_workspaces(
+        self,
+        *,
+        document_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[Workspace]:
+        """Return committed workspaces for idempotent GraphRAG backfill."""
+
+        async with self._session_factory() as session:
+            statement = (
+                select(IngestionJob.id)
+                .join(
+                    IngestionDocumentVersion,
+                    IngestionDocumentVersion.id == IngestionJob.document_version_id,
+                )
+                .where(IngestionJob.status == IngestionJobStatus.COMMITTED)
+                .order_by(IngestionJob.created_at)
+                .limit(max(1, limit))
+            )
+            if document_id:
+                statement = statement.where(
+                    IngestionDocumentVersion.document_id == _uuid(document_id)
+                )
+            job_ids = list((await session.scalars(statement)).all())
+            return [await self._workspace_in_session(session, job_id) for job_id in job_ids]
+
     async def store_batch_result(
         self,
         ingestion_id: str,
         batch_index: int,
+        scope_key: str,
         fragment: GraphPatchFragment | None,
         issues: list[dict],
     ) -> Workspace:
@@ -194,6 +222,7 @@ class IngestionRepository:
             if batch is None:
                 raise KeyError(f"Unknown batch index: {batch_index}")
             batch.validation_attempts += 1
+            batch.scope_key = scope_key
             batch.validation_issues = issues
             if issues:
                 batch.status = "REPAIR_REQUIRED"
@@ -348,7 +377,11 @@ def workspace_chunks(workspace: Workspace, indexes: list[int]) -> list[PreparedC
 def workspace_fingerprint(workspace: Workspace) -> str:
     return _digest(
         [
-            {"batchIndex": item.batch_index, "fragment": item.graph_fragment}
+            {
+                "batchIndex": item.batch_index,
+                "scopeKey": item.scope_key,
+                "fragment": item.graph_fragment,
+            }
             for item in workspace.batches
         ]
     )
