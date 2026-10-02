@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.core.ingestion_runtime import ingestion_lifespan
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-AGENTS_DIR = PROJECT_ROOT / "adk_agents"
+AGENTS_DIR = PROJECT_ROOT / "app"
 
 app = get_fast_api_app(
     agents_dir=str(AGENTS_DIR),
