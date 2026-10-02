@@ -1,1 +1,0 @@
-"""Standalone ADK-discoverable applications."""
