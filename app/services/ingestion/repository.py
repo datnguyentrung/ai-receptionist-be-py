@@ -40,6 +40,14 @@ class Workspace:
 
 
 class IngestionRepository:
+    """Kho lưu trữ dữ liệu Ingestion bền vững trên PostgreSQL.
+
+    Chịu trách nhiệm:
+        - Quản lý vòng đời tài liệu (Document, DocumentVersion).
+        - Lưu trữ danh sách Chunks, Batches và Jobs xử lý.
+        - Quản lý trạng thái lưu tạm (STAGED) và cache kết quả trích xuất.
+    """
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
@@ -55,6 +63,17 @@ class IngestionRepository:
         compiler_version: str,
         batch_size: int,
     ) -> tuple[Workspace, bool, bool]:
+        """Tạo mới hoặc khôi phục một Workspace Ingestion từ PostgreSQL.
+
+        Công dụng:
+            1. Tính toán chữ ký cấu hình (`config_signature`) và chữ ký nạp (`ingestion_signature`).
+            2. Nếu tài liệu cùng chữ ký đã tồn tại, tự động khôi phục (resume) phiên làm việc trước đó.
+            3. Nếu chưa tồn tại, tạo mới Document, DocumentVersion, lưu toàn bộ Chunks, chia Batches và tạo IngestionJob.
+
+        Trả về:
+            Tuple: (workspace: Workspace, resumed: bool, committed: bool)
+        """
+        # 1. Tính toán các chữ ký xác định tính toàn vẹn và tái lặp (Idempotency)
         config_signature = _digest(
             {"chunker": CHUNKER_VERSION, "batchSize": batch_size, "scopeHint": scope_hint}
         )
@@ -70,6 +89,7 @@ class IngestionRepository:
             }
         )
         async with self._session_factory() as session, session.begin():
+            # 2. Tìm hoặc tạo mới IngestionDocument theo document_key
             document = await session.scalar(
                 select(IngestionDocument).where(IngestionDocument.document_key == document_key)
             )
@@ -78,6 +98,7 @@ class IngestionRepository:
                 session.add(document)
                 await session.flush()
 
+            # 3. Tìm IngestionDocumentVersion khớp chữ ký ingestion_signature
             version = await session.scalar(
                 select(IngestionDocumentVersion).where(
                     IngestionDocumentVersion.document_id == document.id,

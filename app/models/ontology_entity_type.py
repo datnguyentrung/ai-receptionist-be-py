@@ -30,6 +30,7 @@ class OntologyEntityType(Base):
             "technical_name",
             name="uq_ontology_entity_type_version_name",
         ),
+        {"schema": "ontology"},
     )
 
     # Khóa chính định danh thực thể (UUID v4)

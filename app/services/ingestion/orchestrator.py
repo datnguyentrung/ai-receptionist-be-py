@@ -29,10 +29,18 @@ from app.services.ingestion.repository import (
     workspace_fingerprint,
 )
 
-MAX_BATCH_VALIDATION_ATTEMPTS = 2
+MAX_BATCH_VALIDATION_ATTEMPTS = 2  # Số lần tối đa cho phép LLM thử sửa lỗi xác thực trên 1 batch trước khi đánh dấu FAILED
 
 
 class IngestionOrchestrator:
+    """Điều phối viên trung tâm (Orchestrator) cho máy trạng thái nạp dữ liệu tri thức.
+
+    Lớp này chịu trách nhiệm:
+        - Quản lý vòng đời tiến trình nạp (Workspace): từ file thô -> chia chunk -> nạp từng batch ->
+          xác thực ontology -> lưu tạm (PostgreSQL) -> kiểm tra toàn vẹn -> commit vào Neo4j.
+        - Điều phối giữa Preprocessing, PostgreSQL Repository, Ontology Registry và Neo4j Graph Store.
+    """
+
     def __init__(
         self,
         repository: IngestionRepository,
@@ -45,14 +53,15 @@ class IngestionOrchestrator:
         skill_digest: str,
         model_id: str,
     ) -> None:
-        self.repository = repository
-        self.graph_store = graph_store
-        self.ontology_cache = ontology_cache
-        self.max_file_size = max_file_size
-        self.chunk_size_chars = chunk_size_chars
-        self.batch_size = max(1, batch_size)
-        self.skill_digest = skill_digest
-        self.model_id = model_id
+        """Khởi tạo Orchestrator với các kho lưu trữ và tham số cấu hình."""
+        self.repository = repository              # Kho lưu trữ PostgreSQL (quản lý Ingestion metadata)
+        self.graph_store = graph_store            # Kho lưu trữ đồ thị Neo4j (quản lý staging & domain graph)
+        self.ontology_cache = ontology_cache      # Cache lưu schema ontology đã biên dịch
+        self.max_file_size = max_file_size        # Kích thước file tối đa cho phép (bytes)
+        self.chunk_size_chars = chunk_size_chars  # Độ dài ký tự tối đa cho mỗi chunk văn bản
+        self.batch_size = max(1, batch_size)      # Số lượng chunk trong mỗi batch xử lý
+        self.skill_digest = skill_digest          # Mã băm đại diện cho phiên bản skill định nghĩa
+        self.model_id = model_id                  # ID mô hình AI đang sử dụng
 
     async def begin(
         self,
@@ -63,7 +72,18 @@ class IngestionOrchestrator:
         scope_hint: str | None = None,
         mime_type: str | None = None,
     ) -> dict[str, Any]:
+        """Khởi tạo hoặc tiếp tục một phiên nạp tài liệu.
+
+        Các bước thực hiện:
+            1. Tải bản chiếu Ontology tương ứng với scope_hint (mặc định 'core').
+            2. Tiền xử lý file: Parse định dạng (PDF/DOCX/MD/TXT), làm sạch, băm nhỏ thành các Chunks.
+            3. Tìm kiếm hoặc tạo mới Workspace bền vững trong PostgreSQL dựa trên mã băm nội dung.
+            4. Trả về trạng thái tiến trình (nếu tài liệu đã từng nạp xong thì trả về idempotent=True).
+        """
+        # 1. Lấy schema ontology theo scope yêu cầu
         projection = await self.ontology_cache.get(scope_hint or "core")
+
+        # 2. Tiền xử lý văn bản: parse nội dung, kiểm tra mã hóa, chia chunk có cấu trúc
         prepared = prepare_document(
             artifact_name,
             data,
@@ -71,7 +91,11 @@ class IngestionOrchestrator:
             chunk_size_chars=self.chunk_size_chars,
             mime_type=mime_type,
         )
+
+        # 3. Chuẩn hóa khóa định danh tài liệu
         stable_key = document_key or _document_key(artifact_name)
+
+        # 4. Khởi tạo bản ghi Document, DocumentVersion, Chunks, Batches và Job trong PostgreSQL
         workspace, resumed, committed = await self.repository.create_or_resume(
             prepared,
             projection,
@@ -82,14 +106,22 @@ class IngestionOrchestrator:
             compiler_version=COMPILER_VERSION,
             batch_size=self.batch_size,
         )
+
+        # 5. Nếu phiên bản này đã từng commit thành công vào đồ thị trước đó, trả về trạng thái idempotent
         if committed:
             return self._status(workspace, resumed=True, idempotent=True)
         return self._status(workspace, resumed=resumed)
 
     async def get_batch(self, ingestion_id: str, batch_index: int) -> dict[str, Any]:
+        """Lấy nội dung các đoạn văn bản (chunks) và ngữ cảnh đã trích xuất trước đó của một batch."""
+        # Kiểm tra workspace tồn tại
         workspace = await self._required_workspace(ingestion_id)
+
+        # Nếu job đã kết thúc (COMMITTED hoặc FAILED), trả về trạng thái hiện tại
         if workspace.job.status in {IngestionJobStatus.COMMITTED, IngestionJobStatus.FAILED}:
             return self._status(workspace)
+
+        # Tìm batch theo chỉ số batch_index
         batch = next((item for item in workspace.batches if item.batch_index == batch_index), None)
         if batch is None:
             return _error(
@@ -98,6 +130,8 @@ class IngestionOrchestrator:
                 "INVALID_BATCH_INDEX",
                 f"Unknown batch index: {batch_index}",
             )
+
+        # Lấy danh sách các chunk thuộc batch này
         chunks = workspace_chunks(workspace, batch.chunk_indexes)
         return {
             "success": True,
@@ -108,6 +142,7 @@ class IngestionOrchestrator:
             "batch": {
                 "batchIndex": batch.batch_index,
                 "chunks": [item.model_dump(by_alias=True, mode="json") for item in chunks],
+                # Cung cấp danh sách thực thể đã trích xuất từ các batch trước để LLM liên kết ID
                 "canonicalGraphContext": _canonical_context(workspace, batch_index),
             },
         }
@@ -118,10 +153,20 @@ class IngestionOrchestrator:
         batch_index: int,
         graph_fragment: dict[str, Any],
     ) -> dict[str, Any]:
+        """Xác thực và lưu tạm (stage) mảnh đồ thị tri thức do LLM trích xuất cho một batch.
+
+        Quy trình xử lý:
+            1. Kiểm tra giới hạn số lần sửa lỗi (`MAX_BATCH_VALIDATION_ATTEMPTS`).
+            2. Validate schema Pydantic (`GraphPatchFragment`).
+            3. Validate tính hợp lệ với Ontology (các quan hệ, thuộc tính bắt buộc, bằng chứng nguồn).
+            4. Lưu tạm vào Neo4j Staging và PostgreSQL Staged Cache.
+        """
         workspace = await self._required_workspace(ingestion_id)
         batch = next((item for item in workspace.batches if item.batch_index == batch_index), None)
         if batch is None:
             return _error("batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index))
+
+        # Kiểm tra nếu số lần thử sửa lỗi đã vượt quá giới hạn cho phép
         if batch.validation_attempts >= MAX_BATCH_VALIDATION_ATTEMPTS and batch.status == "REPAIR_REQUIRED":
             failed = await self.repository.mark_failed(
                 ingestion_id,
@@ -129,6 +174,8 @@ class IngestionOrchestrator:
                 f"Batch {batch_index} exceeded the validation retry limit",
             )
             return self._status(failed)
+
+        # 1. Kiểm tra cấu trúc dữ liệu theo schema Pydantic
         try:
             fragment = GraphPatchFragment.model_validate(graph_fragment)
         except ValidationError as exc:
@@ -146,6 +193,7 @@ class IngestionOrchestrator:
             )
             return self._batch_failure(workspace, batch_index, issues)
 
+        # 2. Kiểm tra tính hợp lệ với Ontology tương ứng
         projection = await self.ontology_cache.get(workspace.job.scope_hint or "core")
         issues = [
             item.model_dump(by_alias=True, mode="json")
@@ -153,12 +201,14 @@ class IngestionOrchestrator:
                 fragment, workspace_chunks(workspace, batch.chunk_indexes)
             )
         ]
+        # Nếu có lỗi vi phạm ontology hoặc bằng chứng trích dẫn không khớp
         if issues:
             workspace = await self.repository.store_batch_result(
                 ingestion_id, batch_index, None, issues
             )
             return self._batch_failure(workspace, batch_index, issues)
 
+        # 3. Lưu tạm fragment vào Neo4j Staging và cập nhật trạng thái STAGED trong PostgreSQL
         payload = fragment.model_dump(by_alias=True, mode="json")
         await self.graph_store.stage_batch(ingestion_id, batch_index, payload)
         workspace = await self.repository.store_batch_result(
@@ -169,6 +219,13 @@ class IngestionOrchestrator:
         return result
 
     async def finalize(self, ingestion_id: str) -> dict[str, Any]:
+        """Xác thực toàn bộ tài liệu sau khi tất cả các batch đã được nạp.
+
+        Quy trình:
+            1. Kiểm tra xem còn batch nào chưa ở trạng thái 'STAGED' hay không.
+            2. Nếu có batch bị lỗi hoặc chưa nạp, trả về stage 'repair_required' cùng danh sách batch index.
+            3. Nếu tất cả đều STAGED, tính toán chữ ký sẵn sàng (fingerprint) và chuyển trạng thái sang READY.
+        """
         workspace = await self._required_workspace(ingestion_id)
         incomplete = [
             item.batch_index for item in workspace.batches if item.status != "STAGED"
@@ -195,6 +252,15 @@ class IngestionOrchestrator:
         return self._status(workspace)
 
     async def fill(self, ingestion_id: str) -> dict[str, Any]:
+        """Ghi chính thức tri thức đã nạp từ Staging vào đồ thị Neo4j.
+
+        Quy trình:
+            1. Kiểm tra điều kiện tiên quyết (Job phải ở trạng thái READY và fingerprint khớp).
+            2. Đánh dấu trạng thái WRITING trong PostgreSQL.
+            3. Chuyển dữ liệu vào Neo4j Graph Store, đồng thời vô hiệu hóa phiên bản cũ (nếu có).
+            4. Thực hiện đọc kiểm chứng (read-back) từ Neo4j để đảm bảo tính toàn vẹn.
+            5. Đánh dấu COMMITTED và dọn dẹp dữ liệu staging tạm thời.
+        """
         workspace = await self._required_workspace(ingestion_id)
         if workspace.job.status == IngestionJobStatus.COMMITTED:
             return self._status(workspace, idempotent=True)
@@ -219,6 +285,7 @@ class IngestionOrchestrator:
             await self.graph_store.purge_staging(ingestion_id)
             return {**self._status(committed), **result}
         except Exception as exc:  # noqa: BLE001 - persistence failures require reconciliation
+            # Trong trường hợp lỗi ghi dữ liệu, thực hiện đối soát để tránh mất dữ liệu đã commit 1 phần
             reconciled = await self.graph_store.committed_summary(str(workspace.version.id))
             if reconciled is not None:
                 committed = await self.repository.mark_committed(ingestion_id, reconciled)
@@ -233,9 +300,11 @@ class IngestionOrchestrator:
             )
 
     async def status(self, ingestion_id: str) -> dict[str, Any]:
+        """Truy vấn trạng thái hiện tại của Workspace."""
         return self._status(await self._required_workspace(ingestion_id))
 
     async def load_scope(self, scope_key: str) -> dict[str, Any]:
+        """Tải schema ontology thu gọn theo phạm vi scope_key."""
         projection = await self.ontology_cache.get(scope_key)
         return {
             "success": True,
@@ -247,6 +316,7 @@ class IngestionOrchestrator:
         }
 
     async def validate_patch(self, graph_patch: dict[str, Any]) -> dict[str, Any]:
+        """Kiểm tra tính hợp lệ của graph patch độc lập không qua lưu trữ."""
         try:
             fragment = GraphPatchFragment.model_validate(graph_patch)
         except ValidationError as exc:
@@ -272,6 +342,7 @@ class IngestionOrchestrator:
         }
 
     async def delete_document(self, document_id: str, if_missing: str) -> dict[str, Any]:
+        """Vô hiệu hóa tài liệu và thu hồi tri thức trong Neo4j."""
         try:
             document, version = await self.repository.set_document_version_status(
                 document_id, None, SourceVersionStatus.DELETED
@@ -284,6 +355,7 @@ class IngestionOrchestrator:
         return {"success": True, "stage": "deleted", "terminal": True, "ingestionId": None, "nextAction": None, "documentId": str(document.id), **result}
 
     async def rollback_version(self, document_id: str, version_id: str) -> dict[str, Any]:
+        """Khôi phục tài liệu về phiên bản cũ hơn dựa trên provenance."""
         try:
             document, version = await self.repository.set_document_version_status(
                 document_id, version_id, SourceVersionStatus.ROLLED_BACK
@@ -294,6 +366,7 @@ class IngestionOrchestrator:
         return {"success": True, "stage": "rolled_back", "terminal": True, "ingestionId": None, "nextAction": None, "documentId": str(document.id), **result}
 
     async def _required_workspace(self, ingestion_id: str) -> Workspace:
+        """Tìm nạp Workspace bắt buộc; ném ngoại lệ nếu không tìm thấy."""
         workspace = await self.repository.get_workspace(ingestion_id)
         if workspace is None:
             raise KeyError(f"Unknown ingestionId: {ingestion_id}")

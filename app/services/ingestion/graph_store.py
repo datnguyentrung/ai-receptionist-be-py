@@ -12,11 +12,22 @@ from app.services.ingestion.repository import Workspace
 
 
 class Neo4jIngestionStore:
+    """Kho lưu trữ và thao tác đồ thị tri thức Taekwondo trên Neo4j.
+
+    Trách nhiệm:
+        - Lưu trữ các batch đang ở trạng thái nháp/tạm thời (Staging nodes).
+        - Khi commit (`fill`): Chuyển hóa các thực thể tri thức (`TaekwondoKnowledgeEntity`),
+          quan hệ (`TaekwondoKnowledgeRelation`) và gắn liên kết với phiên bản tài liệu nguồn
+          (`TaekwondoSourceVersion`) để phục vụ truy vết (Provenance).
+        - Thực hiện truy vấn đọc kiểm chứng (Read-back verification) để đảm bảo dữ liệu ghi thành công.
+    """
+
     def __init__(self, driver: AsyncDriver, database: str) -> None:
         self._driver = driver
         self._database = database
 
     async def stage_batch(self, ingestion_id: str, batch_index: int, fragment: dict) -> None:
+        """Lưu tạm mảnh đồ thị của một batch vào node TaekwondoIngestionBatch trên Neo4j."""
         payload = json.dumps(fragment, ensure_ascii=False, sort_keys=True)
         async with self._driver.session(database=self._database) as session:
             async def write_staging(tx: Any) -> None:
@@ -37,10 +48,14 @@ class Neo4jIngestionStore:
             await session.execute_write(write_staging)
 
     async def fill(self, workspace: Workspace) -> dict[str, Any]:
+        """Ghi chính thức toàn bộ tri thức của Workspace vào Neo4j và đọc kiểm chứng."""
+        # 1. Hợp nhất các mảnh graph fragment từ tất cả các batch
         fragments = [item.graph_fragment for item in workspace.batches if item.graph_fragment]
         nodes, edges = _merge_fragments(fragments)
         ingestion_id = str(workspace.job.id)
         version_id = str(workspace.version.id)
+
+        # 2. Thực thi transaction ghi thực thể, quan hệ và liên kết nguồn gốc
         async with self._driver.session(database=self._database) as session:
             result = await session.execute_write(
                 self._write_and_verify,

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -13,7 +14,10 @@ class Settings(BaseSettings):
     FACE_EMBEDDING_DIMENSION: int = 512
     MAX_IMAGE_SIZE_BYTES: int = 5 * 1024 * 1024
     ALLOWED_IMAGE_TYPES: str = "image/jpeg,image/png"
-    GEMINI_API_KEY: str = ""
+    GEMINI_API_KEY: str = Field(
+        default="",
+        validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
     SERVER_PUBLIC_URL: str = ""

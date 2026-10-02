@@ -48,6 +48,7 @@ class OntologyProperty(Base):
             "technical_name",
             name="uq_ontology_property_entity_name",
         ),
+        {"schema": "ontology"},
     )
 
     # Khóa chính định danh thuộc tính (UUID v4)

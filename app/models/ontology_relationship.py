@@ -45,6 +45,7 @@ class OntologyRelationship(Base):
             "target_entity_type_id",
             name="uq_ontology_relationship_definition",
         ),
+        {"schema": "ontology"},
     )
 
     # Khóa chính định danh quan hệ (UUID v4)

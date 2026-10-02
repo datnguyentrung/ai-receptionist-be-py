@@ -22,6 +22,7 @@ from app.db.base import Base
 
 class IngestionDocument(Base):
     __tablename__ = "ingestion_document"
+    __table_args__ = {"schema": "ontology"}
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
@@ -36,6 +37,7 @@ class IngestionDocumentVersion(Base):
     __tablename__ = "ingestion_document_version"
     __table_args__ = (
         UniqueConstraint("document_id", "ingestion_signature", name="uq_ingestion_document_signature"),
+        {"schema": "ontology"},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -57,6 +59,7 @@ class IngestionDocumentVersion(Base):
 
 class IngestionJob(Base):
     __tablename__ = "ingestion_job"
+    __table_args__ = {"schema": "ontology"}
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ingestion_document_version.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -78,6 +81,7 @@ class IngestionChunk(Base):
     __table_args__ = (
         UniqueConstraint("document_version_id", "chunk_index", name="uq_ingestion_chunk_version_index"),
         UniqueConstraint("chunk_id", name="uq_ingestion_chunk_id"),
+        {"schema": "ontology"},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -97,6 +101,7 @@ class IngestionBatch(Base):
     __tablename__ = "ingestion_batch"
     __table_args__ = (
         UniqueConstraint("job_id", "batch_index", name="uq_ingestion_batch_job_index"),
+        {"schema": "ontology"},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -112,6 +117,7 @@ class IngestionBatch(Base):
 
 class IngestionExtractionCache(Base):
     __tablename__ = "ingestion_extraction_cache"
+    __table_args__ = {"schema": "ontology"}
 
     cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     document_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ingestion_document_version.id", ondelete="CASCADE"), nullable=False, index=True)
