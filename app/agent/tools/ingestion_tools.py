@@ -9,7 +9,7 @@ from typing import Any
 from google.adk.tools import ToolContext
 
 from app.core.ingestion_runtime import get_service_container
-from app.schemas import GraphPatchFragment
+from app.schemas import SemanticGraphPatchFragment
 from app.services.ingestion import operations
 from app.utils.ingestion_logger import log_ingestion_event
 
@@ -131,10 +131,10 @@ async def submit_ingestion_batch(
     ingestion_id: str,
     batch_index: int,
     scope_keys: list[str],
-    graph_fragment: GraphPatchFragment,
+    graph_fragment: SemanticGraphPatchFragment,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Xác thực và lưu tạm (stage) một mảnh đồ thị tri thức (GraphPatchFragment) cho batch."""
+    """Compile, validate and stage one LLM-facing semantic graph fragment."""
     fragment_dict = (
         graph_fragment.model_dump(by_alias=True, mode="json")
         if hasattr(graph_fragment, "model_dump")
@@ -152,6 +152,15 @@ async def submit_ingestion_batch(
     }
     try:
         container = await get_service_container()
+        # Lấy thông tin phiên bản fragment và lỗi trước đó nếu có (phục vụ tính REPAIR_DIFF)
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
+        prev_batch = next(
+            (b for b in workspace.batches if b.batch_index == batch_index), None
+        )
+        prev_fragment = prev_batch.semantic_fragment if prev_batch else None
+        prev_issues = prev_batch.validation_issues if prev_batch else []
+        prev_attempts = prev_batch.validation_attempts if prev_batch else 0
+
         result = await operations.submit_batch(
             container.repository,
             container.ontology_cache,
@@ -178,8 +187,15 @@ async def submit_ingestion_batch(
             )
             if result.get(key) is not None
         }
-        # Thêm thông tin nodes & edges vào log payload để theo dõi
-        merged_payload = {**result, **fragment_dict}
+
+        # Đóng gói payload chi tiết cho logger: EXTRACT_RESULT + REPAIR_DIFF
+        merged_payload = {
+            **result,
+            "extractResult": fragment_dict,
+            "previousFragment": prev_fragment,
+            "previousIssues": prev_issues,
+            "validationAttempts": prev_attempts + 1 if prev_fragment or prev_issues else 0,
+        }
         log_ingestion_event(
             f"SUBMIT_BATCH [idx={batch_index}, scopes={scope_keys}]",
             payload=merged_payload,
@@ -197,16 +213,29 @@ async def finalize_ingestion(
     ingestion_id: str,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Kiểm tra độ phủ toàn bộ tài liệu và tạo chữ ký sẵn sàng (readiness fingerprint)."""
+    """Kiểm tra toàn bộ batch và tạo readiness fingerprint deterministic."""
     req = {"ingestion_id": ingestion_id}
     try:
         container = await get_service_container()
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
         result = await operations.finalize(container.repository, ingestion_id)
         tool_context.state["ingestion_checkpoint"] = {
             "stage": result.get("stage"),
             "repairBatchIndexes": result.get("repairBatchIndexes", []),
         }
-        log_ingestion_event("FINALIZE", payload=result, request=req)
+
+        # Đóng gói danh sách batches cho MERGE_RESULT phân tích cross-batch
+        merged_payload = {
+            **result,
+            "batchesForMerge": [
+                {
+                    "batch_index": b.batch_index,
+                    "graph_fragment": b.graph_fragment,
+                }
+                for b in workspace.batches
+            ],
+        }
+        log_ingestion_event("FINALIZE", payload=merged_payload, request=req)
         return result
     except Exception as exc:
         log_ingestion_event("FINALIZE", error=str(exc), request=req)
@@ -221,11 +250,30 @@ async def fill_ingestion(
     req = {"ingestion_id": ingestion_id}
     try:
         container = await get_service_container()
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
+        fragments = [item.graph_fragment for item in workspace.batches if item.graph_fragment]
+
+        # Tóm tắt payload chuẩn bị ghi (FILL)
+        fill_prep = {
+            "entities_count": sum(len(f.get("nodes", [])) for f in fragments),
+            "entities": [
+                {"className": n.get("className"), "identity": n.get("identity"), "tempId": n.get("tempId")}
+                for f in fragments for n in f.get("nodes", [])
+            ],
+            "facts_count": sum(len(n.get("properties", [])) for f in fragments for n in f.get("nodes", [])),
+            "relations_count": sum(len(f.get("edges", [])) for f in fragments),
+            "chunks_count": len(workspace.chunks),
+        }
+
         result = await operations.fill(
             container.repository, container.graph_store, ingestion_id
         )
         tool_context.state["ingestion_checkpoint"] = {"stage": result.get("stage")}
-        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=result, request=req)
+        merged_payload = {
+            **result,
+            "fillPreparation": fill_prep,
+        }
+        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=merged_payload, request=req)
         return result
     except Exception as exc:
         log_ingestion_event("FILL_COMMIT_TO_NEO4J", error=str(exc), request=req)

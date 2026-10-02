@@ -6,6 +6,7 @@ by :class:`OntologyCompiler`, never assembled on the ingestion read path.
 """
 
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -28,10 +29,12 @@ from app.schemas.ingestion_schema import (
     OntologyProjection,
     OntologyScopeSummary,
     PreparedChunk,
+    SemanticGraphPatchFragment,
     ValidationIssue,
 )
 
 COMPILER_VERSION = "ontology-compiler-v2"
+logger = logging.getLogger(__name__)
 
 
 class OntologyRegistry:
@@ -60,11 +63,100 @@ class OntologyRegistry:
         self.relationships = {
             item["technicalName"]: item for item in projection.relationships
         }
+        self._entity_names = self._name_index(projection.entity_types)
+        self._relationship_names = self._name_index(projection.relationships)
+        self._property_names: dict[str, dict[str, str]] = {}
+        for item in projection.properties:
+            self._property_names.setdefault(item["entityType"], {})[
+                item["technicalName"].casefold()
+            ] = item["technicalName"]
+        self._install_declared_aliases()
+
+    @staticmethod
+    def _name_index(items: Iterable[dict[str, Any]]) -> dict[str, str]:
+        return {item["technicalName"].casefold(): item["technicalName"] for item in items}
+
+    def _install_declared_aliases(self) -> None:
+        targets: dict[tuple[str, str], tuple[str, str | None]] = {}
+        for item in self.projection.entity_types:
+            targets[("ENTITY_TYPE", str(item.get("id")))] = (
+                item["technicalName"], None
+            )
+        for item in self.projection.relationships:
+            targets[("RELATIONSHIP", str(item.get("id")))] = (
+                item["technicalName"], None
+            )
+        for item in self.projection.properties:
+            targets[("PROPERTY", str(item.get("id")))] = (
+                item["technicalName"], item["entityType"]
+            )
+        for alias in self.projection.aliases:
+            target = targets.get((alias.get("targetType"), str(alias.get("targetId"))))
+            alias_value = alias.get("alias")
+            if not target or not isinstance(alias_value, str):
+                continue
+            technical_name, entity_name = target
+            if alias.get("targetType") == "ENTITY_TYPE":
+                self._entity_names[alias_value.casefold()] = technical_name
+            elif alias.get("targetType") == "RELATIONSHIP":
+                self._relationship_names[alias_value.casefold()] = technical_name
+            elif entity_name:
+                self._property_names.setdefault(entity_name, {})[
+                    alias_value.casefold()
+                ] = technical_name
+
+    def resolve_entity_name(self, value: str) -> str | None:
+        return value if value in self.entity_types else self._entity_names.get(value.casefold())
+
+    def resolve_property_name(self, class_name: str, value: str) -> str | None:
+        if (class_name, value) in self.properties:
+            return value
+        return self._property_names.get(class_name, {}).get(value.casefold())
+
+    def resolve_relationship_name(self, value: str) -> str | None:
+        return value if value in self.relationships else self._relationship_names.get(value.casefold())
+
+    def canonicalize_semantic_fragment(
+        self, fragment: SemanticGraphPatchFragment
+    ) -> SemanticGraphPatchFragment:
+        """Apply exact, casefold and declared-alias resolution; never fuzzy match."""
+        node_classes: dict[str, str] = {}
+        nodes = []
+        for node in fragment.nodes:
+            class_name = self.resolve_entity_name(node.class_name) or node.class_name
+            node_classes[node.temp_id] = class_name
+            properties = [
+                fact.model_copy(
+                    update={
+                        "property_name": self.resolve_property_name(
+                            class_name, fact.property_name
+                        )
+                        or fact.property_name
+                    }
+                )
+                for fact in node.properties
+            ]
+            nodes.append(
+                node.model_copy(
+                    update={"class_name": class_name, "properties": properties}
+                )
+            )
+        edges = [
+            edge.model_copy(
+                update={
+                    "edge_name": self.resolve_relationship_name(edge.edge_name)
+                    or edge.edge_name
+                }
+            )
+            for edge in fragment.edges
+        ]
+        return fragment.model_copy(update={"nodes": nodes, "edges": edges})
 
     def validate_fragment(
         self,
         fragment: GraphPatchFragment,
         chunks: Iterable[PreparedChunk],
+        external_node_types: dict[str, str] | None = None,
     ) -> list[ValidationIssue]:
         """Xác thực toàn diện mảnh đồ thị (GraphPatchFragment) đối chiếu với các chunks văn bản.
 
@@ -120,7 +212,7 @@ class OntologyRegistry:
             )
 
         # 3. Kiểm tra tính hợp lệ của từng Thực thể (Node) và các Thuộc tính (Properties)
-        node_types: dict[str, str] = {}
+        node_types: dict[str, str] = dict(external_node_types or {})
         for node_index, node in enumerate(fragment.nodes):
             node_types[node.temp_id] = node.class_name
             if node.class_name not in self.entity_types:
@@ -141,12 +233,34 @@ class OntologyRegistry:
                     if field not in node.identity:
                         issues.append(
                             ValidationIssue(
-                                code="IDENTITY_FIELD_MISSING",
-                                message=f"Identity field {field} is required for {node.class_name}",
+                                code="INTERNAL_IDENTITY_COMPILATION_ERROR",
+                                message=f"Compiler omitted identity field {field} for {node.class_name}",
                                 location=f"nodes.{node_index}.identity.{field}",
+                            )
+                        )
+                    elif field not in supplied_properties:
+                        issues.append(
+                            ValidationIssue(
+                                code="IDENTITY_SOURCE_PROPERTY_MISSING",
+                                message=f"Identity source property {field} is missing for {node.class_name}",
+                                location=f"nodes.{node_index}.properties",
                                 retryable=True,
                             )
                         )
+                    else:
+                        source_value = next(
+                            fact.value for fact in node.properties
+                            if fact.property_name == field
+                        )
+                        normalized = source_value.strip() if isinstance(source_value, str) else source_value
+                        if node.identity.get(field) != normalized:
+                            issues.append(
+                                ValidationIssue(
+                                    code="IDENTITY_PROPERTY_MISMATCH",
+                                    message=f"Identity field {field} does not match its source property",
+                                    location=f"nodes.{node_index}.identity.{field}",
+                                )
+                            )
                 for (entity_name, property_name), property_contract in self.properties.items():
                     if (
                         entity_name == node.class_name
@@ -207,6 +321,16 @@ class OntologyRegistry:
             else:
                 source_type = node_types.get(edge.source_temp_id)
                 target_type = node_types.get(edge.target_temp_id)
+                if source_type is None or target_type is None:
+                    issues.append(
+                        ValidationIssue(
+                            code="UNKNOWN_ENTITY_REFERENCE",
+                            message="Relationship endpoint does not resolve to a local or staged entity",
+                            location=f"edges.{edge_index}",
+                            retryable=True,
+                        )
+                    )
+                    continue
                 if (
                     source_type != contract["sourceEntityType"]
                     or target_type != contract["targetEntityType"]
@@ -241,11 +365,27 @@ class OntologyRegistry:
                         location=f"{location}.{index}",
                     )
                 )
-            elif _normalize_quote(evidence.text) not in _normalize_quote(chunk.text):
+            else:
+                evidence_text = _normalize_quote(evidence.text)
+                chunk_text = _normalize_quote(chunk.text)
+                if evidence_text in chunk_text:
+                    continue
+                reason, preview = _evidence_failure_reason(evidence_text, chunk_text)
+                logger.info(
+                    "EVIDENCE_GROUNDING location=%s chunkIndex=%s reason=%s evidence=%r nearest=%r",
+                    f"{location}.{index}.text",
+                    evidence.chunk_index,
+                    reason,
+                    evidence_text[:120],
+                    preview[:120],
+                )
                 issues.append(
                     ValidationIssue(
                         code="EVIDENCE_NOT_GROUNDED",
-                        message="Evidence text must be a verbatim excerpt from its chunk",
+                        message=(
+                            "Evidence text must be a verbatim excerpt from its chunk "
+                            f"({reason}); evidence={evidence_text[:120]!r}; nearest={preview[:120]!r}"
+                        ),
                         location=f"{location}.{index}.text",
                         retryable=True,
                     )
@@ -477,6 +617,27 @@ def _normalize_quote(value: str) -> str:
     return (
         unicodedata.normalize("NFKC", value).replace("\r\n", "\n").replace("\r", "\n")
     )
+
+
+def _evidence_failure_reason(evidence_text: str, chunk_text: str) -> tuple[str, str]:
+    plain_evidence = re.sub(r"[*_`|]+", "", evidence_text)
+    plain_chunk = re.sub(r"[*_`|]+", "", chunk_text)
+    if plain_evidence and plain_evidence in plain_chunk:
+        return "MARKDOWN_MISMATCH", _nearest_preview(plain_evidence, plain_chunk)
+    if "\n" in chunk_text and evidence_text.replace("\n", " ") in chunk_text.replace("\n", " "):
+        return "LINE_JOIN_MISMATCH", _nearest_preview(evidence_text.replace("\n", " "), chunk_text.replace("\n", " "))
+    if evidence_text and any(line.startswith(evidence_text) or evidence_text.startswith(line) for line in chunk_text.splitlines() if line):
+        return "TRUNCATED_QUOTE", _nearest_preview(evidence_text, chunk_text)
+    return "TEXT_NOT_FOUND", _nearest_preview(evidence_text, chunk_text)
+
+
+def _nearest_preview(needle: str, haystack: str) -> str:
+    tokens = [token for token in re.split(r"\s+", needle.strip()) if token]
+    for token in sorted(tokens, key=len, reverse=True):
+        index = haystack.find(token)
+        if index >= 0:
+            return haystack[max(0, index - 60): index + len(token) + 60]
+    return haystack[:160]
 
 
 __all__ = ["COMPILER_VERSION", "OntologyCache", "OntologyRegistry", "merge_projections"]

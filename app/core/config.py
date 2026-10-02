@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     ADK_SESSION_DB_URI: str = "sqlite:///./.adk/sessions.db"
     INGESTION_MAX_FILE_SIZE_BYTES: int = 20 * 1024 * 1024
     INGESTION_CHUNK_SIZE_CHARS: int = 6000
-    INGESTION_BATCH_SIZE: int = 3
+    INGESTION_BATCH_SIZE: int = 5
     INGESTION_SHUTDOWN_TIMEOUT_SECONDS: float = 15.0
 
     # GraphRAG retrieval/indexing
@@ -94,7 +94,11 @@ class Settings(BaseSettings):
 
     @property
     def adk_allowed_origins(self) -> list[str]:
-        return [value.strip() for value in self.ADK_ALLOWED_ORIGINS.split(",") if value.strip()]
+        return [
+            value.strip()
+            for value in self.ADK_ALLOWED_ORIGINS.split(",")
+            if value.strip()
+        ]
 
 
 settings = Settings()

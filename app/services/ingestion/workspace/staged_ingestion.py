@@ -234,18 +234,33 @@ class IngestionWorkspaceService:
         """
         Chia chunk thành các batch theo giới hạn số lượng, ký tự và token ước lượng.
         """
+        return IngestionWorkspaceService.partition(
+            chunks,
+            max_batch_chunks=MAX_BATCH_CHUNKS,
+            max_batch_chars=MAX_BATCH_CHARS,
+        )
+
+    @staticmethod
+    def partition(
+        chunks: list[DocumentChunk],
+        *,
+        max_batch_chunks: int,
+        max_batch_chars: int,
+    ) -> list[IngestionBatch]:
+        """Chia chunk thành batch theo cấu hình runtime đã truyền vào."""
         if not chunks:
             raise ValueError("At least one source chunk is required")
         batches: list[IngestionBatch] = []
         current: list[DocumentChunk] = []
         current_chars = 0
         current_tokens = 0
-        max_batch_chunks = 1 if TRUE_CHUNK_CACHE_MODE else MAX_BATCH_CHUNKS
+        max_batch_chunks = 1 if TRUE_CHUNK_CACHE_MODE else max(1, max_batch_chunks)
+        max_batch_chars = max(1_000, max_batch_chars)
         for chunk in chunks:
             chunk_chars = len(chunk.content)
             chunk_tokens = max(1, math.ceil(chunk_chars / ESTIMATED_CHARS_PER_TOKEN))
             if (
-                chunk_chars > MAX_BATCH_CHARS
+                chunk_chars > max_batch_chars
                 or chunk_tokens > MAX_BATCH_ESTIMATED_TOKENS
             ):
                 raise ValueError(
@@ -254,7 +269,7 @@ class IngestionWorkspaceService:
                 )
             would_overflow = (
                 len(current) >= max_batch_chunks
-                or current_chars + chunk_chars > MAX_BATCH_CHARS
+                or current_chars + chunk_chars > max_batch_chars
                 or current_tokens + chunk_tokens > MAX_BATCH_ESTIMATED_TOKENS
             )
             if current and would_overflow:

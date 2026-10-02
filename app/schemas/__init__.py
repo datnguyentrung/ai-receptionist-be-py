@@ -1,3 +1,7 @@
-from app.schemas.ingestion_schema import GraphPatchFragment, OntologyProjection
+from app.schemas.ingestion_schema import (
+    GraphPatchFragment,
+    OntologyProjection,
+    SemanticGraphPatchFragment,
+)
 
-__all__ = ["GraphPatchFragment", "OntologyProjection"]
+__all__ = ["GraphPatchFragment", "OntologyProjection", "SemanticGraphPatchFragment"]

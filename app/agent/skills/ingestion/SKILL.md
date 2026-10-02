@@ -43,11 +43,20 @@ Không tự viết SQL/Cypher, không tự bỏ qua giai đoạn, không tự th
 - Không làm mất đoạn nguồn hoặc bằng chứng khi một mẻ bị chặn.
 - Chỉ xử lý mẻ kế tiếp sau khi mẻ hiện tại đã `STAGED` hoặc đã chuyển sang trạng thái
   chờ phê duyệt có chủ đích.
-- Tác nhân gốc không được tự sinh `GraphPatchFragment`.
-- Mọi `GraphPatchFragment` phải được tạo bởi `ingestion_batch_extractor`
-  với `output_schema=GraphPatchFragment`.
-- Không được đổi tên trường, thêm trường, bỏ trường hoặc dựng lại một cấu trúc khác
-  từ kết quả của `ingestion_batch_extractor`.
+- Trong ingestion, tác nhân gốc đồng thời là semantic mapper.
+- Tác nhân chỉ quyết định `className`, properties, edges, evidence và coverage.
+- Tác nhân KHÔNG tạo `identity`. Python dựng identity từ
+  `ontology.entityTypes[*].identityStrategy.required`.
+- Mỗi semantic mapping phải kết thúc bằng đúng một lần
+  `submit_ingestion_batch`; không tồn tại bước extract độc lập.
+- Khi `get_ingestion_batch` trả `canonicalGraphContext`, dùng `ref` dạng
+  `entity:<stable-key>` làm `sourceTempId` hoặc `targetTempId` để nối quan hệ tới
+  entity đã `STAGED` ở mẻ trước. Không phát lại node cũ chỉ để tạo edge.
+- Nếu một quan hệ cần entity chưa có trong mẻ hiện tại hoặc `canonicalGraphContext`,
+  trì hoãn quan hệ đó; không tạo node không có bằng chứng trong chunk hiện tại.
+- Evidence phải trích nguyên văn từ `chunks[*].text` đã được Python chuẩn hóa
+  thành canonical plain text. Không trích từ Markdown raw nếu ký tự `**`, bảng `|`
+  hoặc xuống dòng đã được chuẩn hóa khác đi.
 
 ## Thứ tự xử lý bắt buộc cho mỗi mẻ
 
@@ -56,15 +65,11 @@ Không tự viết SQL/Cypher, không tự bỏ qua giai đoạn, không tự th
    - `list_ontology_scopes`
    - chọn tập phạm vi phù hợp
 3. `load_ontology_scopes`
-4. `ingestion_batch_extractor`
+4. Tác nhân gốc tạo trực tiếp `SemanticGraphPatchFragment` từ chunks và ontology.
 5. `submit_ingestion_batch`
 
-Không được bỏ qua bước 4.
-
-Không được để tác nhân gốc tự tạo `GraphPatchFragment`.
-
-Không được gọi `submit_ingestion_batch` nếu chưa có kết quả từ
-`ingestion_batch_extractor`.
+Sau `load_ontology_scopes`, thao tác ingestion kế tiếp phải là
+`submit_ingestion_batch`. Không gọi extraction sub-agent hay extractor tool.
 
 ## A. Bắt đầu và chuẩn bị tài liệu
 
@@ -103,7 +108,8 @@ Với đúng `nextBatch.batchIndex`:
    - danh mục phạm vi;
    - `scope_hint` nếu có, nhưng chỉ coi là gợi ý;
 
-   chọn tập phạm vi nhỏ nhất nhưng đủ bao phủ các khái niệm trong mẻ.
+   xét từng chunk, xác định khái niệm của chunk rồi chọn hợp của các scope cần thiết:
+   tập phạm vi nhỏ nhất nhưng đủ bao phủ toàn bộ mẻ.
 
    Một mẻ có thể sử dụng một hoặc nhiều phạm vi.
 
@@ -121,47 +127,23 @@ Với đúng `nextBatch.batchIndex`:
 
    thì dừng mẻ và báo lỗi dữ liệu bản thể.
 
-5. BẮT BUỘC gọi `ingestion_batch_extractor`.
+5. Dựa trực tiếp trên chunks từ `get_ingestion_batch` và ontology vừa tải,
+   tác nhân gốc tạo `SemanticGraphPatchFragment`.
 
-   Không được tự tạo `GraphPatchFragment` trong tác nhân gốc.
+   Fragment semantic tuyệt đối không có trường `identity`. Không sao chép chunks
+   qua một tác nhân trung gian và không gọi model lần nữa trước khi submit.
 
-   Truyền cho `ingestion_batch_extractor` đúng dữ liệu đầu vào theo
-   `BatchExtractionInput`, gồm:
-
-   - `ontologyVersion`: phiên bản bản thể đã ghim cho ingestion hiện tại;
-   - `scopeKeys`: chính xác tập phạm vi đã chọn ở bước 3;
-   - `chunks`: toàn bộ các đoạn của mẻ hiện tại;
-   - `ontology`: lược đồ hợp nhất trả về từ `load_ontology_scopes`.
-
-6. `ingestion_batch_extractor` là nguồn duy nhất được phép tạo
-   `GraphPatchFragment`.
-
-   Đầu ra của nó đã được ràng buộc bởi:
-
-   `output_schema=GraphPatchFragment`
-
-   Tác nhân gốc không được:
-   - tự viết lại cấu trúc đầu ra;
-   - tự đổi tên trường;
-   - tạo một JSON mới dựa trên kết quả;
-   - đổi `nodes` thành `entities`;
-   - đổi `edges` thành `relationships`;
-   - đổi `coverage` thành `chunkCoverages`, `chunks` hoặc tên khác;
-   - thêm trường ngoài lược đồ;
-   - bỏ trường bắt buộc.
-
-7. Kết quả có cấu trúc trả về từ `ingestion_batch_extractor`
-   phải được dùng nguyên trạng làm `graph_fragment`.
-
-   Không tự kiểm tra lại bằng cách suy đoán tên trường.
+6. Bảo đảm:
 
    Các quy tắc nghiệp vụ vẫn phải được bảo đảm:
    - mọi đoạn nguồn có đúng một mục `coverage`;
    - quyết định coverage chỉ là `MAPPED` hoặc `NOT_RELEVANT`;
    - thuộc tính và quan hệ phải có bằng chứng nguyên văn;
    - chỉ sử dụng loại thực thể, thuộc tính và quan hệ có trong lược đồ đã tải.
+   - edge endpoint được dùng tempId node mới trong fragment hiện tại hoặc `ref`
+     từ `canonicalGraphContext`; không dùng tempId của batch trước.
 
-8. Gọi:
+7. Gọi ngay:
 
    `submit_ingestion_batch(
        ingestion_id,
@@ -170,13 +152,12 @@ Với đúng `nextBatch.batchIndex`:
        graph_fragment
    )`
 
-   Trong đó `graph_fragment` là nguyên kết quả của
-   `ingestion_batch_extractor`.
+   Python sẽ canonicalize tên, dựng identity, validate, guard repair và stage.
 
-   Không biến đổi `graph_fragment` trước khi gửi.
-
-9. Chỉ khi `submit_ingestion_batch` trả mẻ ở trạng thái `STAGED`
+8. Chỉ khi `submit_ingestion_batch` trả mẻ ở trạng thái `STAGED`
    mới chuyển sang mẻ kế tiếp.
+
+9. Nếu `terminal=true`, dừng ngay; không retry và không chuyển batch.
 
 ### Khi gửi mẻ thất bại
 
@@ -202,9 +183,10 @@ Khi đó:
 5. Giữ nguyên mẻ hiện tại.
 6. Giữ nguyên tập phạm vi nếu chúng vẫn hợp lệ.
 7. Giữ nguyên lược đồ đã tải nếu chúng vẫn hợp lệ.
-8. Gọi lại `ingestion_batch_extractor` để tạo lại
-   `GraphPatchFragment` đúng cấu trúc.
-9. Gửi lại đúng mẻ hiện tại bằng `submit_ingestion_batch`.
+8. Đọc semantic fragment trước cùng validation errors, chỉ sửa đúng phần lỗi
+   và giữ mọi fact/node/edge hợp lệ không liên quan.
+9. Gửi lại đúng mẻ hiện tại bằng `submit_ingestion_batch`; không có bước
+   extract độc lập trước submit.
 
 Nếu ngữ cảnh hiện tại không còn đủ dữ liệu cần thiết thì chỉ lấy lại
 những dữ liệu thiếu tối thiểu; không tự khởi động lại toàn bộ quy trình.
@@ -220,7 +202,7 @@ Nếu mô hình dùng sai lược đồ:
 
 1. Không tạo đề xuất.
 2. Giữ nguyên phạm vi/lược đồ hiện tại nếu vẫn phù hợp.
-3. Gọi lại `ingestion_batch_extractor`.
+3. Sửa đúng semantic fragment theo schema đã tải và giữ các fact hợp lệ.
 4. Gửi lại đúng mẻ hiện tại.
 
 Chỉ khi nội dung thật sự không thể biểu diễn bằng bản thể hiện có mới đi vào

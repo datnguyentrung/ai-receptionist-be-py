@@ -1,9 +1,9 @@
 """Public contracts for Taekwondo document ingestion."""
 
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 # dict[str, Any] tự do nhưng JSON Schema không chứa additionalProperties
 # (Gemini Developer API không hỗ trợ additionalProperties)
@@ -64,6 +64,27 @@ class PropertyFact(IngestionModel):
     evidence: list[Evidence] = Field(min_length=1)
 
 
+class SemanticGraphNode(IngestionModel):
+    """LLM-facing node. Identity is deliberately absent."""
+
+    temp_id: str = Field(min_length=1)
+    class_name: str = Field(min_length=1)
+    properties: list[PropertyFact] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class SemanticGraphEdge(IngestionModel):
+    """LLM-facing edge with evidence-bearing property facts."""
+
+    edge_name: str = Field(min_length=1)
+    source_temp_id: str = Field(min_length=1)
+    target_temp_id: str = Field(min_length=1)
+    properties: list[PropertyFact] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(min_length=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
 class GraphNode(IngestionModel):
     temp_id: str = Field(min_length=1)
     class_name: str = Field(min_length=1)
@@ -88,25 +109,22 @@ class ChunkCoverage(IngestionModel):
     reason: str = Field(min_length=1)
 
 
+class SemanticGraphPatchFragment(IngestionModel):
+    """The only graph-fragment contract exposed to the language model."""
+
+    ontology_version: str = Field(min_length=1)
+    nodes: list[SemanticGraphNode] = Field(default_factory=list)
+    edges: list[SemanticGraphEdge] = Field(default_factory=list)
+    coverage: list[ChunkCoverage] = Field(min_length=1)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class GraphPatchFragment(IngestionModel):
     ontology_version: str = Field(min_length=1)
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
     coverage: list[ChunkCoverage] = Field(min_length=1)
     warnings: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def references_are_local(self) -> Self:
-        node_ids = {node.temp_id for node in self.nodes}
-        for edge in self.edges:
-            if (
-                edge.source_temp_id not in node_ids
-                or edge.target_temp_id not in node_ids
-            ):
-                raise ValueError(
-                    "Every edge endpoint must reference a node in the fragment"
-                )
-        return self
 
 
 class ValidationIssue(IngestionModel):
@@ -156,27 +174,8 @@ class ActiveOntology(IngestionModel):
     version: str
 
 
-class BatchExtractionInput(IngestionModel):
-    ontology_version: str = Field(
-        min_length=1,
-        description="Phiên bản ontology mà ingestion hiện tại đã ghim.",
-    )
-    scope_keys: list[str] = Field(
-        min_length=1,
-        description="Các scope đã được chọn cho batch hiện tại.",
-    )
-    chunks: list[PreparedChunk] = Field(
-        min_length=1,
-        description="Toàn bộ chunks thuộc batch cần trích xuất.",
-    )
-    ontology: OntologyProjection = Field(
-        description="Schema ontology đã hợp nhất từ các scope được chọn.",
-    )
-
-
 __all__ = [
     "ActiveOntology",
-    "BatchExtractionInput",
     "ChunkCoverage",
     "Evidence",
     "FreeformDict",
@@ -188,6 +187,9 @@ __all__ = [
     "OntologyScopeSummary",
     "PreparedChunk",
     "PropertyFact",
+    "SemanticGraphEdge",
+    "SemanticGraphNode",
+    "SemanticGraphPatchFragment",
     "SourceVersionStatus",
     "ValidationIssue",
 ]

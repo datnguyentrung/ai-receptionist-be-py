@@ -101,7 +101,7 @@ def test_unknown_schema_is_returned_as_proposal_candidate(fragment, expected_cod
 
     class Repository:
         async def get_workspace(self, _): return workspace
-        async def store_batch_result(self, *args):
+        async def store_batch_result(self, *args, **kwargs):
             batch.status = "REPAIR_REQUIRED"
             return workspace
 
@@ -184,6 +184,8 @@ def test_repository_is_process_local_and_does_not_resume_after_restart() -> None
             skill_digest="skill",
             model_id="model",
             compiler_version="compiler",
+            batch_size=10,
+            max_batch_chars=15000,
         )
         assert not resumed and not committed
         assert await first.get_workspace(str(workspace.job.id)) is workspace

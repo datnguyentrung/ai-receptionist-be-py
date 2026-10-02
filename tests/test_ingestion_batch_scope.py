@@ -42,8 +42,10 @@ def test_submit_validates_and_persists_multiple_batch_scopes_without_neo4j_stagi
             return workspace
 
         async def store_batch_result(self, ingestion_id, batch_index, bindings,
-                                     merged_hash, fragment, issues):
+                                     merged_hash, semantic_fragment, fragment, issues,
+                                     *, max_attempts):
             captured.update(bindings=bindings, merged_hash=merged_hash,
+                            semantic_fragment=semantic_fragment,
                             fragment=fragment, issues=issues)
             batch.scope_keys = [item["scopeKey"] for item in bindings]
             batch.status = "STAGED" if not issues else "REPAIR_REQUIRED"
