@@ -2,6 +2,7 @@ from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = BASE_DIR / ".env"
@@ -33,6 +34,14 @@ class Settings(BaseSettings):
     INGESTION_BATCH_SIZE: int = 3
     INGESTION_SHUTDOWN_TIMEOUT_SECONDS: float = 15.0
 
+    # GraphRAG retrieval/indexing
+    RAG_EMBEDDING_MODEL: str = "gemini-embedding-001"
+    RAG_EMBEDDING_DIMENSION: int = 768
+    RAG_MIN_COSINE_SCORE: float = 0.55
+    RAG_DEFAULT_TOP_K: int = 10
+    RAG_CANDIDATE_LIMIT: int = 20
+    RAG_CONTEXT_MAX_CHARS: int = 24000
+
     NEO4J_URI: str = ""
     NEO4J_USERNAME: str = ""
     NEO4J_PASSWORD: str = ""
@@ -44,7 +53,6 @@ class Settings(BaseSettings):
     DB_USER: str = "postgres.enjbieisclwmyrgyskha"
     DB_PASSWORD: str = ""
     DB_NAME: str = "postgres"
-    DATABASE_URL: str = ""
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
@@ -53,17 +61,20 @@ class Settings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        if self.DATABASE_URL:
-            url = self.DATABASE_URL
-            if url.startswith("postgresql://"):
-                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            elif url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-            return url
-        return (
-            f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}@"
-            f"{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-        )
+        """Build the PostgreSQL DSN exclusively from the DB_* settings.
+
+        URL.create handles reserved characters in credentials without leaking
+        precedence to an unrelated DATABASE_URL environment variable.
+        """
+
+        return URL.create(
+            drivername="postgresql+asyncpg",
+            username=self.DB_USER,
+            password=self.DB_PASSWORD,
+            host=self.DB_HOST,
+            port=self.DB_PORT,
+            database=self.DB_NAME,
+        ).render_as_string(hide_password=False)
 
     @property
     def insightface_providers(self) -> list[str]:

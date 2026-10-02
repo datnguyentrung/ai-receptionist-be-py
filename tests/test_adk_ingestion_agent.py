@@ -4,6 +4,7 @@ from pathlib import Path
 from app.adk_web import liveness, readiness
 from app.agent.agent import app as agent_app
 from app.agent.skills.skill_loader import discover_skill_descriptors
+from app.agent.tools.graphrag_tools import retrieve_taekwondo_knowledge
 from app.agent.tools.ingestion_tools import INGESTION_TOOLS, fill_graph_patch
 
 
@@ -29,6 +30,7 @@ def test_skill_discovery_ignores_cache_directories() -> None:
     skills_dir = Path(__file__).parents[1] / "app" / "agent" / "skills"
     names = {item.name for item in discover_skill_descriptors(skills_dir)}
     assert "ingestion" in names
+    assert "graph-qa" in names
     assert "__pycache__" not in names
 
 
@@ -38,3 +40,7 @@ def test_direct_fill_is_blocked_and_health_defaults_not_ready() -> None:
     assert result["errors"][0]["code"] == "SOURCE_DOCUMENT_REQUIRED"
     assert asyncio.run(liveness()) == {"status": "UP"}
     assert asyncio.run(readiness()) == {"status": "DOWN", "ready": False}
+
+
+def test_public_retrieval_tool_is_discoverable() -> None:
+    assert retrieve_taekwondo_knowledge.__name__ == "retrieve_taekwondo_knowledge"
