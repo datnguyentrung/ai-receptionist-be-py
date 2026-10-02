@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import json
 import uuid
@@ -7,14 +5,22 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.schemas.ingestion import (
+    DocumentChunk,
+    GraphPatchFragment,
+)
 from app.schemas.ingestion_schema import (
     ActiveOntology,
-    GraphPatchFragment,
     IngestionJobStatus,
     PreparedChunk,
     SourceVersionStatus,
 )
-from app.services.ingestion.preprocessing import CHUNKER_VERSION, PreparedDocument
+from app.services.ingestion.document.strategies import STRUCTURAL_CHUNKER_VERSION
+from app.services.ingestion.workspace.staged_ingestion import (
+    MAX_BATCH_CHARS,
+    MAX_BATCH_CHUNKS,
+    IngestionWorkspaceService,
+)
 
 MAPPER_VERSION = "taekwondo-mapper-v2"
 
@@ -105,23 +111,28 @@ class IngestionRepository:
 
     async def create_or_resume(
         self,
-        prepared: PreparedDocument,
-        ontology: ActiveOntology,
         *,
+        artifact_name: str,
+        content_hash: str,
+        chunks: list[DocumentChunk],
+        ontology: ActiveOntology,
         document_key: str,
         scope_hint: str | None,
         skill_digest: str,
         model_id: str,
         compiler_version: str,
-        batch_size: int,
     ) -> tuple[Workspace, bool, bool]:
         """Tạo mới hoặc tái sử dụng workspace ingestion còn tồn tại trong tiến trình hiện tại (in-process workspace reuse)."""
         config_signature = _digest(
-            {"chunker": CHUNKER_VERSION, "batchSize": batch_size}
+            {
+                "chunker": STRUCTURAL_CHUNKER_VERSION,
+                "maxBatchChunks": MAX_BATCH_CHUNKS,
+                "maxBatchChars": MAX_BATCH_CHARS,
+            }
         )
         ingestion_signature = _digest(
             {
-                "contentHash": prepared.content_hash,
+                "contentHash": content_hash,
                 "configSignature": config_signature,
                 "ontologyVersionId": ontology.version_id,
                 "skillDigest": skill_digest,
@@ -145,13 +156,13 @@ class IngestionRepository:
         document = IngestionDocumentData(
             id=document_id,
             document_key=document_key,
-            name=prepared.filename,
+            name=artifact_name,
             current_version_id=self._document_current_version.get(document_key),
         )
         version = IngestionDocumentVersionData(
             id=version_id,
             document_id=document_id,
-            content_hash=prepared.content_hash,
+            content_hash=content_hash,
             ontology_version_id=ontology_id,
             ontology_digest=_digest(
                 {"versionId": ontology.version_id, "version": ontology.version}
@@ -170,40 +181,43 @@ class IngestionRepository:
             error_message=None,
             summary={},
         )
-        chunks = tuple(
+        ingestion_chunks = tuple(
             IngestionChunkData(
                 id=uuid.uuid4(),
                 document_version_id=version_id,
                 chunk_id=chunk.chunk_id,
-                chunk_index=chunk.chunk_index,
-                text=chunk.text,
+                chunk_index=chunk.index,
+                text=chunk.content,
                 content_hash=chunk.content_hash,
-                token_count=chunk.token_count,
+                token_count=max(1, (len(chunk.content) + 3) // 4),
                 section=chunk.section,
-                page_start=chunk.page_start,
-                page_end=chunk.page_end,
-                source_anchor=chunk.source_anchor,
+                page_start=None,
+                page_end=None,
+                source_anchor=f"{chunk.source}#{chunk.structural_path}:L{chunk.start_line}-L{chunk.end_line}",
             )
-            for chunk in prepared.chunks
+            for chunk in chunks
         )
+        partitioned = IngestionWorkspaceService._partition(chunks)
         batches = tuple(
             IngestionBatchData(
                 id=uuid.uuid4(),
                 job_id=job_id,
-                batch_index=batch_index,
-                chunk_indexes=[
-                    item.chunk_index for item in chunks[start : start + batch_size]
-                ],
+                batch_index=batch.index,
+                chunk_indexes=batch.chunk_indexes,
                 status="PENDING",
                 graph_fragment=None,
                 validation_issues=[],
                 validation_attempts=0,
                 merged_schema_hash=None,
             )
-            for batch_index, start in enumerate(range(0, len(chunks), batch_size))
+            for batch in partitioned
         )
         workspace = Workspace(
-            document=document, version=version, job=job, chunks=chunks, batches=batches
+            document=document,
+            version=version,
+            job=job,
+            chunks=ingestion_chunks,
+            batches=batches,
         )
         self._workspaces[str(job_id)] = workspace
         self._by_signature[ingestion_signature] = str(job_id)

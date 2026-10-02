@@ -20,13 +20,13 @@ from app.schemas.ingestion_schema import (
     PreparedChunk,
     SourceVersionStatus,
 )
+from app.services.ingestion.document.reader import DocumentReader
 from app.services.ingestion.graph_store import Neo4jIngestionStore
 from app.services.ingestion.ontology import (
     COMPILER_VERSION,
     OntologyCache,
     OntologyRegistry,
 )
-from app.services.ingestion.preprocessing import prepare_document
 from app.services.ingestion.repository import (
     IngestionRepository,
     Workspace,
@@ -50,24 +50,27 @@ async def begin(
     scope_hint: str | None = None,
     mime_type: str | None = None,
 ) -> dict[str, Any]:
-    """Chuẩn bị tài liệu và khởi tạo mới hoặc tái sử dụng workspace ingestion trong RAM của tiến trình hiện tại."""
-    prepared = prepare_document(
-        artifact_name,
-        data,
-        max_file_size=max_file_size,
-        chunk_size_chars=chunk_size_chars,
+    """Chuẩn bị tài liệu qua DocumentReader và khởi tạo mới hoặc tái sử dụng workspace ingestion trong RAM."""
+    if len(data) > max_file_size:
+        raise ValueError(f"Artifact exceeds the {max_file_size}-byte ingestion limit")
+    reader = DocumentReader()
+    chunks = reader.read_bytes(
+        filename=artifact_name,
+        data=data,
         mime_type=mime_type,
     )
+    content_hash = hashlib.sha256(data).hexdigest()
     ontology = await ontology_cache.active_version()
     workspace, resumed, committed = await repository.create_or_resume(
-        prepared,
-        ontology,
+        artifact_name=artifact_name,
+        content_hash=content_hash,
+        chunks=chunks,
+        ontology=ontology,
         document_key=document_key or _document_key(artifact_name),
         scope_hint=scope_hint,
         skill_digest=skill_digest,
         model_id=model_id,
         compiler_version=COMPILER_VERSION,
-        batch_size=max(1, batch_size),
     )
     return status_payload(workspace, resumed=resumed or committed, idempotent=committed)
 
@@ -427,7 +430,9 @@ def batch_failure_payload(
         "batchIndex": batch_index,
         "scopeKeys": getattr(batch, "scope_keys", []),  # phạm vi đã dùng
         "snapshotHashes": getattr(batch, "snapshot_hashes", {}),  # snapshot đã dùng
-        "mergedSchemaHash": getattr(batch, "merged_schema_hash", None),  # lược đồ hợp nhất đã dùng
+        "mergedSchemaHash": getattr(
+            batch, "merged_schema_hash", None
+        ),  # lược đồ hợp nhất đã dùng
         "graphFragment": getattr(batch, "graph_fragment", None),
         "errors": issues,
         "validationAttempts": getattr(batch, "validation_attempts", 0),
