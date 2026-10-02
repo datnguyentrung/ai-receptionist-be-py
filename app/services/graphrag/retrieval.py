@@ -1,7 +1,5 @@
 """Hybrid Neo4j retrieval with provenance, reranking, and abstention."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re
@@ -12,7 +10,9 @@ from app.services.graphrag.embeddings import GeminiEmbeddingProvider, cosine_sim
 from app.services.ingestion.graph_store import Neo4jIngestionStore
 
 logger = logging.getLogger(__name__)
-INSUFFICIENT_EVIDENCE = "Không có đủ bằng chứng trong kho tri thức để trả lời câu hỏi này."
+INSUFFICIENT_EVIDENCE = (
+    "Không có đủ bằng chứng trong kho tri thức để trả lời câu hỏi này."
+)
 
 
 class GraphRAGRetriever:
@@ -48,11 +48,17 @@ class GraphRAGRetriever:
 
         chunk_vector, chunk_fulltext, entity_hits, fact_hits = await asyncio.gather(
             self._graph_store.search_chunk_vector(query_vector, self._candidate_limit),
-            self._graph_store.search_chunk_fulltext(lucene_query, self._candidate_limit),
-            self._graph_store.search_entity_fulltext(lucene_query, self._candidate_limit),
+            self._graph_store.search_chunk_fulltext(
+                lucene_query, self._candidate_limit
+            ),
+            self._graph_store.search_entity_fulltext(
+                lucene_query, self._candidate_limit
+            ),
             self._graph_store.search_fact_vector(query_vector, self._candidate_limit),
         )
-        entity_keys = [str(item["stableKey"]) for item in entity_hits if item.get("stableKey")]
+        entity_keys = [
+            str(item["stableKey"]) for item in entity_hits if item.get("stableKey")
+        ]
         fact_chunk_ids = sorted(
             {
                 str(chunk_id)
@@ -187,7 +193,9 @@ def _within_context_budget(
 def _public_passage(item: dict[str, Any]) -> dict[str, Any]:
     document_name = str(item.get("documentName") or item.get("documentId") or "source")
     location = item.get("section") or (
-        f"trang {item['pageStart']}" if item.get("pageStart") else item.get("sourceAnchor")
+        f"trang {item['pageStart']}"
+        if item.get("pageStart")
+        else item.get("sourceAnchor")
     )
     citation = f"{document_name} — {location}" if location else document_name
     return {

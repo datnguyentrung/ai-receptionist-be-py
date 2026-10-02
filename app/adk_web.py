@@ -4,8 +4,6 @@ Run with:
     python -m app.adk_web
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import uvicorn

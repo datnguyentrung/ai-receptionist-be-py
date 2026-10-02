@@ -18,6 +18,10 @@ from app.agent.skills.skill_loader import (
     discover_skill_tools,
 )
 from app.core.ingestion_runtime import IngestionRuntimePlugin
+from app.utils.ingestion_logger import reset_log_file
+
+# Clean log file every time ADK Web / CLI loads the agent
+reset_log_file()
 
 BASE_DIR = Path(__file__).resolve().parent
 SKILLS_DIR = BASE_DIR / "skills"

@@ -1,7 +1,5 @@
 """Ontology loading, projection, and deterministic graph-patch validation."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import unicodedata
@@ -26,7 +24,9 @@ from app.schemas.ingestion_schema import (
     ValidationIssue,
 )
 
-ALLOWED_SCOPES = frozenset({"core", "course", "training", "belt", "facility", "finance", "event"})
+ALLOWED_SCOPES = frozenset(
+    {"core", "course", "training", "belt", "facility", "finance", "event"}
+)
 COMPILER_VERSION = "taekwondo-pg-v1"
 
 
@@ -41,12 +41,16 @@ class OntologyRegistry:
 
     def __init__(self, projection: OntologyProjection) -> None:
         self.projection = projection
-        self.entity_types = {item["technicalName"]: item for item in projection.entity_types}
+        self.entity_types = {
+            item["technicalName"]: item for item in projection.entity_types
+        }
         self.properties = {
             (item["entityType"], item["technicalName"]): item
             for item in projection.properties
         }
-        self.relationships = {item["technicalName"]: item for item in projection.relationships}
+        self.relationships = {
+            item["technicalName"]: item for item in projection.relationships
+        }
 
     def validate_fragment(
         self,
@@ -106,7 +110,11 @@ class OntologyRegistry:
                         location=f"nodes.{node_index}.className",
                     )
                 )
-            issues.extend(self._validate_evidence(node.evidence, chunk_by_index, f"nodes.{node_index}.evidence"))
+            issues.extend(
+                self._validate_evidence(
+                    node.evidence, chunk_by_index, f"nodes.{node_index}.evidence"
+                )
+            )
             for property_index, fact in enumerate(node.properties):
                 contract = self.properties.get((node.class_name, fact.property_name))
                 if contract is None:
@@ -146,7 +154,10 @@ class OntologyRegistry:
             else:
                 source_type = node_types.get(edge.source_temp_id)
                 target_type = node_types.get(edge.target_temp_id)
-                if source_type != contract["sourceEntityType"] or target_type != contract["targetEntityType"]:
+                if (
+                    source_type != contract["sourceEntityType"]
+                    or target_type != contract["targetEntityType"]
+                ):
                     issues.append(
                         ValidationIssue(
                             code="RELATIONSHIP_DOMAIN_RANGE_MISMATCH",
@@ -154,11 +165,17 @@ class OntologyRegistry:
                             location=f"edges.{edge_index}",
                         )
                     )
-            issues.extend(self._validate_evidence(edge.evidence, chunk_by_index, f"edges.{edge_index}.evidence"))
+            issues.extend(
+                self._validate_evidence(
+                    edge.evidence, chunk_by_index, f"edges.{edge_index}.evidence"
+                )
+            )
         return issues
 
     @staticmethod
-    def _validate_evidence(evidence_items, chunk_by_index, location: str) -> list[ValidationIssue]:
+    def _validate_evidence(
+        evidence_items, chunk_by_index, location: str
+    ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         for index, evidence in enumerate(evidence_items):
             chunk = chunk_by_index.get(evidence.chunk_index)
@@ -257,7 +274,9 @@ class OntologyCache:
             )
 
         entity_by_id = {item.id: item for item in entities}
-        selected_entities = [item for item in entities if _belongs_to_scope(item, scope_key)]
+        selected_entities = [
+            item for item in entities if _belongs_to_scope(item, scope_key)
+        ]
         if scope_key != "core" and not selected_entities:
             selected_entities = entities
         selected_ids = {item.id for item in selected_entities}
@@ -291,8 +310,12 @@ class OntologyCache:
                 {
                     "technicalName": item.technical_name,
                     "displayName": item.display_name,
-                    "sourceEntityType": entity_by_id[item.source_entity_type_id].technical_name,
-                    "targetEntityType": entity_by_id[item.target_entity_type_id].technical_name,
+                    "sourceEntityType": entity_by_id[
+                        item.source_entity_type_id
+                    ].technical_name,
+                    "targetEntityType": entity_by_id[
+                        item.target_entity_type_id
+                    ].technical_name,
                     "cardinality": item.cardinality.value,
                     "constraints": item.constraints or {},
                 }
@@ -301,7 +324,11 @@ class OntologyCache:
                 and item.target_entity_type_id in selected_ids
             ],
             "aliases": [
-                {"alias": item.alias, "confidence": item.confidence, "source": item.source.value}
+                {
+                    "alias": item.alias,
+                    "confidence": item.confidence,
+                    "source": item.source.value,
+                }
                 for item in aliases
             ],
         }
@@ -320,7 +347,10 @@ def _belongs_to_scope(entity: OntologyEntityType, scope_key: str) -> bool:
     if isinstance(scopes, str):
         scopes = [scopes]
     haystack = f"{entity.technical_name} {entity.display_name} {entity.description or ''}".casefold()
-    return scope_key in {str(value).casefold() for value in scopes} or scope_key in haystack
+    return (
+        scope_key in {str(value).casefold() for value in scopes}
+        or scope_key in haystack
+    )
 
 
 def _matches_datatype(value: Any, data_type: str) -> bool:
@@ -338,7 +368,9 @@ def _matches_datatype(value: Any, data_type: str) -> bool:
 
 
 def _normalize_quote(value: str) -> str:
-    return unicodedata.normalize("NFKC", value).replace("\r\n", "\n").replace("\r", "\n")
+    return (
+        unicodedata.normalize("NFKC", value).replace("\r\n", "\n").replace("\r", "\n")
+    )
 
 
 __all__ = ["ALLOWED_SCOPES", "COMPILER_VERSION", "OntologyCache", "OntologyRegistry"]

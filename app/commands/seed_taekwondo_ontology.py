@@ -4,8 +4,6 @@ Run with:
     python -m app.commands.seed_taekwondo_ontology
 """
 
-from __future__ import annotations
-
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
@@ -151,20 +149,60 @@ RELATIONSHIPS: tuple[
     tuple[str, str, str, RelationshipCardinality],
     ...,
 ] = (
-    ("organization", "offers_program", "class_program", RelationshipCardinality.ONE_TO_MANY),
+    (
+        "organization",
+        "offers_program",
+        "class_program",
+        RelationshipCardinality.ONE_TO_MANY,
+    ),
     ("organization", "located_at", "location", RelationshipCardinality.MANY_TO_MANY),
-    ("person", "teaches_program", "class_program", RelationshipCardinality.MANY_TO_MANY),
+    (
+        "person",
+        "teaches_program",
+        "class_program",
+        RelationshipCardinality.MANY_TO_MANY,
+    ),
     ("person", "holds_rank", "belt_rank", RelationshipCardinality.MANY_TO_MANY),
     ("class_program", "has_schedule", "schedule", RelationshipCardinality.ONE_TO_MANY),
-    ("class_program", "uses_location", "location", RelationshipCardinality.MANY_TO_MANY),
+    (
+        "class_program",
+        "uses_location",
+        "location",
+        RelationshipCardinality.MANY_TO_MANY,
+    ),
     ("class_program", "has_fee", "fee", RelationshipCardinality.ONE_TO_MANY),
-    ("class_program", "targets_rank", "belt_rank", RelationshipCardinality.MANY_TO_MANY),
-    ("belt_rank", "requires_technique", "technique", RelationshipCardinality.MANY_TO_MANY),
+    (
+        "class_program",
+        "targets_rank",
+        "belt_rank",
+        RelationshipCardinality.MANY_TO_MANY,
+    ),
+    (
+        "belt_rank",
+        "requires_technique",
+        "technique",
+        RelationshipCardinality.MANY_TO_MANY,
+    ),
     ("belt_rank", "requires_poomsae", "poomsae", RelationshipCardinality.MANY_TO_MANY),
-    ("belt_rank", "has_requirement", "requirement", RelationshipCardinality.ONE_TO_MANY),
+    (
+        "belt_rank",
+        "has_requirement",
+        "requirement",
+        RelationshipCardinality.ONE_TO_MANY,
+    ),
     ("class_program", "has_policy", "policy", RelationshipCardinality.ONE_TO_MANY),
-    ("taekwondo_style", "defines_poomsae", "poomsae", RelationshipCardinality.ONE_TO_MANY),
-    ("taekwondo_style", "defines_rank", "belt_rank", RelationshipCardinality.ONE_TO_MANY),
+    (
+        "taekwondo_style",
+        "defines_poomsae",
+        "poomsae",
+        RelationshipCardinality.ONE_TO_MANY,
+    ),
+    (
+        "taekwondo_style",
+        "defines_rank",
+        "belt_rank",
+        RelationshipCardinality.ONE_TO_MANY,
+    ),
 )
 
 ALIASES: dict[str, tuple[str, ...]] = {

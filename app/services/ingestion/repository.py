@@ -1,23 +1,12 @@
-"""PostgreSQL repository for durable ingestion checkpoints."""
-
-from __future__ import annotations
+"""PostgreSQL repository for ingestion (Cleaned / In-Memory State)."""
 
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from app.models.ingestion import (
-    IngestionBatch,
-    IngestionChunk,
-    IngestionDocument,
-    IngestionDocumentVersion,
-    IngestionJob,
-)
 from app.schemas.ingestion_schema import (
     GraphPatchFragment,
     IngestionJobStatus,
@@ -30,26 +19,98 @@ from app.services.ingestion.preprocessing import CHUNKER_VERSION, PreparedDocume
 MAPPER_VERSION = "taekwondo-mapper-v1"
 
 
+@dataclass
+class IngestionDocumentData:
+    id: uuid.UUID
+    document_key: str
+    name: str
+    source_type: str = "MANUAL_UPLOAD"
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class IngestionDocumentVersionData:
+    id: uuid.UUID
+    document_id: uuid.UUID
+    content_hash: str
+    config_signature: str
+    ingestion_signature: str
+    ontology_version_id: uuid.UUID
+    ontology_digest: str
+    skill_digest: str
+    model_id: str
+    chunker_version: str
+    mapper_version: str
+    compiler_version: str
+    status: str = SourceVersionStatus.PENDING
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    committed_at: datetime | None = None
+
+
+@dataclass
+class IngestionJobData:
+    id: uuid.UUID
+    document_version_id: uuid.UUID
+    ontology_version_id: uuid.UUID
+    status: str = IngestionJobStatus.RECEIVED
+    stage: str = "received"
+    scope_hint: str | None = None
+    readiness_fingerprint: str | None = None
+    error_stage: str | None = None
+    error_message: str | None = None
+    summary: dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None
+
+
+@dataclass
+class IngestionChunkData:
+    id: uuid.UUID
+    document_version_id: uuid.UUID
+    chunk_id: str
+    chunk_index: int
+    text: str
+    content_hash: str
+    token_count: int
+    section: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    source_anchor: str = ""
+
+
+@dataclass
+class IngestionBatchData:
+    id: uuid.UUID
+    job_id: uuid.UUID
+    batch_index: int
+    chunk_indexes: list[int]
+    scope_key: str = "core"
+    status: str = "PENDING"
+    graph_fragment: dict | None = None
+    validation_issues: list[dict] = field(default_factory=list)
+    validation_attempts: int = 0
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 @dataclass(frozen=True)
 class Workspace:
-    document: IngestionDocument
-    version: IngestionDocumentVersion
-    job: IngestionJob
-    chunks: tuple[IngestionChunk, ...]
-    batches: tuple[IngestionBatch, ...]
+    document: IngestionDocumentData
+    version: IngestionDocumentVersionData
+    job: IngestionJobData
+    chunks: tuple[IngestionChunkData, ...]
+    batches: tuple[IngestionBatchData, ...]
 
 
 class IngestionRepository:
-    """Kho lưu trữ dữ liệu Ingestion bền vững trên PostgreSQL.
+    """In-Memory Repository quản lý trạng thái phiên Ingestion.
 
-    Chịu trách nhiệm:
-        - Quản lý vòng đời tài liệu (Document, DocumentVersion).
-        - Lưu trữ danh sách Chunks, Batches và Jobs xử lý.
-        - Quản lý trạng thái lưu tạm (STAGED) và cache kết quả trích xuất.
+    Không ghi các bảng trung gian vào PostgreSQL.
     """
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
+    def __init__(self, session_factory: Any = None) -> None:
+        self._workspaces: dict[uuid.UUID, Workspace] = {}
+        self._by_signature: dict[str, uuid.UUID] = {}
 
     async def create_or_resume(
         self,
@@ -63,19 +124,12 @@ class IngestionRepository:
         compiler_version: str,
         batch_size: int,
     ) -> tuple[Workspace, bool, bool]:
-        """Tạo mới hoặc khôi phục một Workspace Ingestion từ PostgreSQL.
-
-        Công dụng:
-            1. Tính toán chữ ký cấu hình (`config_signature`) và chữ ký nạp (`ingestion_signature`).
-            2. Nếu tài liệu cùng chữ ký đã tồn tại, tự động khôi phục (resume) phiên làm việc trước đó.
-            3. Nếu chưa tồn tại, tạo mới Document, DocumentVersion, lưu toàn bộ Chunks, chia Batches và tạo IngestionJob.
-
-        Trả về:
-            Tuple: (workspace: Workspace, resumed: bool, committed: bool)
-        """
-        # 1. Tính toán các chữ ký xác định tính toàn vẹn và tái lặp (Idempotency)
         config_signature = _digest(
-            {"chunker": CHUNKER_VERSION, "batchSize": batch_size, "scopeHint": scope_hint}
+            {
+                "chunker": CHUNKER_VERSION,
+                "batchSize": batch_size,
+                "scopeHint": scope_hint,
+            }
         )
         ingestion_signature = _digest(
             {
@@ -88,121 +142,98 @@ class IngestionRepository:
                 "compilerVersion": compiler_version,
             }
         )
-        async with self._session_factory() as session, session.begin():
-            # 2. Tìm hoặc tạo mới IngestionDocument theo document_key
-            document = await session.scalar(
-                select(IngestionDocument).where(IngestionDocument.document_key == document_key)
-            )
-            if document is None:
-                document = IngestionDocument(document_key=document_key, name=prepared.filename)
-                session.add(document)
-                await session.flush()
 
-            # 3. Tìm IngestionDocumentVersion khớp chữ ký ingestion_signature
-            version = await session.scalar(
-                select(IngestionDocumentVersion).where(
-                    IngestionDocumentVersion.document_id == document.id,
-                    IngestionDocumentVersion.ingestion_signature == ingestion_signature,
+        job_id = self._by_signature.get(ingestion_signature)
+        if job_id and job_id in self._workspaces:
+            ws = self._workspaces[job_id]
+            committed = ws.version.status == SourceVersionStatus.COMMITTED
+            return ws, not committed, committed
+
+        doc_id = uuid.uuid4()
+        ver_id = uuid.uuid4()
+        new_job_id = uuid.uuid4()
+
+        document = IngestionDocumentData(
+            id=doc_id, document_key=document_key, name=prepared.filename
+        )
+        version = IngestionDocumentVersionData(
+            id=ver_id,
+            document_id=doc_id,
+            content_hash=prepared.content_hash,
+            config_signature=config_signature,
+            ingestion_signature=ingestion_signature,
+            ontology_version_id=uuid.UUID(projection.version_id)
+            if isinstance(projection.version_id, str) and "-" in projection.version_id
+            else uuid.uuid4(),
+            ontology_digest=projection.digest,
+            skill_digest=skill_digest,
+            model_id=model_id,
+            chunker_version=CHUNKER_VERSION,
+            mapper_version=MAPPER_VERSION,
+            compiler_version=compiler_version,
+            status=SourceVersionStatus.PENDING,
+        )
+
+        job = IngestionJobData(
+            id=new_job_id,
+            document_version_id=ver_id,
+            ontology_version_id=version.ontology_version_id,
+            status=IngestionJobStatus.BATCHING,
+            stage="batching",
+            scope_hint=scope_hint,
+        )
+
+        chunks = tuple(
+            IngestionChunkData(
+                id=uuid.uuid4(),
+                document_version_id=ver_id,
+                chunk_id=chunk.chunk_id,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                content_hash=chunk.content_hash,
+                token_count=chunk.token_count,
+                section=chunk.section,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                source_anchor=chunk.source_anchor,
+            )
+            for chunk in prepared.chunks
+        )
+
+        batches_list = []
+        for batch_index, start in enumerate(range(0, len(chunks), batch_size)):
+            batch_chunks = chunks[start : start + batch_size]
+            batches_list.append(
+                IngestionBatchData(
+                    id=uuid.uuid4(),
+                    job_id=new_job_id,
+                    batch_index=batch_index,
+                    chunk_indexes=[item.chunk_index for item in batch_chunks],
+                    scope_key=scope_hint or "core",
+                    status="PENDING",
                 )
             )
-            if version is not None:
-                job = await session.scalar(
-                    select(IngestionJob)
-                    .where(IngestionJob.document_version_id == version.id)
-                    .order_by(IngestionJob.created_at.desc())
-                )
-                if job is None:
-                    raise RuntimeError("Document version exists without an ingestion job")
-                workspace = await self._workspace_in_session(session, job.id)
-                return workspace, version.status != SourceVersionStatus.COMMITTED, version.status == SourceVersionStatus.COMMITTED
+        batches = tuple(batches_list)
 
-            version = IngestionDocumentVersion(
-                document_id=document.id,
-                content_hash=prepared.content_hash,
-                config_signature=config_signature,
-                ingestion_signature=ingestion_signature,
-                ontology_version_id=uuid.UUID(projection.version_id),
-                ontology_digest=projection.digest,
-                skill_digest=skill_digest,
-                model_id=model_id,
-                chunker_version=CHUNKER_VERSION,
-                mapper_version=MAPPER_VERSION,
-                compiler_version=compiler_version,
-                status=SourceVersionStatus.PENDING,
-            )
-            session.add(version)
-            await session.flush()
-            job = IngestionJob(
-                document_version_id=version.id,
-                ontology_version_id=version.ontology_version_id,
-                status=IngestionJobStatus.BATCHING,
-                stage="batching",
-                scope_hint=scope_hint,
-                summary={"warnings": list(prepared.warnings)},
-            )
-            session.add(job)
-            await session.flush()
-            for chunk in prepared.chunks:
-                session.add(
-                    IngestionChunk(
-                        document_version_id=version.id,
-                        chunk_id=chunk.chunk_id,
-                        chunk_index=chunk.chunk_index,
-                        text=chunk.text,
-                        content_hash=chunk.content_hash,
-                        token_count=chunk.token_count,
-                        section=chunk.section,
-                        page_start=chunk.page_start,
-                        page_end=chunk.page_end,
-                        source_anchor=chunk.source_anchor,
-                    )
-                )
-            for batch_index, start in enumerate(range(0, len(prepared.chunks), batch_size)):
-                session.add(
-                    IngestionBatch(
-                        job_id=job.id,
-                        batch_index=batch_index,
-                        scope_key=scope_hint or "core",
-                        chunk_indexes=[
-                            item.chunk_index for item in prepared.chunks[start : start + batch_size]
-                        ],
-                    )
-                )
-            await session.flush()
-            return await self._workspace_in_session(session, job.id), False, False
+        workspace = Workspace(
+            document=document,
+            version=version,
+            job=job,
+            chunks=chunks,
+            batches=batches,
+        )
+        self._workspaces[new_job_id] = workspace
+        self._by_signature[ingestion_signature] = new_job_id
+        return workspace, False, False
 
-    async def get_workspace(self, ingestion_id: str | uuid.UUID) -> Workspace | None:
-        job_id = _uuid(ingestion_id)
-        async with self._session_factory() as session:
-            if await session.get(IngestionJob, job_id) is None:
-                return None
-            return await self._workspace_in_session(session, job_id)
+    async def get_workspace(self, ingestion_id: str) -> Workspace | None:
+        return self._workspaces.get(_uuid(ingestion_id))
 
-    async def list_committed_workspaces(
-        self,
-        *,
-        document_id: str | None = None,
-        limit: int = 1000,
-    ) -> list[Workspace]:
-        """Return committed workspaces for idempotent GraphRAG backfill."""
-
-        async with self._session_factory() as session:
-            statement = (
-                select(IngestionJob.id)
-                .join(
-                    IngestionDocumentVersion,
-                    IngestionDocumentVersion.id == IngestionJob.document_version_id,
-                )
-                .where(IngestionJob.status == IngestionJobStatus.COMMITTED)
-                .order_by(IngestionJob.created_at)
-                .limit(max(1, limit))
-            )
-            if document_id:
-                statement = statement.where(
-                    IngestionDocumentVersion.document_id == _uuid(document_id)
-                )
-            job_ids = list((await session.scalars(statement)).all())
-            return [await self._workspace_in_session(session, job_id) for job_id in job_ids]
+    async def list_workspaces(self, document_id: str | None = None) -> list[Workspace]:
+        if not document_id:
+            return list(self._workspaces.values())
+        doc_uuid = _uuid(document_id)
+        return [ws for ws in self._workspaces.values() if ws.document.id == doc_uuid]
 
     async def store_batch_result(
         self,
@@ -212,197 +243,192 @@ class IngestionRepository:
         fragment: GraphPatchFragment | None,
         issues: list[dict],
     ) -> Workspace:
-        async with self._session_factory() as session, session.begin():
-            batch = await session.scalar(
-                select(IngestionBatch).where(
-                    IngestionBatch.job_id == _uuid(ingestion_id),
-                    IngestionBatch.batch_index == batch_index,
-                )
+        job_uuid = _uuid(ingestion_id)
+        workspace = self._workspaces.get(job_uuid)
+        if not workspace:
+            raise KeyError(ingestion_id)
+
+        batch = next(
+            (item for item in workspace.batches if item.batch_index == batch_index),
+            None,
+        )
+        if batch is None:
+            raise KeyError(f"Unknown batch index: {batch_index}")
+
+        batch.validation_attempts += 1
+        batch.scope_key = scope_key
+        batch.validation_issues = issues
+        if issues:
+            batch.status = "REPAIR_REQUIRED"
+            batch.graph_fragment = None
+        else:
+            batch.status = "STAGED"
+            batch.graph_fragment = (
+                fragment.model_dump(by_alias=True, mode="json") if fragment else None
             )
-            if batch is None:
-                raise KeyError(f"Unknown batch index: {batch_index}")
-            batch.validation_attempts += 1
-            batch.scope_key = scope_key
-            batch.validation_issues = issues
-            if issues:
-                batch.status = "REPAIR_REQUIRED"
-                batch.graph_fragment = None
-            else:
-                batch.status = "STAGED"
-                batch.graph_fragment = fragment.model_dump(by_alias=True, mode="json") if fragment else None
-            job = await session.get(IngestionJob, batch.job_id)
-            if job is None:
-                raise RuntimeError("Ingestion batch has no job")
-            job.status = IngestionJobStatus.BATCHING
-            job.stage = "batching"
-            job.readiness_fingerprint = None
-            await session.flush()
-            return await self._workspace_in_session(session, job.id)
+
+        workspace.job.status = IngestionJobStatus.BATCHING
+        workspace.job.stage = "batching"
+        workspace.job.readiness_fingerprint = None
+        workspace.job.updated_at = datetime.now(timezone.utc)
+        return workspace
 
     async def mark_ready(self, ingestion_id: str, fingerprint: str) -> Workspace:
-        async with self._session_factory() as session, session.begin():
-            job = await session.get(IngestionJob, _uuid(ingestion_id))
-            if job is None:
-                raise KeyError(ingestion_id)
-            job.status = IngestionJobStatus.READY
-            job.stage = "ready_to_fill"
-            job.readiness_fingerprint = fingerprint
-            await session.flush()
-            return await self._workspace_in_session(session, job.id)
+        job_uuid = _uuid(ingestion_id)
+        workspace = self._workspaces.get(job_uuid)
+        if not workspace:
+            raise KeyError(ingestion_id)
+        workspace.job.status = IngestionJobStatus.READY
+        workspace.job.stage = "ready_to_fill"
+        workspace.job.readiness_fingerprint = fingerprint
+        workspace.job.updated_at = datetime.now(timezone.utc)
+        return workspace
 
     async def mark_writing(self, ingestion_id: str) -> Workspace:
-        return await self._set_job(ingestion_id, IngestionJobStatus.WRITING, "writing")
+        job_uuid = _uuid(ingestion_id)
+        workspace = self._workspaces.get(job_uuid)
+        if not workspace:
+            raise KeyError(ingestion_id)
+        workspace.job.status = IngestionJobStatus.WRITING
+        workspace.job.stage = "writing"
+        workspace.job.updated_at = datetime.now(timezone.utc)
+        return workspace
 
     async def mark_committed(self, ingestion_id: str, summary: dict) -> Workspace:
-        async with self._session_factory() as session, session.begin():
-            workspace = await self._workspace_in_session(session, _uuid(ingestion_id))
-            now = datetime.now(timezone.utc)
-            workspace.job.status = IngestionJobStatus.COMMITTED
-            workspace.job.stage = "committed"
-            workspace.job.summary = {**(workspace.job.summary or {}), **summary}
-            workspace.job.completed_at = now
-            workspace.version.status = SourceVersionStatus.COMMITTED
-            workspace.version.committed_at = now
-            previous_version_id = workspace.document.current_version_id
-            workspace.document.current_version_id = workspace.version.id
-            if previous_version_id and previous_version_id != workspace.version.id:
-                previous = await session.get(IngestionDocumentVersion, previous_version_id)
-                if previous and previous.status == SourceVersionStatus.COMMITTED:
-                    previous.status = SourceVersionStatus.SUPERSEDED
-            await session.flush()
-            return await self._workspace_in_session(session, workspace.job.id)
+        job_uuid = _uuid(ingestion_id)
+        workspace = self._workspaces.get(job_uuid)
+        if not workspace:
+            raise KeyError(ingestion_id)
+        now = datetime.now(timezone.utc)
+        workspace.job.status = IngestionJobStatus.COMMITTED
+        workspace.job.stage = "committed"
+        workspace.job.completed_at = now
+        workspace.job.summary = summary
+        workspace.version.status = SourceVersionStatus.COMMITTED
+        workspace.version.committed_at = now
+        return workspace
 
-    async def mark_failed(self, ingestion_id: str, stage: str, message: str) -> Workspace:
-        async with self._session_factory() as session, session.begin():
-            workspace = await self._workspace_in_session(session, _uuid(ingestion_id))
-            workspace.job.status = IngestionJobStatus.FAILED
-            workspace.job.stage = "failed"
-            workspace.job.error_stage = stage
-            workspace.job.error_message = message[:4000]
-            workspace.version.status = SourceVersionStatus.FAILED
-            await session.flush()
-            return await self._workspace_in_session(session, workspace.job.id)
+    async def mark_failed(
+        self, ingestion_id: str, stage: str, message: str
+    ) -> Workspace:
+        job_uuid = _uuid(ingestion_id)
+        workspace = self._workspaces.get(job_uuid)
+        if not workspace:
+            raise KeyError(ingestion_id)
+        workspace.job.status = IngestionJobStatus.FAILED
+        workspace.job.stage = stage
+        workspace.job.error_stage = stage
+        workspace.job.error_message = message
+        workspace.version.status = SourceVersionStatus.FAILED
+        return workspace
 
-    async def set_document_version_status(
-        self, document_id: str, version_id: str | None, status: SourceVersionStatus
-    ) -> tuple[IngestionDocument, IngestionDocumentVersion]:
-        async with self._session_factory() as session, session.begin():
-            document = await session.get(IngestionDocument, _uuid(document_id))
-            if document is None:
-                raise KeyError(document_id)
-            target_id = _uuid(version_id) if version_id else document.current_version_id
-            if target_id is None:
-                raise KeyError("Document has no current version")
-            version = await session.get(IngestionDocumentVersion, target_id)
-            if version is None or version.document_id != document.id:
-                raise KeyError(str(target_id))
-            version.status = status
-            if document.current_version_id == version.id:
-                previous = await session.scalar(
-                    select(IngestionDocumentVersion)
-                    .where(
-                        IngestionDocumentVersion.document_id == document.id,
-                        IngestionDocumentVersion.id != version.id,
-                        IngestionDocumentVersion.status.in_([
-                            SourceVersionStatus.COMMITTED,
-                            SourceVersionStatus.SUPERSEDED,
-                        ]),
-                    )
-                    .order_by(IngestionDocumentVersion.committed_at.desc())
-                )
-                document.current_version_id = previous.id if previous else None
-                if previous:
-                    previous.status = SourceVersionStatus.COMMITTED
-            return document, version
+    async def mark_deleted(self, document_id: str) -> tuple[Workspace, list[Workspace]]:
+        doc_uuid = _uuid(document_id)
+        all_workspaces = [
+            ws for ws in self._workspaces.values() if ws.document.id == doc_uuid
+        ]
+        if not all_workspaces:
+            raise KeyError(document_id)
+        for ws in all_workspaces:
+            ws.version.status = SourceVersionStatus.DELETED
+            ws.job.status = IngestionJobStatus.DELETED
+        return all_workspaces[-1], all_workspaces
 
-    async def _set_job(self, ingestion_id: str, status: IngestionJobStatus, stage: str) -> Workspace:
-        async with self._session_factory() as session, session.begin():
-            job = await session.get(IngestionJob, _uuid(ingestion_id))
-            if job is None:
-                raise KeyError(ingestion_id)
-            job.status = status
-            job.stage = stage
-            await session.flush()
-            return await self._workspace_in_session(session, job.id)
-
-    async def _workspace_in_session(self, session: AsyncSession, job_id: uuid.UUID) -> Workspace:
-        job = await session.get(IngestionJob, job_id)
-        if job is None:
-            raise KeyError(str(job_id))
-        version = await session.get(IngestionDocumentVersion, job.document_version_id)
-        if version is None:
-            raise RuntimeError("Ingestion job has no document version")
-        document = await session.get(IngestionDocument, version.document_id)
-        if document is None:
-            raise RuntimeError("Ingestion version has no document")
-        chunks = tuple(
-            (
-                await session.scalars(
-                    select(IngestionChunk)
-                    .where(IngestionChunk.document_version_id == version.id)
-                    .order_by(IngestionChunk.chunk_index)
-                )
-            ).all()
+    async def mark_rolled_back(
+        self, document_id: str, target_version_id: str
+    ) -> tuple[Workspace, list[Workspace]]:
+        doc_uuid = _uuid(document_id)
+        target_uuid = _uuid(target_version_id)
+        all_workspaces = [
+            ws for ws in self._workspaces.values() if ws.document.id == doc_uuid
+        ]
+        target = next(
+            (ws for ws in all_workspaces if ws.version.id == target_uuid), None
         )
-        batches = tuple(
-            (
-                await session.scalars(
-                    select(IngestionBatch)
-                    .where(IngestionBatch.job_id == job.id)
-                    .order_by(IngestionBatch.batch_index)
-                )
-            ).all()
-        )
-        return Workspace(document=document, version=version, job=job, chunks=chunks, batches=batches)
+        if not target:
+            raise KeyError(target_version_id)
+        for ws in all_workspaces:
+            if ws.version.id != target_uuid:
+                ws.version.status = SourceVersionStatus.ROLLED_BACK
+                ws.job.status = IngestionJobStatus.ROLLED_BACK
+        return target, all_workspaces
+
+    async def get_cached_fragment(
+        self,
+        document_version_id: uuid.UUID,
+        batch_index: int,
+        graph_context_digest: str,
+    ) -> dict | None:
+        return None
+
+    async def put_cached_fragment(
+        self,
+        document_version_id: uuid.UUID,
+        batch_index: int,
+        graph_context_digest: str,
+        fragment: dict,
+    ) -> None:
+        pass
 
 
-def workspace_chunks(workspace: Workspace, indexes: list[int]) -> list[PreparedChunk]:
-    selected = {item.chunk_index: item for item in workspace.chunks}
+def _uuid(value: str | uuid.UUID) -> uuid.UUID:
+    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+
+def _digest(data: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def workspace_chunks(
+    workspace: Workspace, chunk_indexes: list[int]
+) -> list[PreparedChunk]:
+    index_set = set(chunk_indexes)
     return [
         PreparedChunk(
-            chunk_id=selected[index].chunk_id,
-            chunk_index=index,
-            text=selected[index].text,
-            content_hash=selected[index].content_hash,
-            token_count=selected[index].token_count,
-            section=selected[index].section,
-            page_start=selected[index].page_start,
-            page_end=selected[index].page_end,
-            source_anchor=selected[index].source_anchor,
+            chunk_id=item.chunk_id,
+            chunk_index=item.chunk_index,
+            text=item.text,
+            content_hash=item.content_hash,
+            token_count=item.token_count,
+            section=item.section,
+            page_start=item.page_start,
+            page_end=item.page_end,
+            source_anchor=item.source_anchor,
         )
-        for index in indexes
+        for item in workspace.chunks
+        if item.chunk_index in index_set
     ]
 
 
 def workspace_fingerprint(workspace: Workspace) -> str:
+    staged = [
+        {
+            "batchIndex": b.batch_index,
+            "scopeKey": b.scope_key,
+            "fragment": b.graph_fragment,
+        }
+        for b in sorted(workspace.batches, key=lambda x: x.batch_index)
+        if b.status == "STAGED"
+    ]
     return _digest(
-        [
-            {
-                "batchIndex": item.batch_index,
-                "scopeKey": item.scope_key,
-                "fragment": item.graph_fragment,
-            }
-            for item in workspace.batches
-        ]
+        {
+            "versionId": str(workspace.version.id),
+            "contentHash": workspace.version.content_hash,
+            "staged": staged,
+        }
     )
 
 
-def _digest(value) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
-    ).hexdigest()
-
-
-def _uuid(value: str | uuid.UUID | None) -> uuid.UUID:
-    if isinstance(value, uuid.UUID):
-        return value
-    if value is None:
-        raise ValueError("UUID is required")
-    return uuid.UUID(str(value))
-
-
 __all__ = [
+    "CHUNKER_VERSION",
     "MAPPER_VERSION",
+    "IngestionBatchData",
+    "IngestionChunkData",
+    "IngestionDocumentData",
+    "IngestionDocumentVersionData",
+    "IngestionJobData",
     "IngestionRepository",
     "Workspace",
     "workspace_chunks",

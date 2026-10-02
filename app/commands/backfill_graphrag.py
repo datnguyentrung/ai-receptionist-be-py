@@ -4,8 +4,6 @@ Run with:
     python -m app.commands.backfill_graphrag [--document-id UUID] [--limit 1000]
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 

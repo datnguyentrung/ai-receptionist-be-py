@@ -1,7 +1,5 @@
 """Lifecycle-owned dependencies for the standalone ADK ingestion server."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -25,6 +23,8 @@ from app.services.graphrag.embeddings import GeminiEmbeddingProvider
 from app.services.ingestion.graph_store import Neo4jIngestionStore
 from app.services.ingestion.ontology import OntologyCache
 from app.services.ingestion.repository import IngestionRepository
+
+from app.utils.ingestion_logger import reset_log_file
 
 logger = logging.getLogger(__name__)
 SKILL_DIR = Path(__file__).resolve().parents[1] / "agent" / "skills" / "ingestion"
@@ -95,6 +95,7 @@ async def get_service_container() -> ServiceContainer:
 
 
 async def build_service_container() -> ServiceContainer:
+    reset_log_file()
     _validate_settings()
     engine = create_async_engine(
         settings.async_database_url,
@@ -103,7 +104,9 @@ async def build_service_container() -> ServiceContainer:
         pool_size=settings.DB_POOL_SIZE,
         max_overflow=settings.DB_MAX_OVERFLOW,
     )
-    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     driver = AsyncGraphDatabase.driver(
         settings.NEO4J_URI,
         auth=(settings.NEO4J_USERNAME, settings.NEO4J_PASSWORD),
