@@ -15,13 +15,16 @@ from app.models import (
     OntologyAlias,
     OntologyAliasSource,
     OntologyEntityType,
+    OntologyEntityTypeScope,
     OntologyProperty,
     OntologyPropertyDataType,
     OntologyRelationship,
+    OntologyScope,
     OntologyVersion,
     OntologyVersionStatus,
     RelationshipCardinality,
 )
+from app.services.ontology_compiler import OntologyCompiler
 
 VERSION_CODE = "taekwondo-core-v1"
 
@@ -218,6 +221,63 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "policy": ("rule", "regulation", "quy dinh"),
 }
 
+SCOPE_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "fundamentals": (
+        "Khái niệm nền tảng, tổ chức, con người, phong cách và chính sách Taekwondo.",
+        ("taekwondo_style", "organization", "person", "policy"),
+    ),
+    "training": (
+        "Lớp học, chương trình tập luyện, kỹ thuật, bài quyền và lịch tập.",
+        ("class_program", "person", "technique", "poomsae", "schedule"),
+    ),
+    "rank": (
+        "Cấp đai, yêu cầu thi, kỹ thuật và bài quyền theo cấp bậc.",
+        ("belt_rank", "requirement", "technique", "poomsae"),
+    ),
+    "facility": (
+        "Cơ sở, địa điểm, phòng tập và chương trình sử dụng địa điểm.",
+        ("organization", "location", "class_program"),
+    ),
+    "finance": (
+        "Học phí, lệ phí và chi phí gắn với tổ chức hoặc chương trình.",
+        ("fee", "class_program", "organization"),
+    ),
+}
+
+
+async def _ensure_scopes(session, version: OntologyVersion) -> int:
+    entities = list((await session.scalars(select(OntologyEntityType).where(
+        OntologyEntityType.ontology_version_id == version.id
+    ))).all())
+    entity_by_name = {item.technical_name: item for item in entities}
+    count = 0
+    for key, (description, names) in SCOPE_SPECS.items():
+        scope = await session.scalar(select(OntologyScope).where(
+            OntologyScope.ontology_version_id == version.id,
+            OntologyScope.scope_key == key,
+        ))
+        if scope is None:
+            scope = OntologyScope(
+                ontology_version_id=version.id, scope_key=key,
+                description=description, summary={"entityTypeCount": len(names)},
+            )
+            session.add(scope)
+            await session.flush()
+        for name in names:
+            entity = entity_by_name.get(name)
+            if entity is None:
+                continue
+            membership = await session.get(OntologyEntityTypeScope, (scope.id, entity.id))
+            if membership is None:
+                session.add(OntologyEntityTypeScope(
+                    ontology_version_id=version.id,
+                    scope_id=scope.id,
+                    entity_type_id=entity.id,
+                ))
+                count += 1
+    await session.flush()
+    return count
+
 
 async def seed() -> dict[str, Any]:
     async with AsyncSessionLocal() as session:
@@ -231,11 +291,15 @@ async def seed() -> dict[str, Any]:
             ).all()
         )
         if len(active_versions) == 1:
+            membership_count = await _ensure_scopes(session, active_versions[0])
+            snapshots = await OntologyCompiler().compile_all(session, active_versions[0].id)
+            await session.commit()
             return {
-                "status": "skipped",
-                "reason": "ACTIVE ontology already exists",
+                "status": "ensured",
                 "version": active_versions[0].version,
                 "version_id": str(active_versions[0].id),
+                "scope_memberships_added": membership_count,
+                "snapshots": len(snapshots),
             }
         if len(active_versions) > 1:
             raise RuntimeError(
@@ -335,6 +399,9 @@ async def seed() -> dict[str, Any]:
             )
             alias_count += 1
 
+        await _ensure_scopes(session, version)
+        snapshots = await OntologyCompiler().compile_all(session, version.id)
+
         await session.commit()
         return {
             "status": "seeded",
@@ -344,6 +411,7 @@ async def seed() -> dict[str, Any]:
             "properties": property_count,
             "relationships": relationship_count,
             "aliases": alias_count,
+            "snapshots": len(snapshots),
         }
 
 

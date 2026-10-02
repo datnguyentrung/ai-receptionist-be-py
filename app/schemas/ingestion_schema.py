@@ -129,13 +129,50 @@ class OntologyProjection(IngestionModel):
     version: str
     digest: str
     scope_key: str
+    scope_keys: list[str] = Field(default_factory=list)
+    description: str = ""
+    compiler_version: str = "ontology-compiler-v2"
     entity_types: list[dict[str, Any]]
     properties: list[dict[str, Any]]
     relationships: list[dict[str, Any]]
     aliases: list[dict[str, Any]]
 
 
+class OntologyScopeSummary(IngestionModel):
+    id: str
+    ontology_version_id: str
+    scope_key: str
+    description: str
+    summary: dict[str, Any] = Field(default_factory=dict)
+    schema_hash: str | None = None
+
+
+class ActiveOntology(IngestionModel):
+    version_id: str
+    version: str
+
+
+class BatchExtractionInput(IngestionModel):
+    ontology_version: str = Field(
+        min_length=1,
+        description="Phiên bản ontology mà ingestion hiện tại đã ghim.",
+    )
+    scope_keys: list[str] = Field(
+        min_length=1,
+        description="Các scope đã được chọn cho batch hiện tại.",
+    )
+    chunks: list[PreparedChunk] = Field(
+        min_length=1,
+        description="Toàn bộ chunks thuộc batch cần trích xuất.",
+    )
+    ontology: OntologyProjection = Field(
+        description="Schema ontology đã hợp nhất từ các scope được chọn.",
+    )
+
+
 __all__ = [
+    "ActiveOntology",
+    "BatchExtractionInput",
     "ChunkCoverage",
     "Evidence",
     "GraphEdge",
@@ -143,6 +180,7 @@ __all__ = [
     "GraphPatchFragment",
     "IngestionJobStatus",
     "OntologyProjection",
+    "OntologyScopeSummary",
     "PreparedChunk",
     "PropertyFact",
     "SourceVersionStatus",

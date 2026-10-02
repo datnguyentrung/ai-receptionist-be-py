@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
 from enum import Enum
+from typing import ClassVar
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -22,13 +23,20 @@ class OntologyVersion(Base):
     """Bảng quản lý các phiên bản Ontology của hệ thống."""
 
     __tablename__ = "ontology_version"
-    __table_args__ = {"schema": "ontology"}
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "ontology"}
 
     # Định danh duy nhất cho từng phiên bản Ontology (UUID v4)
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
+    )
+
+    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ontology_version.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # Mã phiên bản (Ví dụ: 'v1.0.0', 'v2.1.0-draft') - Duy nhất trong toàn bộ hệ thống
