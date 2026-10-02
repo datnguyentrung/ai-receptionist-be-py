@@ -22,6 +22,7 @@ class OntologyVersion(Base):
     """Bảng quản lý các phiên bản Ontology của hệ thống."""
 
     __tablename__ = "ontology_version"
+    __table_args__ = {"schema": "ontology"}
 
     # Định danh duy nhất cho từng phiên bản Ontology (UUID v4)
     id: Mapped[uuid.UUID] = mapped_column(

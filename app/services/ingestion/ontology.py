@@ -31,6 +31,14 @@ COMPILER_VERSION = "taekwondo-pg-v1"
 
 
 class OntologyRegistry:
+    """Bộ kiểm tra xác thực đối chiếu đồ thị tri thức với Schema Ontology.
+
+    Nhiệm vụ:
+        - Đối chiếu các Thực thể (`nodes`), Thuộc tính (`properties`) và Quan hệ (`edges`)
+          trong `GraphPatchFragment` với phiên bản Ontology đang hoạt động (`ACTIVE`).
+        - Kiểm tra tính xác thực của các trích dẫn bằng chứng (`evidence`) có trong đoạn văn bản nguồn hay không.
+    """
+
     def __init__(self, projection: OntologyProjection) -> None:
         self.projection = projection
         self.entity_types = {item["technicalName"]: item for item in projection.entity_types}
@@ -45,8 +53,19 @@ class OntologyRegistry:
         fragment: GraphPatchFragment,
         chunks: Iterable[PreparedChunk],
     ) -> list[ValidationIssue]:
+        """Xác thực toàn diện mảnh đồ thị (GraphPatchFragment) đối chiếu với các chunks văn bản.
+
+        Kiểm tra:
+            1. Phiên bản ontology (`ontology_version`) phải khớp với phiên bản đang nạp.
+            2. Độ phủ (`coverage`): Mọi chunk trong batch phải có quyết định MAPPED hoặc NOT_RELEVANT.
+            3. Tính hợp lệ của từng Nút (Node): Loại thực thể tồn tại, trường định danh hợp lệ.
+            4. Thuộc tính (Property): Tên thuộc tính, kiểu dữ liệu, các ràng buộc và bằng chứng trích xuất.
+            5. Mối quan hệ (Edge): Nút nguồn, nút đích, tên quan hệ hợp lệ và bằng chứng liên kết.
+        """
         issues: list[ValidationIssue] = []
         chunk_by_index = {chunk.chunk_index: chunk for chunk in chunks}
+
+        # 1. Kiểm tra phiên bản Ontology
         if fragment.ontology_version != self.projection.version:
             issues.append(
                 ValidationIssue(
@@ -289,7 +308,8 @@ class OntologyCache:
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
-        return OntologyProjection(digest=digest, **payload)
+        payload["digest"] = digest
+        return OntologyProjection.model_validate(payload)
 
 
 def _belongs_to_scope(entity: OntologyEntityType, scope_key: str) -> bool:

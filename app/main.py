@@ -9,8 +9,13 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
+from sqlalchemy import text
+
+import app.models  # noqa: F401 - ensure all models are registered in metadata
 from app.api import api_router
 from app.core.config import settings
+from app.db.base import Base
+from app.db.session import engine
 from app.exceptions.exception_handler import (
     face_embedding_exception_handler,
     face_embedding_validation_exception_handler,
@@ -59,6 +64,14 @@ async def lifespan(app: FastAPI):
         initialize_face_app()
     except Exception:
         logger.exception("InsightFace model initialization failed")
+
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE SCHEMA IF NOT EXISTS ontology;"))
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database schema 'ontology' and tables initialized successfully")
+    except Exception:
+        logger.exception("Database initialization failed during startup")
 
     yield
 

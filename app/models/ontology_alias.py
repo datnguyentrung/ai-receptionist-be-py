@@ -57,6 +57,7 @@ class OntologyAlias(Base):
             "alias",
             name="uq_ontology_alias_version_alias",
         ),
+        {"schema": "ontology"},
     )
 
     # Khóa chính định danh Alias (UUID v4)

@@ -31,6 +31,7 @@ class OntologyCompiledSnapshot(Base):
             "scope_key",
             name="uq_ontology_compiled_snapshot_version_scope",
         ),
+        {"schema": "ontology"},
     )
 
     # Khóa chính định danh Snapshot (UUID v4)

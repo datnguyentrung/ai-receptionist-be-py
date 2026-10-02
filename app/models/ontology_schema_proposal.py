@@ -47,6 +47,7 @@ class OntologySchemaProposal(Base):
     """
 
     __tablename__ = "ontology_schema_proposal"
+    __table_args__ = {"schema": "ontology"}
 
     # Khóa chính định danh đề xuất (UUID v4)
     id: Mapped[uuid.UUID] = mapped_column(

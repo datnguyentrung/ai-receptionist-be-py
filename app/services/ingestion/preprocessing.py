@@ -50,6 +50,25 @@ def prepare_document(
     chunk_size_chars: int,
     mime_type: str | None = None,
 ) -> PreparedDocument:
+    """Tiền xử lý, kiểm tra tính hợp lệ và phân chia tài liệu thành các chunk văn bản.
+
+    Các bước:
+        1. Kiểm tra điều kiện đầu vào (tên file, dữ liệu rỗng, kích thước vượt ngưỡng, định dạng MIME).
+        2. Phân tích nội dung theo định dạng (.pdf, .docx, .md, .txt) thành các khối `SourceBlock`.
+        3. Khử trùng lặp (Deduplicate), làm sạch ký tự lạ, kiểm tra tỷ lệ ký tự hợp lệ (> 85%).
+        4. Phân chia cấu trúc thành danh sách `PreparedChunk` có tính toán token và content hash.
+
+    Tham số:
+        filename: Tên file tài liệu.
+        data: Dữ liệu nhị phân (bytes) của file.
+        max_file_size: Kích thước tối đa cho phép.
+        chunk_size_chars: Số ký tự mục tiêu cho mỗi chunk.
+        mime_type: Định dạng MIME của file.
+
+    Trả về:
+        PreparedDocument chứa toàn bộ văn bản chuẩn hóa, mã băm SHA256 và danh sách chunks.
+    """
+    # 1. Kiểm tra các cổng bảo vệ cơ bản
     if not filename.strip():
         raise DocumentPreprocessingError("Artifact filename is required")
     if not data:
@@ -59,6 +78,7 @@ def prepare_document(
             f"Artifact exceeds the {max_file_size}-byte ingestion limit"
         )
 
+    # 2. Kiểm tra phần mở rộng file và MIME type
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         raise DocumentPreprocessingError(f"Unsupported document type: {suffix or '<none>'}")
@@ -68,6 +88,7 @@ def prepare_document(
             f"MIME type {normalized_mime} does not match the {suffix} artifact"
         )
 
+    # 3. Parse nội dung từ file theo định dạng
     blocks = _parse(suffix, filename, data)
     blocks = _deduplicate_blocks(blocks)
     cleaned = tuple(_clean_block(block) for block in blocks if block.text.strip())
@@ -75,13 +96,16 @@ def prepare_document(
     if not cleaned:
         raise DocumentPreprocessingError("Document contains no usable text after cleaning")
 
+    # 4. Kiểm tra độ nguyên vẹn bảng mã ký tự (tránh file rác / corrupted encoding)
     normalized_text = "\n\n".join(block.text for block in cleaned)
     if _valid_character_ratio(normalized_text) < 0.85:
         raise DocumentPreprocessingError("Document text appears corrupted or badly encoded")
 
+    # 5. Chia văn bản thành các chunks có giới hạn ký tự
     chunks = _chunk(filename, cleaned, max(500, chunk_size_chars))
     if not chunks:
         raise DocumentPreprocessingError("Document could not be divided into chunks")
+
     return PreparedDocument(
         filename=filename,
         content_hash=_sha256(data),
