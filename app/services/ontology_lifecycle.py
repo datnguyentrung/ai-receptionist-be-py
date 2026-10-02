@@ -56,7 +56,27 @@ class OntologyLifecycle:
         evidence: dict[str, Any],
         affected_scope_keys: list[str],
     ) -> OntologySchemaProposal:
-        proposal_kind = SchemaProposalType(proposal_type)
+        if isinstance(proposal_type, SchemaProposalType):
+            proposal_kind = proposal_type
+        else:
+            raw = str(proposal_type).strip().upper()
+            aliases = {
+                "EXTEND_RELATIONSHIP": SchemaProposalType.MODIFY_RELATIONSHIP,
+                "EXTEND_RELATIONSHIP_SOURCE": SchemaProposalType.NEW_RELATIONSHIP,
+                "EXTEND_RELATIONSHIP_TARGET": SchemaProposalType.NEW_RELATIONSHIP,
+                "ADD_RELATIONSHIP": SchemaProposalType.NEW_RELATIONSHIP,
+                "ADD_PROPERTY": SchemaProposalType.NEW_PROPERTY,
+                "ADD_ENTITY_TYPE": SchemaProposalType.NEW_ENTITY_TYPE,
+                "ADD_ENTITY": SchemaProposalType.NEW_ENTITY_TYPE,
+                "ADD_SCOPE": SchemaProposalType.NEW_SCOPE,
+            }
+            proposal_kind = aliases.get(raw) or SchemaProposalType(raw)
+
+        payload = dict(payload) if payload else {}
+        evidence = dict(evidence) if evidence else {}
+        if technical_name and "technicalName" not in payload:
+            payload["technicalName"] = technical_name
+
         digest = _digest({
             "ingestionId": ingestion_id, "batchIndex": batch_index,
             "type": proposal_kind.value, "technicalName": technical_name,

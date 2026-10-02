@@ -37,6 +37,85 @@ COMPILER_VERSION = "ontology-compiler-v2"
 logger = logging.getLogger(__name__)
 
 
+def validate_coverage_integrity(
+    fragment: GraphPatchFragment,
+    chunks: Iterable[PreparedChunk],
+) -> list[ValidationIssue]:
+    """Validate that coverage decisions correspond to real graph contributions."""
+    issues: list[ValidationIssue] = []
+    chunk_by_index = {chunk.chunk_index: chunk for chunk in chunks}
+    expected_coverage = set(chunk_by_index)
+    coverage_positions: dict[int, list[int]] = {}
+    for coverage_index, item in enumerate(fragment.coverage):
+        coverage_positions.setdefault(item.chunk_index, []).append(coverage_index)
+
+    supplied_coverage = set(coverage_positions)
+    for index in sorted(expected_coverage - supplied_coverage):
+        issues.append(
+            ValidationIssue(
+                code="COVERAGE_MISSING",
+                message=f"Chunk {index} is missing from coverage",
+                location="coverage",
+                retryable=True,
+            )
+        )
+    for index in sorted(supplied_coverage - expected_coverage):
+        issues.append(
+            ValidationIssue(
+                code="COVERAGE_UNKNOWN_CHUNK",
+                message=f"Coverage references unknown chunk {index}",
+                location="coverage",
+            )
+        )
+    for chunk_index, positions in sorted(coverage_positions.items()):
+        if len(positions) > 1:
+            issues.append(
+                ValidationIssue(
+                    code="COVERAGE_DUPLICATE",
+                    message=f"Chunk {chunk_index} has multiple coverage decisions",
+                    location="coverage",
+                    retryable=True,
+                )
+            )
+
+    mapped_evidence_chunks: set[int] = set()
+    for node in fragment.nodes:
+        mapped_evidence_chunks.update(item.chunk_index for item in node.evidence)
+        for fact in node.properties:
+            mapped_evidence_chunks.update(item.chunk_index for item in fact.evidence)
+    for edge in fragment.edges:
+        mapped_evidence_chunks.update(item.chunk_index for item in edge.evidence)
+
+    for coverage_index, item in enumerate(fragment.coverage):
+        if item.chunk_index not in expected_coverage:
+            continue
+        if item.decision == "MAPPED" and item.chunk_index not in mapped_evidence_chunks:
+            issues.append(
+                ValidationIssue(
+                    code="MAPPED_WITHOUT_MAPPING",
+                    message=(
+                        f"Chunk {item.chunk_index} is marked MAPPED but no "
+                        "node, property, or edge carries evidence from that chunk"
+                    ),
+                    location=f"coverage.{coverage_index}.decision",
+                    retryable=True,
+                )
+            )
+        elif item.decision == "SCHEMA_GAP":
+            issues.append(
+                ValidationIssue(
+                    code="SCHEMA_GAP_CANDIDATE",
+                    message=(
+                        f"Chunk {item.chunk_index} contains relevant knowledge "
+                        f"that the loaded ontology cannot represent: {item.reason}"
+                    ),
+                    location=f"coverage.{coverage_index}.decision",
+                    retryable=False,
+                )
+            )
+    return issues
+
+
 class OntologyRegistry:
     """Bộ kiểm tra xác thực đối chiếu đồ thị tri thức với Schema Ontology.
 
@@ -60,8 +139,12 @@ class OntologyRegistry:
             (item["entityType"], item["technicalName"]): item
             for item in projection.properties
         }
-        self.relationships = {
-            item["technicalName"]: item for item in projection.relationships
+        self.relationships: dict[str, list[dict[str, Any]]] = {}
+        for item in projection.relationships:
+            self.relationships.setdefault(item["technicalName"], []).append(item)
+        self.relationships_by_signature: dict[tuple[str, str, str], dict[str, Any]] = {
+            (item["technicalName"], item["sourceEntityType"], item["targetEntityType"]): item
+            for item in projection.relationships
         }
         self._entity_names = self._name_index(projection.entity_types)
         self._relationship_names = self._name_index(projection.relationships)
@@ -190,26 +273,8 @@ class OntologyRegistry:
                 )
             )
 
-        # 2. Kiểm tra độ phủ (Coverage) của các chunks trong batch
-        supplied_coverage = {item.chunk_index for item in fragment.coverage}
-        expected_coverage = set(chunk_by_index)
-        for index in sorted(expected_coverage - supplied_coverage):
-            issues.append(
-                ValidationIssue(
-                    code="COVERAGE_MISSING",
-                    message=f"Chunk {index} is missing from coverage",
-                    location="coverage",
-                    retryable=True,
-                )
-            )
-        for index in sorted(supplied_coverage - expected_coverage):
-            issues.append(
-                ValidationIssue(
-                    code="COVERAGE_UNKNOWN_CHUNK",
-                    message=f"Coverage references unknown chunk {index}",
-                    location="coverage",
-                )
-            )
+        # 2. Kiểm tra semantic coverage của từng chunk.
+        issues.extend(validate_coverage_integrity(fragment, chunk_by_index.values()))
 
         # 3. Kiểm tra tính hợp lệ của từng Thực thể (Node) và các Thuộc tính (Properties)
         node_types: dict[str, str] = dict(external_node_types or {})
@@ -309,8 +374,8 @@ class OntologyRegistry:
 
         # 4. Kiểm tra tính hợp lệ của các Mối quan hệ (Edges)
         for edge_index, edge in enumerate(fragment.edges):
-            contract = self.relationships.get(edge.edge_name)
-            if contract is None:
+            contracts = self.relationships.get(edge.edge_name)
+            if not contracts:
                 issues.append(
                     ValidationIssue(
                         code="UNKNOWN_RELATIONSHIP",
@@ -331,14 +396,18 @@ class OntologyRegistry:
                         )
                     )
                     continue
-                if (
-                    source_type != contract["sourceEntityType"]
-                    or target_type != contract["targetEntityType"]
-                ):
+                matching_contract = self.relationships_by_signature.get(
+                    (edge.edge_name, source_type, target_type)
+                )
+                if matching_contract is None:
+                    expected_pairs = [
+                        f"{c['sourceEntityType']} -> {c['targetEntityType']}"
+                        for c in contracts
+                    ]
                     issues.append(
                         ValidationIssue(
                             code="RELATIONSHIP_DOMAIN_RANGE_MISMATCH",
-                            message=f"{edge.edge_name} expects {contract['sourceEntityType']} -> {contract['targetEntityType']}",
+                            message=f"{edge.edge_name} expects {' or '.join(expected_pairs)}",
                             location=f"edges.{edge_index}",
                         )
                     )

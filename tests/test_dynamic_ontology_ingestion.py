@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+
+from app.core.schemas.ingestion import DocumentChunk
 from app.models import (
     OntologyEntityType,
     OntologyProperty,
@@ -13,14 +15,23 @@ from app.models import (
     SchemaProposalType,
 )
 from app.schemas.ingestion_schema import (
+    ChunkCoverage,
+    Evidence,
+    GraphEdge,
+    GraphNode,
+    GraphPatchFragment,
     IngestionJobStatus,
     OntologyProjection,
     PreparedChunk,
+    SemanticGraphPatchFragment,
 )
 from app.services.ingestion.graph_store import Neo4jIngestionStore
-from app.services.ingestion.ontology import merge_projections
-from app.services.ingestion.operations import finalize, submit_batch
-from app.core.schemas.ingestion import DocumentChunk
+from app.services.ingestion.ontology import OntologyRegistry, merge_projections
+from app.services.ingestion.operations import (
+    _classify_missing_scopes,
+    finalize,
+    submit_batch,
+)
 from app.services.ingestion.repository import (
     IngestionRepository,
     snapshot_bindings_unchanged,
@@ -254,3 +265,310 @@ def test_skill_owns_batch_loop_scope_selection_and_approval_gate() -> None:
     assert "một hoặc nhiều scope" in skill
     assert "không tự approve" in skill
     assert "Chỉ sau trạng thái `APPROVED`" in skill
+
+
+def test_domain_range_mismatch_uses_dynamic_ontology_compatibility() -> None:
+    selected = projection(
+        "training",
+        entities=[
+            {"id": "org", "technicalName": "organization"},
+            {"id": "program", "technicalName": "class_program"},
+            {"id": "policy", "technicalName": "policy"},
+        ],
+        relationships=[{
+            "id": "has-policy",
+            "technicalName": "has_policy",
+            "sourceEntityType": "class_program",
+            "targetEntityType": "policy",
+        }],
+    )
+    other = projection(
+        "organization",
+        entities=[
+            {"id": "org", "technicalName": "organization"},
+            {"id": "policy", "technicalName": "policy"},
+        ],
+        relationships=[{
+            "id": "org-policy",
+            "technicalName": "organization_has_policy",
+            "sourceEntityType": "organization",
+            "targetEntityType": "policy",
+        }],
+    )
+    semantic = SemanticGraphPatchFragment.model_validate({
+        "ontologyVersion": "v1",
+        "nodes": [
+            {"tempId": "org-1", "className": "organization"},
+            {"tempId": "policy-1", "className": "policy"},
+        ],
+        "edges": [{
+            "edgeName": "has_policy",
+            "sourceTempId": "org-1",
+            "targetTempId": "policy-1",
+            "evidence": [{"source": "x", "chunkIndex": 0, "text": "x"}],
+        }],
+        "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "test"}],
+    })
+    issues = [{
+        "code": "RELATIONSHIP_DOMAIN_RANGE_MISMATCH",
+        "message": "has_policy expects class_program -> policy",
+        "location": "edges.0",
+        "retryable": False,
+    }]
+
+    class Cache:
+        async def list_scopes(self, _):
+            return (
+                SimpleNamespace(scope_key="training"),
+                SimpleNamespace(scope_key="organization"),
+            )
+
+        async def get_many(self, scope_keys, _):
+            return other if scope_keys == ["organization"] else selected
+
+        async def get(self, scope_key, _):
+            return other if scope_key == "organization" else selected
+
+    result = asyncio.run(_classify_missing_scopes(
+        Cache(),
+        selected.version_id,
+        selected,
+        semantic,
+        issues,
+    ))
+
+    assert result[0]["code"] == "MISSING_SCOPE"
+    assert result[0]["candidateScopes"] == ["organization"]
+    assert result[0]["candidateRelationships"] == {
+        "organization": ["organization_has_policy"]
+    }
+
+
+def test_polymorphic_relationships_validation() -> None:
+    proj = projection(
+        "core",
+        entities=[
+            {"id": "e1", "technicalName": "class_program"},
+            {"id": "e2", "technicalName": "location"},
+            {"id": "e3", "technicalName": "schedule"},
+        ],
+        relationships=[
+            {
+                "id": "r1",
+                "technicalName": "has_schedule",
+                "sourceEntityType": "class_program",
+                "targetEntityType": "schedule",
+            },
+            {
+                "id": "r2",
+                "technicalName": "has_schedule",
+                "sourceEntityType": "location",
+                "targetEntityType": "schedule",
+            },
+        ],
+    )
+    registry = OntologyRegistry(proj)
+
+    # Test edge from location -> schedule (must be valid)
+    fragment = GraphPatchFragment(
+        ontology_version="v1",
+        nodes=[
+            GraphNode(class_name="location", temp_id="loc_1", properties=[], identity={"name": "Cơ sở 1"}),
+            GraphNode(class_name="schedule", temp_id="sched_1", properties=[], identity={"name": "Lịch 1"}),
+        ],
+        edges=[
+            GraphEdge(edge_name="has_schedule", source_temp_id="loc_1", target_temp_id="sched_1", properties={}, evidence=[Evidence(source="test", chunk_index=0, text="test")]),
+        ],
+        coverage=[ChunkCoverage(chunk_index=0, decision="MAPPED", reason="test")],
+    )
+    issues = registry.validate_fragment(fragment, [PreparedChunk(chunk_id="c0", chunk_index=0, text="test", content_hash="h", token_count=1, source_anchor="a")])
+    domain_issues = [i for i in issues if i.code == "RELATIONSHIP_DOMAIN_RANGE_MISMATCH"]
+    assert len(domain_issues) == 0, f"Expected 0 mismatch issues, got {domain_issues}"
+
+
+
+def test_mapped_coverage_requires_real_graph_contribution() -> None:
+    registry = OntologyRegistry(projection("core"))
+    chunk = PreparedChunk(
+        chunkId="c0",
+        chunkIndex=0,
+        text="Năm 2017 đạt thành tích nổi bật.",
+        contentHash="h",
+        tokenCount=8,
+        sourceAnchor="source#0",
+    )
+    fragment = GraphPatchFragment(
+        ontologyVersion="v1",
+        nodes=[],
+        edges=[],
+        coverage=[
+            ChunkCoverage(
+                chunkIndex=0,
+                decision="MAPPED",
+                reason="Thành tích năm 2017",
+            )
+        ],
+    )
+
+    issues = registry.validate_fragment(fragment, [chunk])
+
+    assert "MAPPED_WITHOUT_MAPPING" in {issue.code for issue in issues}
+
+
+def test_schema_gap_coverage_becomes_schema_gap_candidate() -> None:
+    registry = OntologyRegistry(projection("core"))
+    chunk = PreparedChunk(
+        chunkId="c0",
+        chunkIndex=0,
+        text="Phùng Thế Lịch là người sáng lập hệ thống.",
+        contentHash="h",
+        tokenCount=10,
+        sourceAnchor="source#0",
+    )
+    fragment = GraphPatchFragment(
+        ontologyVersion="v1",
+        nodes=[],
+        edges=[],
+        coverage=[
+            ChunkCoverage(
+                chunkIndex=0,
+                decision="SCHEMA_GAP",
+                reason="Ontology chưa có quan hệ founder_of",
+            )
+        ],
+    )
+
+    issues = registry.validate_fragment(fragment, [chunk])
+    schema_issues = [issue for issue in issues if issue.code == "SCHEMA_GAP_CANDIDATE"]
+    assert len(schema_issues) == 1
+    assert schema_issues[0].retryable is False
+    assert "founder_of" in schema_issues[0].message
+
+
+def test_submit_does_not_stage_mapped_batch_without_mapping() -> None:
+    async def scenario():
+        repository = IngestionRepository()
+        ontology_id = uuid4()
+        source_chunk = DocumentChunk(
+            index=0,
+            source="history.md",
+            content="Năm 2017 đạt thành tích nổi bật.",
+            documentId="doc",
+            chunkId="chunk-0",
+            contentHash="chunk-hash",
+            structuralPath="history#0",
+            startLine=1,
+            endLine=1,
+        )
+        workspace, _, _ = await repository.create_or_resume(
+            artifact_name="history.md",
+            content_hash="content-hash",
+            chunks=[source_chunk],
+            ontology=SimpleNamespace(version_id=str(ontology_id), version="v1"),
+            document_key="history",
+            scope_hint=None,
+            skill_digest="skill",
+            model_id="model",
+            compiler_version="compiler",
+            batch_size=5,
+            max_batch_chars=15000,
+        )
+        schema = projection("core")
+
+        class Cache:
+            async def get_many(self, *_):
+                return schema
+
+            async def get(self, *_):
+                return schema
+
+        result = await submit_batch(
+            repository,
+            Cache(),
+            str(workspace.job.id),
+            0,
+            ["core"],
+            {
+                "ontologyVersion": "v1",
+                "nodes": [],
+                "edges": [],
+                "coverage": [
+                    {
+                        "chunkIndex": 0,
+                        "decision": "MAPPED",
+                        "reason": "Thành tích năm 2017",
+                    }
+                ],
+            },
+        )
+        current = await repository.get_workspace(str(workspace.job.id))
+        return result, current
+
+    result, current = asyncio.run(scenario())
+
+    assert result["success"] is False
+    assert result["stage"] == "repair_required"
+    assert "MAPPED_WITHOUT_MAPPING" in {
+        item["code"] for item in result["errors"]
+    }
+    assert current.batches[0].status == "REPAIR_REQUIRED"
+
+
+def test_finalize_reopens_legacy_staged_batch_with_fake_mapped_coverage() -> None:
+    async def scenario():
+        repository = IngestionRepository()
+        ontology_id = uuid4()
+        source_chunk = DocumentChunk(
+            index=0,
+            source="history.md",
+            content="Năm 2017 đạt thành tích nổi bật.",
+            documentId="doc",
+            chunkId="chunk-legacy",
+            contentHash="legacy-hash",
+            structuralPath="history#legacy",
+            startLine=1,
+            endLine=1,
+        )
+        workspace, _, _ = await repository.create_or_resume(
+            artifact_name="history.md",
+            content_hash="legacy-content-hash",
+            chunks=[source_chunk],
+            ontology=SimpleNamespace(version_id=str(ontology_id), version="v1"),
+            document_key="legacy-history",
+            scope_hint=None,
+            skill_digest="skill",
+            model_id="model",
+            compiler_version="compiler",
+            batch_size=5,
+            max_batch_chars=15000,
+        )
+        batch = workspace.batches[0]
+        batch.status = "STAGED"
+        batch.scope_keys = ["core"]
+        batch.merged_schema_hash = "hash"
+        batch.graph_fragment = {
+            "ontologyVersion": "v1",
+            "nodes": [],
+            "edges": [],
+            "coverage": [
+                {
+                    "chunkIndex": 0,
+                    "decision": "MAPPED",
+                    "reason": "Thành tích năm 2017",
+                }
+            ],
+        }
+
+        result = await finalize(repository, str(workspace.job.id))
+        current = await repository.get_workspace(str(workspace.job.id))
+        return result, current
+
+    result, current = asyncio.run(scenario())
+
+    assert result["success"] is False
+    assert result["stage"] == "repair_required"
+    assert result["repairBatchIndexes"] == [0]
+    assert "MAPPED_WITHOUT_MAPPING" in {
+        item["code"] for item in result["errors"]
+    }
+    assert current.batches[0].status == "REPAIR_REQUIRED"

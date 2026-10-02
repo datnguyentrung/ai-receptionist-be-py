@@ -41,7 +41,7 @@ class ExtractedEdge(IngestionBaseModel):
 
 class ChunkCoverage(IngestionBaseModel):
     chunk_index: int = Field(ge=0, alias="chunkIndex")
-    decision: Literal["MAPPED", "NOT_RELEVANT"]
+    decision: Literal["MAPPED", "NOT_RELEVANT", "SCHEMA_GAP"]
     reason: str | None = None
 
 

@@ -26,13 +26,15 @@ from app.schemas.ingestion_schema import (
 )
 from app.services.ingestion.document.reader import DocumentReader
 from app.services.ingestion.evidence_guard import GraphFragmentEvidenceGuard
-from app.services.ingestion.graph_store import Neo4jIngestionStore
 from app.services.ingestion.graph_patch_compiler import GraphPatchCompiler
+from app.services.ingestion.graph_store import Neo4jIngestionStore
 from app.services.ingestion.ontology import (
     COMPILER_VERSION,
     OntologyCache,
     OntologyRegistry,
+    validate_coverage_integrity,
 )
+from app.services.ingestion.repair_guard import RepairGuard
 from app.services.ingestion.repository import (
     IngestionRepository,
     Workspace,
@@ -40,7 +42,7 @@ from app.services.ingestion.repository import (
     workspace_chunks,
     workspace_fingerprint,
 )
-from app.services.ingestion.repair_guard import RepairGuard
+from app.services.ingestion.workflow_policy import evaluate_workflow
 
 MAX_BATCH_VALIDATION_ATTEMPTS = max(
     1, int(os.getenv("INGESTION_MAX_BATCH_VALIDATION_ATTEMPTS", "2"))
@@ -104,11 +106,9 @@ async def get_batch(
     batch_index: int,
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
-    if workspace.job.status in {
-        IngestionJobStatus.COMMITTED,
-        IngestionJobStatus.FAILED,
-    }:
-        return status_payload(workspace)
+    guarded = workflow_guard_payload(workspace, "get_batch")
+    if guarded is not None:
+        return guarded
     batch = next(
         (item for item in workspace.batches if item.batch_index == batch_index), None
     )
@@ -152,6 +152,9 @@ async def submit_batch(
     semantic_fragment: SemanticGraphPatchFragment,
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
+    guarded = workflow_guard_payload(workspace, "submit_batch")
+    if guarded is not None:
+        return guarded
     batch = next(
         (item for item in workspace.batches if item.batch_index == batch_index), None
     )
@@ -295,9 +298,12 @@ async def submit_batch(
         issues = await _classify_missing_scopes(
             ontology_cache,
             str(workspace.job.ontology_version_id),
-            projection.scope_keys,
+            projection,
             canonical_semantic,
             issues,
+            external_node_types={
+                ref: item["className"] for ref, item in entity_index.items()
+            },
         )
         workspace = await repository.store_batch_result(
             ingestion_id,
@@ -319,13 +325,21 @@ async def submit_batch(
                 batch_index,
                 result.get("attempt"),
             )
-        if any(
-            item["code"]
-            in {"UNKNOWN_ENTITY_TYPE", "UNKNOWN_PROPERTY", "UNKNOWN_RELATIONSHIP"}
-            for item in issues
-        ):
-            result["stage"] = "schema_gap_candidate"
-            result["nextAction"] = "assess_schema_gap"
+        if not result["terminal"]:
+            codes = {item.get("code") for item in issues}
+            if codes & {
+                "SCHEMA_GAP_CANDIDATE",
+                "UNKNOWN_ENTITY_TYPE",
+                "UNKNOWN_PROPERTY",
+                "UNKNOWN_RELATIONSHIP",
+            }:
+                result["stage"] = "schema_gap_candidate"
+                result["nextAction"] = "assess_schema_gap"
+                result["retryRequired"] = False
+            elif "MISSING_SCOPE" in codes:
+                result["stage"] = "scope_reselection_required"
+                result["nextAction"] = "reselect_scopes"
+                result["retryRequired"] = True
         return result
 
     workspace = await repository.store_batch_result(
@@ -358,6 +372,9 @@ async def finalize(
     ingestion_id: str,
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
+    guarded = workflow_guard_payload(workspace, "finalize")
+    if guarded is not None:
+        return guarded
     incomplete = [
         item.batch_index for item in workspace.batches if item.status != "STAGED"
     ]
@@ -386,6 +403,57 @@ async def finalize(
             ],
         }
 
+    coverage_errors: dict[int, list[dict[str, Any]]] = {}
+    for batch in workspace.batches:
+        if not batch.graph_fragment:
+            continue
+        try:
+            fragment = GraphPatchFragment.model_validate(batch.graph_fragment)
+        except ValidationError as exc:
+            coverage_errors[batch.batch_index] = [
+                {
+                    "code": "INVALID_STAGED_GRAPH_FRAGMENT",
+                    "message": item["msg"],
+                    "location": ".".join(str(part) for part in item["loc"]),
+                    "retryable": True,
+                }
+                for item in exc.errors()
+            ]
+            continue
+
+        issues = validate_coverage_integrity(
+            fragment,
+            workspace_chunks(workspace, batch.chunk_indexes),
+        )
+        if issues:
+            coverage_errors[batch.batch_index] = [
+                issue.model_dump(by_alias=True, mode="json") for issue in issues
+            ]
+
+    if coverage_errors:
+        for batch_index, issues in coverage_errors.items():
+            workspace = await repository.mark_batch_for_repair(
+                ingestion_id, batch_index, issues
+            )
+        flattened = [
+            {**issue, "batchIndex": batch_index}
+            for batch_index, issues in coverage_errors.items()
+            for issue in issues
+        ]
+        has_schema_gap = any(
+            item.get("code") == "SCHEMA_GAP_CANDIDATE" for item in flattened
+        )
+        return {
+            "success": False,
+            "stage": "schema_gap_candidate" if has_schema_gap else "repair_required",
+            "terminal": False,
+            "retryRequired": not has_schema_gap,
+            "nextAction": "assess_schema_gap" if has_schema_gap else "repair_batches",
+            "ingestionId": ingestion_id,
+            "repairBatchIndexes": sorted(coverage_errors),
+            "errors": flattened,
+        }
+
     return status_payload(
         await repository.mark_ready(ingestion_id, workspace_fingerprint(workspace))
     )
@@ -398,6 +466,9 @@ async def fill(
 ) -> dict[str, Any]:
     """Ghi chính thức tri thức vào Neo4j và cập nhật trạng thái COMMITTED cho workspace trong bộ nhớ RAM."""
     workspace = await required_workspace(repository, ingestion_id)
+    guarded = workflow_guard_payload(workspace, "fill")
+    if guarded is not None:
+        return guarded
     if workspace.job.status == IngestionJobStatus.COMMITTED:
         return status_payload(workspace, idempotent=True)
     expected = workspace_fingerprint(workspace)
@@ -559,66 +630,156 @@ async def rollback_version(
 async def _classify_missing_scopes(
     ontology_cache: OntologyCache,
     ontology_version_id: str,
-    selected_scope_keys: list[str],
+    selected_projection,
     semantic: SemanticGraphPatchFragment,
     issues: list[dict[str, Any]],
+    *,
+    external_node_types: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Distinguish an omitted scope from a true ontology schema gap."""
-    unknown_codes = {
+    """Classify ontology errors by introspecting the pinned ontology version.
+
+    The classifier is data-driven: it never knows domain-specific relationship names.
+    It distinguishes model mapping errors, omitted scopes, and genuine schema gaps.
+    """
+    relevant_codes = {
         "UNKNOWN_ENTITY_TYPE",
         "UNKNOWN_PROPERTY",
         "UNKNOWN_RELATIONSHIP",
+        "RELATIONSHIP_DOMAIN_RANGE_MISMATCH",
     }
-    if not any(item.get("code") in unknown_codes for item in issues):
+    if not any(item.get("code") in relevant_codes for item in issues):
         return issues
-    if not hasattr(ontology_cache, "list_scopes"):
-        return issues
-    catalog = await ontology_cache.list_scopes(ontology_version_id)
-    other_keys = [
-        item.scope_key for item in catalog if item.scope_key not in selected_scope_keys
-    ]
-    if not other_keys:
-        return issues
-    other_projection = await ontology_cache.get_many(other_keys, ontology_version_id)
-    other_registry = OntologyRegistry(other_projection)
-    classified = []
+
+    selected_scope_keys = list(getattr(selected_projection, "scope_keys", []) or [])
+    node_types = {node.temp_id: node.class_name for node in semantic.nodes}
+    node_types.update(external_node_types or {})
+
+    other_keys: list[str] = []
+    other_registry = None
+    if hasattr(ontology_cache, "list_scopes"):
+        catalog = await ontology_cache.list_scopes(ontology_version_id)
+        other_keys = [
+            item.scope_key for item in catalog
+            if item.scope_key not in selected_scope_keys
+        ]
+        if other_keys:
+            other_projection = await ontology_cache.get_many(
+                other_keys, ontology_version_id
+            )
+            other_registry = OntologyRegistry(other_projection)
+
+    classified: list[dict[str, Any]] = []
     for issue in issues:
-        found_scope = False
+        code = issue.get("code")
         location = str(issue.get("location") or "")
         parts = location.split(".")
+        updated = issue
         try:
-            if issue.get("code") == "UNKNOWN_ENTITY_TYPE":
+            if code == "UNKNOWN_ENTITY_TYPE" and other_registry is not None:
                 node = semantic.nodes[int(parts[1])]
-                found_scope = other_registry.resolve_entity_name(node.class_name) is not None
-            elif issue.get("code") == "UNKNOWN_PROPERTY":
+                if other_registry.resolve_entity_name(node.class_name) is not None:
+                    updated = _missing_scope_issue(issue)
+
+            elif code == "UNKNOWN_PROPERTY" and other_registry is not None:
                 node = semantic.nodes[int(parts[1])]
                 fact = node.properties[int(parts[3])]
                 other_class = other_registry.resolve_entity_name(node.class_name)
-                found_scope = bool(
+                if (
                     other_class
                     and other_registry.resolve_property_name(
                         other_class, fact.property_name
                     )
-                )
-            elif issue.get("code") == "UNKNOWN_RELATIONSHIP":
+                ):
+                    updated = _missing_scope_issue(issue)
+
+            elif code == "UNKNOWN_RELATIONSHIP" and other_registry is not None:
                 edge = semantic.edges[int(parts[1])]
-                found_scope = (
-                    other_registry.resolve_relationship_name(edge.edge_name) is not None
-                )
-        except (IndexError, TypeError, ValueError):
-            found_scope = False
-        if found_scope:
-            issue = {
-                **issue,
-                "code": "MISSING_SCOPE",
-                "message": (
-                    f"{issue['message']}; the concept exists in another scope "
-                    "of the pinned ontology version"
-                ),
-                "retryable": True,
-            }
-        classified.append(issue)
+                if other_registry.resolve_relationship_name(edge.edge_name) is not None:
+                    updated = _missing_scope_issue(issue)
+
+            elif code == "RELATIONSHIP_DOMAIN_RANGE_MISMATCH":
+                edge = semantic.edges[int(parts[1])]
+                source_type = node_types.get(edge.source_temp_id)
+                target_type = node_types.get(edge.target_temp_id)
+                if source_type and target_type:
+                    selected_candidates = _compatible_relationships(
+                        selected_projection.relationships,
+                        source_type,
+                        target_type,
+                    )
+                    if selected_candidates:
+                        updated = {
+                            **issue,
+                            "code": "RELATIONSHIP_MAPPING_MISMATCH",
+                            "message": (
+                                f"{issue['message']}; compatible relationship(s) "
+                                f"in the loaded schema: {selected_candidates}"
+                            ),
+                            "retryable": True,
+                            "candidateRelationships": selected_candidates,
+                        }
+                    else:
+                        scope_candidates: dict[str, list[str]] = {}
+                        if hasattr(ontology_cache, "get"):
+                            for scope_key in other_keys:
+                                projection = await ontology_cache.get(
+                                    scope_key, ontology_version_id
+                                )
+                                candidates = _compatible_relationships(
+                                    projection.relationships,
+                                    source_type,
+                                    target_type,
+                                )
+                                if candidates:
+                                    scope_candidates[scope_key] = candidates
+                        if scope_candidates:
+                            updated = {
+                                **_missing_scope_issue(issue),
+                                "candidateScopes": sorted(scope_candidates),
+                                "candidateRelationships": scope_candidates,
+                            }
+                        else:
+                            updated = {
+                                **issue,
+                                "code": "SCHEMA_GAP_CANDIDATE",
+                                "message": (
+                                    f"{issue['message']}; no relationship in the "
+                                    f"pinned ontology supports {source_type} -> {target_type}"
+                                ),
+                                "retryable": False,
+                                "sourceEntityType": source_type,
+                                "targetEntityType": target_type,
+                            }
+        except (IndexError, KeyError, TypeError, ValueError):
+            updated = issue
+        classified.append(updated)
     return classified
+
+
+def _missing_scope_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **issue,
+        "code": "MISSING_SCOPE",
+        "message": (
+            f"{issue['message']}; the concept exists in another scope "
+            "of the pinned ontology version"
+        ),
+        "retryable": True,
+    }
+
+
+def _compatible_relationships(
+    relationships: list[dict[str, Any]],
+    source_type: str,
+    target_type: str,
+) -> list[str]:
+    return sorted({
+        item["technicalName"]
+        for item in relationships
+        if item.get("sourceEntityType") == source_type
+        and item.get("targetEntityType") == target_type
+        and item.get("technicalName")
+    })
 
 
 async def required_workspace(
@@ -628,6 +789,21 @@ async def required_workspace(
     if workspace is None:
         raise KeyError(f"Unknown ingestionId: {ingestion_id}")
     return workspace
+
+
+def workflow_guard_payload(
+    workspace: Workspace,
+    action: str,
+) -> dict[str, Any] | None:
+    """Return a structured state payload when an action is illegal in the current job state."""
+    decision = evaluate_workflow(workspace.job.status, action)
+    if decision.allowed:
+        return None
+    result = status_payload(workspace)
+    result["blockedAction"] = action
+    if decision.next_action is not None:
+        result["nextAction"] = decision.next_action
+    return result
 
 
 def batch_failure_payload(
@@ -642,9 +818,11 @@ def batch_failure_payload(
             "success": False,
             "stage": "explicit_extraction_failure",
             "terminal": True,
-            "nextAction": None,
+            "retryRequired": False,
+            "nextAction": "explicit_extraction_failure",
             "ingestionId": str(workspace.job.id),
             "batchIndex": batch_index,
+            "affectedChunkIndexes": list(getattr(batch, "chunk_indexes", [])),
             "attempt": batch.validation_attempts,
             "maxAttempts": max_attempts,
             "errors": [
@@ -659,21 +837,12 @@ def batch_failure_payload(
         "success": False,
         "stage": "repair_required",
         "terminal": False,
+        "retryRequired": True,
         "nextAction": "repair_batch",
         "ingestionId": str(workspace.job.id),
         "batchIndex": batch_index,
-        "scopeKeys": getattr(batch, "scope_keys", []),  # phạm vi đã dùng
-        "snapshotHashes": getattr(batch, "snapshot_hashes", {}),  # snapshot đã dùng
-        "mergedSchemaHash": getattr(
-            batch, "merged_schema_hash", None
-        ),  # lược đồ hợp nhất đã dùng
-        "graphFragment": getattr(batch, "graph_fragment", None),
-        "semanticFragment": getattr(batch, "semantic_fragment", None),
-        "canonicalGraphContext": _canonical_context(workspace, batch_index),
-        "chunks": [
-            item.model_dump(by_alias=True, mode="json")
-            for item in workspace_chunks(workspace, batch.chunk_indexes)
-        ],
+        "scopeKeys": getattr(batch, "scope_keys", []),
+        "affectedChunkIndexes": list(getattr(batch, "chunk_indexes", [])),
         "errors": issues,
         "validationAttempts": getattr(batch, "validation_attempts", 0),
         "maxAttempts": max_attempts,
@@ -692,7 +861,11 @@ def status_payload(
     if workspace.job.status == IngestionJobStatus.COMMITTED:
         stage, terminal, next_action = "committed", True, None
     elif workspace.job.status == IngestionJobStatus.FAILED:
-        stage, terminal, next_action = "failed", True, None
+        stage, terminal, next_action = (
+            "explicit_extraction_failure",
+            True,
+            "explicit_extraction_failure",
+        )
     elif workspace.job.status == IngestionJobStatus.READY:
         stage, terminal, next_action = "ready_to_fill", False, "fill"
     elif pending is None:
@@ -711,6 +884,7 @@ def status_payload(
         "success": workspace.job.status != IngestionJobStatus.FAILED,
         "stage": stage,
         "terminal": terminal,
+        "retryRequired": next_action == "repair_batch",
         "nextAction": next_action,
         "ingestionId": str(workspace.job.id),
         "documentId": str(workspace.document.id),

@@ -105,7 +105,7 @@ class GraphEdge(IngestionModel):
 
 class ChunkCoverage(IngestionModel):
     chunk_index: int = Field(ge=0)
-    decision: Literal["MAPPED", "NOT_RELEVANT"]
+    decision: Literal["MAPPED", "NOT_RELEVANT", "SCHEMA_GAP"]
     reason: str = Field(min_length=1)
 
 

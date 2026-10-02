@@ -87,9 +87,13 @@ class GraphPatchCompiler:
             return GraphPatchCompileResult(issues=issues)
 
         canonical_edges: list[GraphEdge] = []
-        relationships = {
-            item["technicalName"]: item for item in projection.relationships
+        relationships_by_sig = {
+            (item["technicalName"], item["sourceEntityType"], item["targetEntityType"]): item
+            for item in projection.relationships
         }
+        relationships = {}
+        for item in projection.relationships:
+            relationships.setdefault(item["technicalName"], []).append(item)
         for edge_index, edge in enumerate(semantic_fragment.edges):
             source_key = self._resolve_endpoint(
                 edge.source_temp_id, local_entity_keys, staged_entities
@@ -115,18 +119,22 @@ class GraphPatchCompiler:
                         retryable=True,
                     )
                 )
-            contract = relationships.get(edge.edge_name)
-            if contract and source_key and target_key:
+            contracts = relationships.get(edge.edge_name)
+            if contracts and source_key and target_key:
                 source_type = node_types.get(source_key)
                 target_type = node_types.get(target_key)
                 if (
-                    source_type != contract["sourceEntityType"]
-                    or target_type != contract["targetEntityType"]
+                    source_type and target_type
+                    and (edge.edge_name, source_type, target_type) not in relationships_by_sig
                 ):
+                    expected_pairs = [
+                        f"{c['sourceEntityType']} -> {c['targetEntityType']}"
+                        for c in contracts
+                    ]
                     issues.append(
                         ValidationIssue(
                             code="RELATIONSHIP_DOMAIN_RANGE_MISMATCH",
-                            message=f"{edge.edge_name} expects {contract['sourceEntityType']} -> {contract['targetEntityType']}",
+                            message=f"{edge.edge_name} expects {' or '.join(expected_pairs)}",
                             location=f"edges.{edge_index}",
                             retryable=True,
                         )

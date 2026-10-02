@@ -1,7 +1,7 @@
-import json
 import asyncio
-from typing import get_type_hints
+import json
 from pathlib import Path
+from typing import get_type_hints
 
 from app.agent.agent import root_agent
 from app.agent.tools.ingestion_tools import submit_ingestion_batch
@@ -236,6 +236,38 @@ def test_evidence_only_repair_allows_evidence_text_change() -> None:
     assert issues == []
 
 
+def test_evidence_only_repair_cannot_add_properties() -> None:
+    old = _semantic([("name", "Phùng Thế Lịch")])
+    new = _semantic([("name", "Phùng Thế Lịch"), ("description", "HLV")])
+    issues = RepairGuard.compare(
+        previous_semantic_fragment=old,
+        new_semantic_fragment=new,
+        previous_validation_issues=[
+            {
+                "code": "EVIDENCE_NOT_GROUNDED",
+                "location": "nodes.0.properties.0.evidence.0.text",
+            }
+        ],
+    )
+    assert any(issue.code == "REPAIR_MUTATED_UNRELATED_NODE" for issue in issues)
+
+
+def test_non_evidence_repair_can_add_properties() -> None:
+    old = _semantic([("name", "Phùng Thế Lịch")])
+    new = _semantic([("name", "Phùng Thế Lịch"), ("description", "HLV")])
+    issues = RepairGuard.compare(
+        previous_semantic_fragment=old,
+        new_semantic_fragment=new,
+        previous_validation_issues=[
+            {
+                "code": "MAPPED_WITHOUT_MAPPING",
+                "location": "coverage.0.decision",
+            }
+        ],
+    )
+    assert issues == []
+
+
 def test_cross_batch_identity_merge_preserves_distinct_properties() -> None:
     identity = {"name": "Phùng Thế Lịch"}
     first = {
@@ -439,7 +471,7 @@ def test_retry_limit_becomes_terminal_on_third_failed_submit() -> None:
                 ["people"],
                 fragment,
             )
-            for _ in range(3)
+            for _ in range(4)
         ]
 
     results = asyncio.run(scenario())
@@ -447,12 +479,30 @@ def test_retry_limit_becomes_terminal_on_third_failed_submit() -> None:
         "repair_required",
         "repair_required",
         "explicit_extraction_failure",
+        "explicit_extraction_failure",
     ]
-    assert results[-1]["terminal"] is True
-    assert results[-1]["nextAction"] is None
-    assert results[-1]["errors"][0]["code"] == (
+    assert results[0]["terminal"] is False
+    assert results[0]["nextAction"] == "repair_batch"
+    assert results[0]["affectedChunkIndexes"] == [0]
+    for forbidden in (
+        "graphFragment",
+        "semanticFragment",
+        "canonicalGraphContext",
+        "chunks",
+        "snapshotHashes",
+        "mergedSchemaHash",
+    ):
+        assert forbidden not in results[0]
+
+    assert results[2]["terminal"] is True
+    assert results[2]["nextAction"] == "explicit_extraction_failure"
+    assert results[2]["errors"][0]["code"] == (
         "BATCH_VALIDATION_RETRY_LIMIT_EXCEEDED"
     )
+    assert results[3]["terminal"] is True
+    assert results[3]["nextAction"] == "explicit_extraction_failure"
+    assert results[3]["blockedAction"] == "submit_batch"
+    assert results[3]["errors"][0]["code"] == "INGESTION_FAILED"
 
 
 def test_runtime_batch_size_partitions_23_chunks_into_10_10_3() -> None:
@@ -482,5 +532,82 @@ def test_runtime_batch_size_partitions_23_chunks_into_10_10_3() -> None:
     ]
 
 
-def test_default_ingestion_batch_size_is_10() -> None:
-    assert Settings.model_fields["INGESTION_BATCH_SIZE"].default == 10
+def test_default_ingestion_batch_size_is_5() -> None:
+    assert Settings.model_fields["INGESTION_BATCH_SIZE"].default == 5
+
+
+def test_successful_submit_returns_compact_next_batch_summary() -> None:
+    async def scenario() -> dict:
+        repository = IngestionRepository()
+        ontology = _projection()
+        chunks = [
+            DocumentChunk(
+                index=0,
+                source="people.md",
+                content="Phùng Thế Lịch",
+                documentId="doc",
+                chunkId="chunk-0",
+                contentHash="hash-0",
+                structuralPath="people#0",
+                startLine=1,
+                endLine=1,
+            ),
+            DocumentChunk(
+                index=1,
+                source="people.md",
+                content="Nguyễn Văn A",
+                documentId="doc",
+                chunkId="chunk-1",
+                contentHash="hash-1",
+                structuralPath="people#1",
+                startLine=2,
+                endLine=2,
+            ),
+        ]
+        workspace, _, _ = await repository.create_or_resume(
+            artifact_name="people.md",
+            content_hash="content-hash",
+            chunks=chunks,
+            ontology=type(
+                "Active",
+                (),
+                {
+                    "version_id": "00000000-0000-0000-0000-000000000010",
+                    "version": "v1",
+                },
+            )(),
+            document_key="people",
+            scope_hint=None,
+            skill_digest="skill",
+            model_id="model",
+            compiler_version="compiler",
+            batch_size=1,
+            max_batch_chars=15000,
+        )
+
+        class Cache:
+            async def get_many(self, *_):
+                return ontology
+
+            async def get(self, *_):
+                return ontology
+        return await submit_batch(
+            repository,
+            Cache(),
+            str(workspace.job.id),
+            0,
+            ["people"],
+            _semantic([("name", "Phùng Thế Lịch")]),
+        )
+
+    result = asyncio.run(scenario())
+
+    assert result["success"] is True
+    assert result["stage"] == "batching"
+    assert result["nextBatch"] == {
+        "batchIndex": 1,
+        "chunkIndexes": [1],
+        "selectedScopeKeys": [],
+    }
+    assert "chunks" not in result["nextBatch"]
+    assert "canonicalGraphContext" not in result["nextBatch"]

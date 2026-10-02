@@ -59,27 +59,6 @@ def create_root_agent() -> Agent:
     )
 
 
-# quét ngược từ submit
-# ↓
-# tìm lần gọi get_ingestion_batch gần nhất
-# ↓
-# đó là đầu của ngữ cảnh batch hiện tại
-def _find_current_batch_start(
-    contents: list[types.Content],
-    submit_index: int,
-) -> int | None:
-    for index in range(submit_index - 1, -1, -1):
-        content = contents[index]
-
-        for part in content.parts or []:
-            call = part.function_call
-
-            if call is not None and call.name == "get_ingestion_batch":
-                return index
-
-    return None
-
-
 def _compact_ingestion_context(
     contents: list[types.Content],
 ) -> list[types.Content]:
@@ -133,21 +112,21 @@ def _compact_ingestion_context(
 
     checkpoint = {
         "ingestionId": response.get("ingestionId"),
+        "success": response.get("success"),
         "stage": response.get("stage"),
+        "terminal": response.get("terminal"),
+        "retryRequired": response.get("retryRequired"),
         "nextAction": response.get("nextAction"),
         "processedBatches": response.get("processedBatches"),
         "remainingBatches": response.get("remainingBatches"),
         "nextBatch": response.get("nextBatch"),
-        "workspaceStats": response.get("workspaceStats"),
-        "ontologyVersionId": response.get("ontologyVersionId"),
-        # Thông tin cần để sửa đúng batch hiện tại
         "batchIndex": response.get("batchIndex"),
         "scopeKeys": response.get("scopeKeys"),
-        "snapshotHashes": response.get("snapshotHashes"),
-        "mergedSchemaHash": response.get("mergedSchemaHash"),
-        "graphFragment": response.get("graphFragment"),
+        "affectedChunkIndexes": response.get("affectedChunkIndexes"),
         "errors": response.get("errors"),
         "validationAttempts": response.get("validationAttempts"),
+        "attempt": response.get("attempt"),
+        "maxAttempts": response.get("maxAttempts"),
     }
 
     compact_checkpoint = {
@@ -166,49 +145,10 @@ def _compact_ingestion_context(
         )
     )
 
-    # 4. Giữ context cho đến khi hoàn thành batch hiện tại
-    ## Khi submit thành công
-    # STAGED
-    # ↓
-    # compact mạnh
-    # ↓
-    # bỏ dữ liệu batch cũ
-    # ↓
-    # tiết kiệm token
-
-    ## Khi submit lỗi
-    # REPAIR_REQUIRED
-    # ↓
-    # giữ:
-    # GET_BATCH
-    # LIST_SCOPES
-    # LOAD_SCOPES
-    # EXTRACT
-    # SUBMIT ERROR
-    # ↓
-    # model có đủ ngữ cảnh để sửa
-
-    stage = response.get("stage")
-    next_action = response.get("nextAction")
-
-    needs_batch_context = stage in {
-        "repair_required",
-        "schema_gap_candidate",
-    } or next_action in {
-        "repair_batch",
-        "assess_schema_gap",
-    }
-
-    if needs_batch_context:
-        batch_start_index = _find_current_batch_start(
-            contents,
-            last_submit_index,
-        )
-
-        if batch_start_index is not None:
-            result.extend(contents[batch_start_index : last_submit_index + 1])
-    else:
-        result.extend(contents[last_submit_index + 1 :])
+    # 4. Sau mọi submit, bỏ toàn bộ raw history của batch vừa xử lý.
+    # Nếu cần repair, Agent sẽ lấy lại đúng batch/schema tối thiểu bằng tools.
+    # Chỉ giữ các turn thực sự phát sinh sau submit mới nhất.
+    result.extend(contents[last_submit_index + 1 :])
 
     return result
 
