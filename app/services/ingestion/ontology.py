@@ -138,7 +138,7 @@ class OntologyRegistry:
                 )
                 supplied_properties = {fact.property_name for fact in node.properties}
                 for field in required_identity:
-                    if field not in node.identity and field not in supplied_properties:
+                    if field not in node.identity:
                         issues.append(
                             ValidationIssue(
                                 code="IDENTITY_FIELD_MISSING",

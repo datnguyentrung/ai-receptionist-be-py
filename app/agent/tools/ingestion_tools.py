@@ -20,25 +20,13 @@ async def begin_ingestion(
     document_key: str | None = None,
     scope_hint: str | None = None,
 ) -> dict[str, Any]:
-    """Khởi tạo mới hoặc tái sử dụng phiên ingestion còn tồn tại trong tiến trình hiện tại (RAM).
-
-    Công dụng:
-        - Tải file nhị phân của artifact từ phiên làm việc ADK (ToolContext).
-        - Parse tài liệu, làm sạch, băm nhỏ thành chunks và nhóm thành batches.
-        - Khởi tạo mới hoặc tái sử dụng Ingestion Workspace trong bộ nhớ RAM của tiến trình hiện tại.
-        - Lưu `ingestionId` vào trạng thái phiên (`tool_context.state`) để duy trì ngữ cảnh.
-
-    Tham số:
-        artifact_name: Tên của artifact/tài liệu được tải lên trong session.
-        tool_context: Ngữ cảnh thực thi tool của ADK (chứa state và artifact loader).
-        document_key: Khóa định danh tài liệu duy nhất (tùy chọn; mặc định sinh từ tên file).
-        scope_hint: Gợi ý không ràng buộc; tác nhân vẫn phải chọn từ catalog động.
-
-    Trả về:
-        Dictionary chứa thông tin phiên nạp: `ingestionId`, `stage`, `totalBatches`, `nextBatch`...
-    """
+    """Khởi tạo mới hoặc tái sử dụng phiên ingestion còn tồn tại trong tiến trình hiện tại (RAM)."""
+    req = {
+        "artifact_name": artifact_name,
+        "document_key": document_key,
+        "scope_hint": scope_hint,
+    }
     try:
-        # 1. Tải dữ liệu artifact từ phiên làm việc ADK hiện tại
         artifact = await tool_context.load_artifact(artifact_name)
         if (
             artifact is None
@@ -50,7 +38,7 @@ async def begin_ingestion(
                 "ARTIFACT_NOT_FOUND",
                 f"Artifact is unavailable in this ADK session: {artifact_name}",
             )
-            log_ingestion_event(f"BEGIN [{artifact_name}]", payload=err)
+            log_ingestion_event(f"BEGIN [{artifact_name}]", payload=err, request=req)
             return err
 
         container = await get_service_container()
@@ -69,13 +57,12 @@ async def begin_ingestion(
             mime_type=artifact.inline_data.mime_type,
         )
 
-        # 3. Ghi nhận ID phiên nạp vào ADK State để các bước tiếp theo tự động kế thừa
         if result.get("ingestionId"):
             tool_context.state["active_ingestion_id"] = result["ingestionId"]
-        log_ingestion_event(f"BEGIN [{artifact_name}]", payload=result)
+        log_ingestion_event(f"BEGIN [{artifact_name}]", payload=result, request=req)
         return result
     except Exception as exc:
-        log_ingestion_event(f"BEGIN [{artifact_name}]", error=str(exc))
+        log_ingestion_event(f"BEGIN [{artifact_name}]", error=str(exc), request=req)
         raise
 
 
@@ -86,15 +73,57 @@ async def get_ingestion_batch(
 ) -> dict[str, Any]:
     """Lấy nội dung chi tiết các đoạn văn bản (chunks) và ngữ cảnh đã có của một batch."""
     del tool_context
+    req = {"ingestion_id": ingestion_id, "batch_index": batch_index}
     try:
         container = await get_service_container()
         result = await operations.get_batch(
             container.repository, ingestion_id, batch_index
         )
-        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", payload=result)
+        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", payload=result, request=req)
         return result
     except Exception as exc:
-        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", error=str(exc))
+        log_ingestion_event(f"GET_BATCH [idx={batch_index}]", error=str(exc), request=req)
+        raise
+
+
+async def list_ontology_scopes(
+    ingestion_id: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Liệt kê danh mục scope nhẹ của đúng ontology version đã ghim cho ingestion."""
+    del tool_context
+    req = {"ingestion_id": ingestion_id}
+    try:
+        container = await get_service_container()
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
+        result = await operations.list_scopes(
+            container.ontology_cache, str(workspace.job.ontology_version_id)
+        )
+        log_ingestion_event("LIST_SCOPES", payload=result, request=req)
+        return result
+    except Exception as exc:
+        log_ingestion_event("LIST_SCOPES", error=str(exc), request=req)
+        raise
+
+
+async def load_ontology_scopes(
+    ingestion_id: str,
+    scope_keys: list[str],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Tải và hợp nhất deterministic các compiled snapshots đã chọn cho một batch."""
+    req = {"ingestion_id": ingestion_id, "scope_keys": scope_keys}
+    try:
+        container = await get_service_container()
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
+        result = await operations.load_scope(
+            container.ontology_cache, scope_keys, str(workspace.job.ontology_version_id)
+        )
+        tool_context.state["active_ontology_scopes"] = scope_keys
+        log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", payload=result, request=req)
+        return result
+    except Exception as exc:
+        log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", error=str(exc), request=req)
         raise
 
 
@@ -106,6 +135,21 @@ async def submit_ingestion_batch(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Xác thực và lưu tạm (stage) một mảnh đồ thị tri thức (GraphPatchFragment) cho batch."""
+    fragment_dict = (
+        graph_fragment.model_dump(by_alias=True, mode="json")
+        if hasattr(graph_fragment, "model_dump")
+        else graph_fragment
+    )
+    req = {
+        "ingestion_id": ingestion_id,
+        "batch_index": batch_index,
+        "scope_keys": scope_keys,
+        "fragment_summary": {
+            "nodes_count": len(fragment_dict.get("nodes", [])),
+            "edges_count": len(fragment_dict.get("edges", [])),
+            "coverage_count": len(fragment_dict.get("coverage", [])),
+        },
+    }
     try:
         container = await get_service_container()
         result = await operations.submit_batch(
@@ -134,12 +178,18 @@ async def submit_ingestion_batch(
             )
             if result.get(key) is not None
         }
+        # Thêm thông tin nodes & edges vào log payload để theo dõi
+        merged_payload = {**result, **fragment_dict}
         log_ingestion_event(
-            f"SUBMIT_BATCH [idx={batch_index}, scopes={scope_keys}]", payload=result
+            f"SUBMIT_BATCH [idx={batch_index}, scopes={scope_keys}]",
+            payload=merged_payload,
+            request=req,
         )
         return result
     except Exception as exc:
-        log_ingestion_event(f"SUBMIT_BATCH [idx={batch_index}]", error=str(exc))
+        log_ingestion_event(
+            f"SUBMIT_BATCH [idx={batch_index}]", error=str(exc), request=req
+        )
         raise
 
 
@@ -148,6 +198,7 @@ async def finalize_ingestion(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Kiểm tra độ phủ toàn bộ tài liệu và tạo chữ ký sẵn sàng (readiness fingerprint)."""
+    req = {"ingestion_id": ingestion_id}
     try:
         container = await get_service_container()
         result = await operations.finalize(container.repository, ingestion_id)
@@ -155,10 +206,10 @@ async def finalize_ingestion(
             "stage": result.get("stage"),
             "repairBatchIndexes": result.get("repairBatchIndexes", []),
         }
-        log_ingestion_event("FINALIZE", payload=result)
+        log_ingestion_event("FINALIZE", payload=result, request=req)
         return result
     except Exception as exc:
-        log_ingestion_event("FINALIZE", error=str(exc))
+        log_ingestion_event("FINALIZE", error=str(exc), request=req)
         raise
 
 
@@ -167,16 +218,17 @@ async def fill_ingestion(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Ghi chính thức tri thức đã hoàn tất nạp vào Neo4j, cập nhật trạng thái COMMITTED trong RAM và thực hiện đọc kiểm chứng (read-back)."""
+    req = {"ingestion_id": ingestion_id}
     try:
         container = await get_service_container()
         result = await operations.fill(
             container.repository, container.graph_store, ingestion_id
         )
         tool_context.state["ingestion_checkpoint"] = {"stage": result.get("stage")}
-        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=result)
+        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=result, request=req)
         return result
     except Exception as exc:
-        log_ingestion_event("FILL_COMMIT_TO_NEO4J", error=str(exc))
+        log_ingestion_event("FILL_COMMIT_TO_NEO4J", error=str(exc), request=req)
         raise
 
 
@@ -191,34 +243,6 @@ async def get_ingestion_status(
     return operations.status_payload(workspace)
 
 
-async def list_ontology_scopes(
-    ingestion_id: str,
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Liệt kê danh mục scope nhẹ của đúng ontology version đã ghim cho ingestion."""
-    del tool_context
-    container = await get_service_container()
-    workspace = await operations.required_workspace(container.repository, ingestion_id)
-    return await operations.list_scopes(
-        container.ontology_cache, str(workspace.job.ontology_version_id)
-    )
-
-
-async def load_ontology_scopes(
-    ingestion_id: str,
-    scope_keys: list[str],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Tải và hợp nhất deterministic các compiled snapshots đã chọn cho một batch."""
-    container = await get_service_container()
-    workspace = await operations.required_workspace(container.repository, ingestion_id)
-    result = await operations.load_scope(
-        container.ontology_cache, scope_keys, str(workspace.job.ontology_version_id)
-    )
-    tool_context.state["active_ontology_scopes"] = scope_keys
-    return result
-
-
 async def create_schema_proposal(
     ingestion_id: str,
     batch_index: int,
@@ -231,42 +255,56 @@ async def create_schema_proposal(
     technical_name: str | None = None,
 ) -> dict[str, Any]:
     """Lưu bền vững đề xuất thay đổi lược đồ vào PostgreSQL và tạm chặn batch nguồn trong bộ nhớ RAM."""
-    container = await get_service_container()
-    workspace = await operations.required_workspace(container.repository, ingestion_id)
-    proposal = await container.ontology_lifecycle.create_proposal(
-        ingestion_id=ingestion_id,
-        batch_index=batch_index,
-        ontology_version_id=str(workspace.job.ontology_version_id),
-        source_document_id=str(workspace.version.id),
-        proposal_type=proposal_type,
-        technical_name=technical_name,
-        reason=reason,
-        payload=payload,
-        evidence=evidence,
-        affected_scope_keys=affected_scope_keys,
-    )
-    await container.repository.block_batch_for_proposal(
-        ingestion_id,
-        batch_index,
-        [
-            {
-                "code": "SCHEMA_PROPOSAL_PENDING",
-                "message": f"Schema proposal {proposal.id} is waiting for review",
-                "location": f"batch[{batch_index}]",
-                "retryable": True,
-            }
-        ],
-    )
-    tool_context.state["pending_schema_proposal_id"] = str(proposal.id)
-    return {
-        "success": True,
-        "stage": "awaiting_schema_approval",
-        "nextAction": "wait_for_user_review",
-        "ingestionId": ingestion_id,
-        "batchIndex": batch_index,
-        "proposalId": str(proposal.id),
-        "proposalStatus": proposal.status.value,
+    req = {
+        "ingestion_id": ingestion_id,
+        "batch_index": batch_index,
+        "proposal_type": proposal_type,
+        "technical_name": technical_name,
+        "reason": reason,
+        "affected_scope_keys": affected_scope_keys,
     }
+    try:
+        container = await get_service_container()
+        workspace = await operations.required_workspace(container.repository, ingestion_id)
+        proposal = await container.ontology_lifecycle.create_proposal(
+            ingestion_id=ingestion_id,
+            batch_index=batch_index,
+            ontology_version_id=str(workspace.job.ontology_version_id),
+            source_document_id=str(workspace.version.id),
+            proposal_type=proposal_type,
+            technical_name=technical_name,
+            reason=reason,
+            payload=payload,
+            evidence=evidence,
+            affected_scope_keys=affected_scope_keys,
+        )
+        await container.repository.block_batch_for_proposal(
+            ingestion_id,
+            batch_index,
+            [
+                {
+                    "code": "SCHEMA_PROPOSAL_PENDING",
+                    "message": f"Schema proposal {proposal.id} is waiting for review",
+                    "location": f"batch[{batch_index}]",
+                    "retryable": True,
+                }
+            ],
+        )
+        tool_context.state["pending_schema_proposal_id"] = str(proposal.id)
+        result = {
+            "success": True,
+            "stage": "awaiting_schema_approval",
+            "nextAction": "wait_for_user_review",
+            "ingestionId": ingestion_id,
+            "batchIndex": batch_index,
+            "proposalId": str(proposal.id),
+            "proposalStatus": proposal.status.value,
+        }
+        log_ingestion_event("CREATE_SCHEMA_PROPOSAL", payload=result, request=req)
+        return result
+    except Exception as exc:
+        log_ingestion_event("CREATE_SCHEMA_PROPOSAL", error=str(exc), request=req)
+        raise
 
 
 async def get_schema_proposal(
@@ -302,36 +340,43 @@ async def review_schema_proposal(
 ) -> dict[str, Any]:
     """Ghi nhận quyết định phê duyệt hoặc từ chối đề xuất lược đồ vào PostgreSQL; không bao giờ tự gọi nếu không có hướng dẫn từ người dùng."""
     del tool_context
-    container = await get_service_container()
-    proposal = await container.ontology_lifecycle.review_proposal(
-        proposal_id, approved=approved, reviewed_by=reviewed_by
-    )
-    if (
-        not approved
-        and proposal.source_ingestion_id
-        and proposal.source_batch_index is not None
-    ):
-        try:
-            await container.repository.reject_batch_schema_proposal(
-                proposal.source_ingestion_id,
-                proposal.source_batch_index,
-                [
-                    {
-                        "code": "SCHEMA_PROPOSAL_REJECTED",
-                        "message": f"Schema proposal {proposal.id} was rejected",
-                        "location": f"batch[{proposal.source_batch_index}]",
-                        "retryable": True,
-                    }
-                ],
-            )
-        except KeyError:
-            pass
-    return {
-        "success": True,
-        "stage": "schema_proposal_reviewed",
-        "proposalId": str(proposal.id),
-        "proposalStatus": proposal.status.value,
-    }
+    req = {"proposal_id": proposal_id, "approved": approved, "reviewed_by": reviewed_by}
+    try:
+        container = await get_service_container()
+        proposal = await container.ontology_lifecycle.review_proposal(
+            proposal_id, approved=approved, reviewed_by=reviewed_by
+        )
+        if (
+            not approved
+            and proposal.source_ingestion_id
+            and proposal.source_batch_index is not None
+        ):
+            try:
+                await container.repository.reject_batch_schema_proposal(
+                    proposal.source_ingestion_id,
+                    proposal.source_batch_index,
+                    [
+                        {
+                            "code": "SCHEMA_PROPOSAL_REJECTED",
+                            "message": f"Schema proposal {proposal.id} was rejected",
+                            "location": f"batch[{proposal.source_batch_index}]",
+                            "retryable": True,
+                        }
+                    ],
+                )
+            except KeyError:
+                pass
+        result = {
+            "success": True,
+            "stage": "schema_proposal_reviewed",
+            "proposalId": str(proposal.id),
+            "proposalStatus": proposal.status.value,
+        }
+        log_ingestion_event("REVIEW_SCHEMA_PROPOSAL", payload=result, request=req)
+        return result
+    except Exception as exc:
+        log_ingestion_event("REVIEW_SCHEMA_PROPOSAL", error=str(exc), request=req)
+        raise
 
 
 async def apply_schema_proposal(
@@ -342,18 +387,29 @@ async def apply_schema_proposal(
 ) -> dict[str, Any]:
     """Áp dụng đề xuất đã APPROVED bằng cách biên dịch và kích hoạt phiên bản ontology mới trong PostgreSQL."""
     del tool_context
-    container = await get_service_container()
-    version = await container.ontology_lifecycle.apply_proposal(
-        proposal_id, new_version_code=new_version_code, applied_by=applied_by
-    )
-    return {
-        "success": True,
-        "stage": "schema_proposal_applied",
-        "proposalId": proposal_id,
-        "ontologyVersionId": str(version.id),
-        "ontologyVersion": version.version,
-        "nextAction": "rebase_ingestion",
+    req = {
+        "proposal_id": proposal_id,
+        "new_version_code": new_version_code,
+        "applied_by": applied_by,
     }
+    try:
+        container = await get_service_container()
+        version = await container.ontology_lifecycle.apply_proposal(
+            proposal_id, new_version_code=new_version_code, applied_by=applied_by
+        )
+        result = {
+            "success": True,
+            "stage": "schema_proposal_applied",
+            "proposalId": proposal_id,
+            "ontologyVersionId": str(version.id),
+            "ontologyVersion": version.version,
+            "nextAction": "rebase_ingestion",
+        }
+        log_ingestion_event("APPLY_SCHEMA_PROPOSAL", payload=result, request=req)
+        return result
+    except Exception as exc:
+        log_ingestion_event("APPLY_SCHEMA_PROPOSAL", error=str(exc), request=req)
+        raise
 
 
 async def rebase_ingestion(
@@ -362,32 +418,42 @@ async def rebase_ingestion(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Chuyển đổi workspace ingestion trong RAM sang phiên bản ontology mục tiêu từ PostgreSQL và vô hiệu hóa các batch bị ảnh hưởng."""
-    container = await get_service_container()
-    active = await container.ontology_cache.active_version()
-    if target_ontology_version_id != active.version_id:
-        return _tool_error(
-            "ontology_rebase",
-            "TARGET_ONTOLOGY_NOT_ACTIVE",
-            "A job can only be explicitly rebased to the current ACTIVE ontology version.",
-        )
-    catalog = await container.ontology_cache.list_scopes(target_ontology_version_id)
-    hashes = {item.scope_key: item.schema_hash for item in catalog if item.schema_hash}
-    current = await operations.required_workspace(container.repository, ingestion_id)
-    merged_hashes: dict[str, str] = {}
-    for batch in current.batches:
-        if batch.scope_keys and all(
-            hashes.get(key) == batch.snapshot_hashes.get(key)
-            for key in batch.scope_keys
-        ):
-            projection = await container.ontology_cache.get_many(
-                batch.scope_keys, target_ontology_version_id
+    req = {
+        "ingestion_id": ingestion_id,
+        "target_ontology_version_id": target_ontology_version_id,
+    }
+    try:
+        container = await get_service_container()
+        active = await container.ontology_cache.active_version()
+        if target_ontology_version_id != active.version_id:
+            return _tool_error(
+                "ontology_rebase",
+                "TARGET_ONTOLOGY_NOT_ACTIVE",
+                "A job can only be explicitly rebased to the current ACTIVE ontology version.",
             )
-            merged_hashes["\x1f".join(batch.scope_keys)] = projection.digest
-    workspace = await container.repository.rebase_ontology_version(
-        ingestion_id, target_ontology_version_id, hashes, merged_hashes
-    )
-    tool_context.state["active_ingestion_id"] = ingestion_id
-    return operations.status_payload(workspace)
+        catalog = await container.ontology_cache.list_scopes(target_ontology_version_id)
+        hashes = {item.scope_key: item.schema_hash for item in catalog if item.schema_hash}
+        current = await operations.required_workspace(container.repository, ingestion_id)
+        merged_hashes: dict[str, str] = {}
+        for batch in current.batches:
+            if batch.scope_keys and all(
+                hashes.get(key) == batch.snapshot_hashes.get(key)
+                for key in batch.scope_keys
+            ):
+                projection = await container.ontology_cache.get_many(
+                    batch.scope_keys, target_ontology_version_id
+                )
+                merged_hashes["\x1f".join(batch.scope_keys)] = projection.digest
+        workspace = await container.repository.rebase_ontology_version(
+            ingestion_id, target_ontology_version_id, hashes, merged_hashes
+        )
+        tool_context.state["active_ingestion_id"] = ingestion_id
+        res = operations.status_payload(workspace)
+        log_ingestion_event("REBASE_INGESTION", payload=res, request=req)
+        return res
+    except Exception as exc:
+        log_ingestion_event("REBASE_INGESTION", error=str(exc), request=req)
+        raise
 
 
 async def delete_document(
@@ -399,15 +465,16 @@ async def delete_document(
     del tool_context
     if if_missing not in {"error", "ignore"}:
         return _tool_error("delete", "INVALID_IF_MISSING", "Use 'error' or 'ignore'")
+    req = {"document_id": document_id, "if_missing": if_missing}
     try:
         container = await get_service_container()
         result = await operations.delete_document(
             container.repository, container.graph_store, document_id, if_missing
         )
-        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", payload=result)
+        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", payload=result, request=req)
         return result
     except Exception as exc:
-        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", error=str(exc))
+        log_ingestion_event(f"DELETE_DOCUMENT [{document_id}]", error=str(exc), request=req)
         raise
 
 
@@ -418,18 +485,19 @@ async def rollback_document_version(
 ) -> dict[str, Any]:
     """Thu hồi/quay lui (rollback) phiên bản tài liệu về một phiên bản cũ trước đó trong Knowledge Graph Neo4j và cập nhật trạng thái trong RAM."""
     del tool_context
+    req = {"document_id": document_id, "version_id": version_id}
     try:
         container = await get_service_container()
         result = await operations.rollback_version(
             container.repository, container.graph_store, document_id, version_id
         )
         log_ingestion_event(
-            f"ROLLBACK_VERSION [{document_id} -> {version_id}]", payload=result
+            f"ROLLBACK_VERSION [{document_id} -> {version_id}]", payload=result, request=req
         )
         return result
     except Exception as exc:
         log_ingestion_event(
-            f"ROLLBACK_VERSION [{document_id} -> {version_id}]", error=str(exc)
+            f"ROLLBACK_VERSION [{document_id} -> {version_id}]", error=str(exc), request=req
         )
         raise
 

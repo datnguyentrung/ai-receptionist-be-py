@@ -1,9 +1,13 @@
 """Public contracts for Taekwondo document ingestion."""
 
 from enum import StrEnum
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
+
+# dict[str, Any] tự do nhưng JSON Schema không chứa additionalProperties
+# (Gemini Developer API không hỗ trợ additionalProperties)
+FreeformDict = Annotated[dict[str, Any], WithJsonSchema({"type": "object"})]
 
 
 class IngestionModel(BaseModel):
@@ -13,7 +17,7 @@ class IngestionModel(BaseModel):
             for index, word in enumerate(name.split("_"))
         ),
         populate_by_name=True,
-        extra="forbid",
+        extra="ignore",
         str_strip_whitespace=True,
     )
 
@@ -63,7 +67,7 @@ class PropertyFact(IngestionModel):
 class GraphNode(IngestionModel):
     temp_id: str = Field(min_length=1)
     class_name: str = Field(min_length=1)
-    identity: dict[str, Any] = Field(default_factory=dict)
+    identity: FreeformDict = Field(default_factory=dict)
     properties: list[PropertyFact] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     confidence: float | None = Field(default=None, ge=0, le=1)
@@ -73,7 +77,7 @@ class GraphEdge(IngestionModel):
     edge_name: str = Field(min_length=1)
     source_temp_id: str = Field(min_length=1)
     target_temp_id: str = Field(min_length=1)
-    properties: dict[str, Any] = Field(default_factory=dict)
+    properties: FreeformDict = Field(default_factory=dict)
     evidence: list[Evidence] = Field(min_length=1)
     confidence: float | None = Field(default=None, ge=0, le=1)
 
@@ -132,10 +136,10 @@ class OntologyProjection(IngestionModel):
     scope_keys: list[str] = Field(default_factory=list)
     description: str = ""
     compiler_version: str = "ontology-compiler-v2"
-    entity_types: list[dict[str, Any]]
-    properties: list[dict[str, Any]]
-    relationships: list[dict[str, Any]]
-    aliases: list[dict[str, Any]]
+    entity_types: list[FreeformDict]
+    properties: list[FreeformDict]
+    relationships: list[FreeformDict]
+    aliases: list[FreeformDict]
 
 
 class OntologyScopeSummary(IngestionModel):
@@ -143,7 +147,7 @@ class OntologyScopeSummary(IngestionModel):
     ontology_version_id: str
     scope_key: str
     description: str
-    summary: dict[str, Any] = Field(default_factory=dict)
+    summary: FreeformDict = Field(default_factory=dict)
     schema_hash: str | None = None
 
 
@@ -175,6 +179,7 @@ __all__ = [
     "BatchExtractionInput",
     "ChunkCoverage",
     "Evidence",
+    "FreeformDict",
     "GraphEdge",
     "GraphNode",
     "GraphPatchFragment",

@@ -20,7 +20,6 @@ def test_agent_and_ingestion_tools_are_discoverable() -> None:
         "get_ingestion_status",
         "list_ontology_scopes",
         "load_ontology_scopes",
-        "validate_graph_patch",
         "create_schema_proposal",
         "get_schema_proposal",
         "review_schema_proposal",

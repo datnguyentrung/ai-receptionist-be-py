@@ -20,7 +20,7 @@ from app.schemas.ingestion_schema import (
 from app.services.ingestion.graph_store import Neo4jIngestionStore
 from app.services.ingestion.ontology import merge_projections
 from app.services.ingestion.operations import finalize, submit_batch
-from app.services.ingestion.preprocessing import PreparedDocument
+from app.core.schemas.ingestion import DocumentChunk
 from app.services.ingestion.repository import (
     IngestionRepository,
     snapshot_bindings_unchanged,
@@ -162,22 +162,28 @@ def test_finalize_rejects_repair_and_blocked_batches_and_accepts_many_staged() -
 def test_repository_is_process_local_and_does_not_resume_after_restart() -> None:
     async def scenario() -> None:
         ontology_id = uuid4()
-        prepared = PreparedDocument(
-            filename="local.txt",
-            content_hash="content-hash",
-            normalized_text="process local evidence",
-            chunks=(PreparedChunk(
-                chunkId="local-chunk", chunkIndex=0, text="process local evidence",
-                contentHash="chunk-hash", tokenCount=3, sourceAnchor="local.txt#0",
-            ),),
+        chunk = DocumentChunk(
+            index=0,
+            source="local.txt",
+            content="process local evidence",
+            documentId="doc_1",
+            chunkId="chk_1",
+            contentHash="chunk-hash",
+            structuralPath="local.txt#0",
+            startLine=1,
+            endLine=1,
         )
         first = IngestionRepository()
         workspace, resumed, committed = await first.create_or_resume(
-            prepared,
-            SimpleNamespace(version_id=str(ontology_id), version="v-local"),
-            document_key="local-document", scope_hint=None,
-            skill_digest="skill", model_id="model", compiler_version="compiler",
-            batch_size=1,
+            artifact_name="local.txt",
+            content_hash="content-hash",
+            chunks=[chunk],
+            ontology=SimpleNamespace(version_id=str(ontology_id), version="v-local"),
+            document_key="local-document",
+            scope_hint=None,
+            skill_digest="skill",
+            model_id="model",
+            compiler_version="compiler",
         )
         assert not resumed and not committed
         assert await first.get_workspace(str(workspace.job.id)) is workspace

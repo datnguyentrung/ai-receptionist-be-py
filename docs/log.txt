@@ -1,0 +1,288 @@
+# Ingestion Real-time Logs (Started at 2026-10-02 23:25:23)
+
+[2026-10-02 23:25:29] === BEGIN [he-thong-taekwondo-van-quan-gioi-thieu.md] ===
+  📥 REQUEST / INPUT:
+     • artifact_name: he-thong-taekwondo-van-quan-gioi-thieu.md
+     • document_key: None
+     • scope_hint: None
+  • Success: True
+  • Stage: batching
+  • Next Action: process_batch
+  • Tiến độ: 0/3 batches | Tổng cộng 23 chunks
+  • Batch tiếp theo: Batch #0 (xử lý Chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+[2026-10-02 23:25:31] === GET_BATCH [idx=0] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 0
+  • Success: True
+  • Stage: batch_retrieved
+  • Next Action: list_scopes
+  • Đang lấy Batch #0 (gồm các Chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) | Scope: 'None'
+     Các đoạn văn bản nguồn (Chunks):
+       - Chunk [0] Section: 'HỆ THỐNG TAEKWONDO VĂN QUÁN' (80 ký tự)
+       - Chunk [1] Section: 'Giới thiệu' (728 ký tự)
+       - Chunk [2] Section: 'Thông tin tổng quan' (663 ký tự)
+       - Chunk [3] Section: '2012 — Thành lập CLB Taekwondo Văn Quán' (286 ký tự)
+       - Chunk [4] Section: '2012–2019 — Phát triển hệ thống' (198 ký tự)
+       - Chunk [5] Section: '2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán' (228 ký tự)
+       - Chunk [6] Section: '2022 — Kỷ niệm 10 năm thành lập' (441 ký tự)
+       - Chunk [7] Section: 'Thầy Phùng Thế Lịch' (471 ký tự)
+       - Chunk [8] Section: 'Hệ thống cơ sở tập luyện' (295 ký tự)
+       - Chunk [9] Section: 'Cơ sở 1 — Văn Quán' (178 ký tự)
+
+[2026-10-02 23:25:31] === LIST_SCOPES ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+  • Success: True
+  • Stage: scope_catalog_loaded
+  • Danh mục Scopes (7): ['core', 'facility', 'finance', 'fundamentals', 'rank', 'taekwondo', 'training']
+
+[2026-10-02 23:25:33] === LOAD_SCOPES [['fundamentals', 'facility']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • scope_keys: ["fundamentals", "facility"]
+  • Success: True
+  • Stage: schema_loaded
+  • Next Action: extract_batch
+
+[2026-10-02 23:26:04] === SUBMIT_BATCH [idx=0, scopes=['fundamentals', 'facility']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 0
+     • scope_keys: ["fundamentals", "facility"]
+     • fragment_summary: {"nodes_count": 4, "edges_count": 1, "coverage_count": 10}
+  • Success: False
+  • Stage: repair_required
+  • Next Action: repair_batch
+  • Đồ thị trích xuất: 4 Nodes, 1 Edges
+     - Node [organization]: tempId=org_1, identity={"name": "CLB Taekwondo Văn Quán"}
+     - Node [organization]: tempId=org_2, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [person]: tempId=pers_1, identity={"name": "Phùng Thế Lịch"}
+     - Node [location]: tempId=loc_1, identity={"name": "Cơ sở 1 — Văn Quán"}
+     - Edge [located_at]: org_2 -> loc_1
+  ❌ Lỗi trả về (5):
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.2.properties.1.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.3.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.3.properties.0.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.3.properties.1.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: edges.0.evidence.0.text)
+
+[2026-10-02 23:26:11] === SUBMIT_BATCH [idx=0, scopes=['fundamentals', 'facility']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 0
+     • scope_keys: ["fundamentals", "facility"]
+     • fragment_summary: {"nodes_count": 4, "edges_count": 1, "coverage_count": 10}
+  • Success: False
+  • Stage: repair_required
+  • Next Action: repair_batch
+  • Đồ thị trích xuất: 4 Nodes, 1 Edges
+     - Node [organization]: tempId=org_1, identity={"name": "CLB Taekwondo Văn Quán"}
+     - Node [organization]: tempId=org_2, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [person]: tempId=pers_1, identity={"name": "Phùng Thế Lịch"}
+     - Node [location]: tempId=loc_1, identity={"name": "Cơ sở 1 — Văn Quán"}
+     - Edge [located_at]: org_2 -> loc_1
+  ❌ Lỗi trả về (1):
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.3.properties.0.evidence.0.text)
+
+[2026-10-02 23:26:15] === SUBMIT_BATCH [idx=0, scopes=['fundamentals', 'facility']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 0
+     • scope_keys: ["fundamentals", "facility"]
+     • fragment_summary: {"nodes_count": 4, "edges_count": 1, "coverage_count": 10}
+  • Success: True
+  • Stage: batching
+  • Next Action: process_batch
+  • Tiến độ: 1/3 batches | Tổng cộng 23 chunks
+  • Batch tiếp theo: Batch #1 (xử lý Chunk: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
+  • Đồ thị trích xuất: 4 Nodes, 1 Edges
+     - Node [organization]: tempId=org_1, identity={"name": "CLB Taekwondo Văn Quán"}
+     - Node [organization]: tempId=org_2, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [person]: tempId=pers_1, identity={"name": "Phùng Thế Lịch"}
+     - Node [location]: tempId=loc_1, identity={"name": "Cơ sở 1 — Văn Quán"}
+     - Edge [located_at]: org_2 -> loc_1
+
+[2026-10-02 23:26:18] === GET_BATCH [idx=1] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 1
+  • Success: True
+  • Stage: batch_retrieved
+  • Next Action: list_scopes
+  • Đang lấy Batch #1 (gồm các Chunk: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) | Scope: 'None'
+     Các đoạn văn bản nguồn (Chunks):
+       - Chunk [10] Section: 'Cơ sở 2 — Văn Quán, Nhóm Nâng Cao' (200 ký tự)
+       - Chunk [11] Section: 'Cơ sở 3 — Xa La' (151 ký tự)
+       - Chunk [12] Section: 'Cơ sở 4 — Văn Yên' (118 ký tự)
+       - Chunk [13] Section: 'Cơ sở 5 — Lucky House' (158 ký tự)
+       - Chunk [14] Section: 'Cơ sở 6 — Văn Quán 2' (179 ký tự)
+       - Chunk [15] Section: 'Hoạt động đào tạo và tập luyện' (474 ký tự)
+       - Chunk [16] Section: 'Hoạt động thi đấu' (303 ký tự)
+       - Chunk [17] Section: 'Thành tích tiêu biểu' (101 ký tự)
+       - Chunk [18] Section: 'Năm 2017' (179 ký tự)
+       - Chunk [19] Section: 'Cột mốc phát triển' (495 ký tự)
+
+[2026-10-02 23:26:18] === LIST_SCOPES ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+  • Success: True
+  • Stage: scope_catalog_loaded
+  • Danh mục Scopes (7): ['core', 'facility', 'finance', 'fundamentals', 'rank', 'taekwondo', 'training']
+
+[2026-10-02 23:26:20] === LOAD_SCOPES [['fundamentals', 'facility', 'training']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • scope_keys: ["fundamentals", "facility", "training"]
+  • Success: True
+  • Stage: schema_loaded
+  • Next Action: extract_batch
+
+[2026-10-02 23:26:51] === SUBMIT_BATCH [idx=1, scopes=['fundamentals', 'facility', 'training']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 1
+     • scope_keys: ["fundamentals", "facility", "training"]
+     • fragment_summary: {"nodes_count": 7, "edges_count": 0, "coverage_count": 10}
+  • Success: False
+  • Stage: repair_required
+  • Next Action: repair_batch
+  • Đồ thị trích xuất: 7 Nodes, 0 Edges
+     - Node [location]: tempId=loc_van_quan_2, identity="loc_van_quan_2"
+     - Node [location]: tempId=loc_xa_la, identity="loc_xa_la"
+     - Node [location]: tempId=loc_van_yen, identity="loc_van_yen"
+     - Node [location]: tempId=loc_lucky_house, identity="loc_lucky_house"
+     - Node [location]: tempId=loc_van_quan_6, identity="loc_van_quan_6"
+     - Node [organization]: tempId=org_taekwondo_van_quan, identity="org_taekwondo_van_quan"
+     - Node [person]: tempId=pers_phung_the_lich, identity="pers_phung_the_lich"
+  ❌ Lỗi trả về (14):
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for location (vị trí: nodes.0.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for location (vị trí: nodes.0.properties)
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for location (vị trí: nodes.1.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for location (vị trí: nodes.1.properties)
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for location (vị trí: nodes.2.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for location (vị trí: nodes.2.properties)
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for location (vị trí: nodes.3.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for location (vị trí: nodes.3.properties)
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for location (vị trí: nodes.4.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for location (vị trí: nodes.4.properties)
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for organization (vị trí: nodes.5.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for organization (vị trí: nodes.5.properties)
+     - [IDENTITY_FIELD_MISSING] Identity field name is required for person (vị trí: nodes.6.identity.name)
+     - [REQUIRED_PROPERTY_MISSING] Property name is required for person (vị trí: nodes.6.properties)
+
+[2026-10-02 23:27:01] === SUBMIT_BATCH [idx=1, scopes=['fundamentals', 'facility', 'training']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 1
+     • scope_keys: ["fundamentals", "facility", "training"]
+     • fragment_summary: {"nodes_count": 7, "edges_count": 0, "coverage_count": 10}
+  • Success: False
+  • Stage: repair_required
+  • Next Action: repair_batch
+  • Đồ thị trích xuất: 7 Nodes, 0 Edges
+     - Node [location]: tempId=loc_van_quan_2, identity={"name": "Cơ sở 2 — Văn Quán"}
+     - Node [location]: tempId=loc_xa_la, identity={"name": "Cơ sở 3 — Xa La"}
+     - Node [location]: tempId=loc_van_yen, identity={"name": "Cơ sở 4 — Văn Yên"}
+     - Node [location]: tempId=loc_lucky_house, identity={"name": "Cơ sở 5 — Lucky House"}
+     - Node [location]: tempId=loc_van_quan_6, identity={"name": "Cơ sở 6 — Văn Quán 2"}
+     - Node [organization]: tempId=org_taekwondo_van_quan, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [person]: tempId=pers_phung_the_lich, identity={"name": "Phùng Thế Lịch"}
+  ❌ Lỗi trả về (6):
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.0.properties.0.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.1.properties.0.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.2.properties.0.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.3.properties.0.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.4.properties.0.evidence.0.text)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.5.properties.0.evidence.0.text)
+
+[2026-10-02 23:27:07] === SUBMIT_BATCH [idx=1, scopes=['fundamentals', 'facility', 'training']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 1
+     • scope_keys: ["fundamentals", "facility", "training"]
+     • fragment_summary: {"nodes_count": 7, "edges_count": 0, "coverage_count": 10}
+  • Success: True
+  • Stage: batching
+  • Next Action: process_batch
+  • Tiến độ: 2/3 batches | Tổng cộng 23 chunks
+  • Batch tiếp theo: Batch #2 (xử lý Chunk: [20, 21, 22])
+  • Đồ thị trích xuất: 7 Nodes, 0 Edges
+     - Node [location]: tempId=loc_van_quan_2, identity={"name": "Cơ sở 2 — Văn Quán"}
+     - Node [location]: tempId=loc_xa_la, identity={"name": "Cơ sở 3 — Xa La"}
+     - Node [location]: tempId=loc_van_yen, identity={"name": "Cơ sở 4 — Văn Yên"}
+     - Node [location]: tempId=loc_lucky_house, identity={"name": "Cơ sở 5 — Lucky House"}
+     - Node [location]: tempId=loc_van_quan_6, identity={"name": "Cơ sở 6 — Văn Quán 2"}
+     - Node [organization]: tempId=org_taekwondo_van_quan, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [person]: tempId=pers_phung_the_lich, identity={"name": "Phùng Thế Lịch"}
+
+[2026-10-02 23:27:09] === GET_BATCH [idx=2] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 2
+  • Success: True
+  • Stage: batch_retrieved
+  • Next Action: list_scopes
+  • Đang lấy Batch #2 (gồm các Chunk: [20, 21, 22]) | Scope: 'None'
+     Các đoạn văn bản nguồn (Chunks):
+       - Chunk [20] Section: 'Tinh thần Hệ Thống Taekwondo Văn Quán' (456 ký tự)
+       - Chunk [21] Section: 'HỆ THỐNG TAEKWONDO VĂN QUÁN' (225 ký tự)
+       - Chunk [22] Section: 'HỆ THỐNG TAEKWONDO VĂN QUÁN' (164 ký tự)
+
+[2026-10-02 23:27:10] === LIST_SCOPES ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+  • Success: True
+  • Stage: scope_catalog_loaded
+  • Danh mục Scopes (7): ['core', 'facility', 'finance', 'fundamentals', 'rank', 'taekwondo', 'training']
+
+[2026-10-02 23:27:12] === LOAD_SCOPES [['fundamentals', 'taekwondo']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • scope_keys: ["fundamentals", "taekwondo"]
+  • Success: True
+  • Stage: schema_loaded
+  • Next Action: extract_batch
+
+[2026-10-02 23:27:50] === SUBMIT_BATCH [idx=2, scopes=['fundamentals', 'taekwondo']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 2
+     • scope_keys: ["fundamentals", "taekwondo"]
+     • fragment_summary: {"nodes_count": 2, "edges_count": 0, "coverage_count": 3}
+  • Success: False
+  • Stage: schema_gap_candidate
+  • Next Action: assess_schema_gap
+  • Đồ thị trích xuất: 2 Nodes, 0 Edges
+     - Node [Organization]: tempId=org_van_quan, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [Person]: tempId=person_phung_the_lich, identity={"name": "Phùng Thế Lịch"}
+  ❌ Lỗi trả về (5):
+     - [UNKNOWN_ENTITY_TYPE] Unknown entity type: Organization (vị trí: nodes.0.className)
+     - [EVIDENCE_NOT_GROUNDED] Evidence text must be a verbatim excerpt from its chunk (vị trí: nodes.0.evidence.0.text)
+     - [UNKNOWN_PROPERTY] Property name is not valid for Organization (vị trí: nodes.0.properties.0)
+     - [UNKNOWN_ENTITY_TYPE] Unknown entity type: Person (vị trí: nodes.1.className)
+     - [UNKNOWN_PROPERTY] Property name is not valid for Person (vị trí: nodes.1.properties.0)
+
+[2026-10-02 23:27:54] === SUBMIT_BATCH [idx=2, scopes=['fundamentals', 'taekwondo']] ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+     • batch_index: 2
+     • scope_keys: ["fundamentals", "taekwondo"]
+     • fragment_summary: {"nodes_count": 2, "edges_count": 0, "coverage_count": 3}
+  • Success: True
+  • Stage: ready_to_finalize
+  • Next Action: finalize
+  • Tiến độ: 3/3 batches | Tổng cộng 23 chunks
+  • Đồ thị trích xuất: 2 Nodes, 0 Edges
+     - Node [organization]: tempId=org_van_quan, identity={"name": "Hệ Thống Taekwondo Văn Quán"}
+     - Node [person]: tempId=person_phung_the_lich, identity={"name": "Phùng Thế Lịch"}
+
+[2026-10-02 23:27:57] === FINALIZE ===
+  📥 REQUEST / INPUT:
+     • ingestion_id: 7801b5bd-d849-4e61-bdca-96e9bff41544
+  • Success: True
+  • Stage: ready_to_fill
+  • Next Action: fill
+  • Tiến độ: 3/3 batches | Tổng cộng 23 chunks
+
