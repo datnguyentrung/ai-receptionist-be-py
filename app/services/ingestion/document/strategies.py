@@ -8,7 +8,7 @@ from typing import Protocol
 
 from app.core.schemas.ingestion.document import DocumentChunk, LoadedDocument
 
-STRUCTURAL_CHUNKER_VERSION = "structural-v2"
+STRUCTURAL_CHUNKER_VERSION = "structural-v4-canonical-plain-text"
 DOCUMENT_ID_VERSION = "document-id-v1"
 
 
@@ -25,6 +25,45 @@ def stable_document_id(source: str) -> str:
 
 def chunk_content_hash(content: str) -> str:
     return _sha256(content)
+
+
+def canonicalize_markdown_plain_text(content: str) -> str:
+    """Convert Markdown source to deterministic plain text for evidence checks."""
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    plain: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if plain and plain[-1] != "":
+                plain.append("")
+            continue
+        if _is_markdown_table_separator(stripped):
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [_strip_inline_markdown(cell.strip()) for cell in stripped.strip("|").split("|")]
+            if len(cells) >= 2:
+                plain.append(f"{cells[0]}: {' | '.join(cells[1:])}")
+            elif cells:
+                plain.append(cells[0])
+            continue
+        plain.append(_strip_inline_markdown(line).strip())
+    while plain and plain[-1] == "":
+        plain.pop()
+    return "\n".join(plain).strip()
+
+
+def _is_markdown_table_separator(value: str) -> bool:
+    body = value.strip("|").replace(" ", "")
+    return bool(body) and all(ch in {":", "-"} for ch in body)
+
+
+def _strip_inline_markdown(value: str) -> str:
+    value = re.sub(r"(?<!\*)\*\*([^*]+)\*\*(?!\*)", r"\1", value)
+    value = re.sub(r"(?<!_)__([^_]+)__(?!_)", r"\1", value)
+    value = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", value)
+    value = re.sub(r"(?<!_)_([^_]+)_(?!_)", r"\1", value)
+    value = re.sub(r"`([^`]+)`", r"\1", value)
+    return value
 
 
 def stable_chunk_id(
@@ -118,12 +157,13 @@ class StructuralTextChunker:
         end_line: int,
     ) -> DocumentChunk:
         document_id = stable_document_id(source)
-        content_hash = chunk_content_hash(content)
+        canonical_content = canonicalize_markdown_plain_text(content)
+        content_hash = chunk_content_hash(canonical_content)
         return DocumentChunk(
             index=index,
             source=source,
             section=section,
-            content=content,
+            content=canonical_content,
             documentId=document_id,
             chunkId=stable_chunk_id(
                 document_id=document_id,
@@ -152,6 +192,8 @@ class StructuralTextChunker:
                 current_lines = []
                 current_start_line = None
                 return
+            if current_section and not content.startswith(current_section):
+                content = f"{current_section}\n\n{content}"
             first_offset = next(
                 i for i, line in enumerate(current_lines) if line.strip()
             )
@@ -205,6 +247,7 @@ __all__ = [
     "LoaderStrategy",
     "StructuralTextChunker",
     "Utf8TextLoader",
+    "canonicalize_markdown_plain_text",
     "chunk_content_hash",
     "stable_chunk_id",
     "stable_document_id",

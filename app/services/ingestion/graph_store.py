@@ -61,6 +61,42 @@ class Neo4jIngestionStore:
         async with self._driver.session(database=self._database) as session:
             for statement in statements:
                 await (await session.run(statement)).consume()
+            duplicate_checks = {
+                "TaekwondoKnowledgeEntity.stableKey": """
+                    MATCH (n:TaekwondoKnowledgeEntity)
+                    WITH n.stableKey AS value, count(*) AS total
+                    WHERE value IS NOT NULL AND total > 1
+                    RETURN count(*) AS duplicates
+                """,
+                "TaekwondoKnowledgeFact.factId": """
+                    MATCH (n:TaekwondoKnowledgeFact)
+                    WITH n.factId AS value, count(*) AS total
+                    WHERE value IS NOT NULL AND total > 1
+                    RETURN count(*) AS duplicates
+                """,
+                "TaekwondoSourceVersion.versionId": """
+                    MATCH (n:TaekwondoSourceVersion)
+                    WITH n.versionId AS value, count(*) AS total
+                    WHERE value IS NOT NULL AND total > 1
+                    RETURN count(*) AS duplicates
+                """,
+            }
+            for label, query in duplicate_checks.items():
+                record = await (await session.run(query)).single()
+                if record and int(record["duplicates"] or 0):
+                    raise RuntimeError(
+                        f"Cannot create uniqueness constraint; duplicates exist for {label}"
+                    )
+            constraints = (
+                "CREATE CONSTRAINT taekwondo_entity_stable_key_unique IF NOT EXISTS "
+                "FOR (n:TaekwondoKnowledgeEntity) REQUIRE n.stableKey IS UNIQUE",
+                "CREATE CONSTRAINT taekwondo_fact_id_unique IF NOT EXISTS "
+                "FOR (n:TaekwondoKnowledgeFact) REQUIRE n.factId IS UNIQUE",
+                "CREATE CONSTRAINT taekwondo_source_version_id_unique IF NOT EXISTS "
+                "FOR (n:TaekwondoSourceVersion) REQUIRE n.versionId IS UNIQUE",
+            )
+            for statement in constraints:
+                await (await session.run(statement)).consume()
 
     async def fill(self, workspace: Workspace) -> dict[str, Any]:
         """Write domain graph, source chunks, facts, embeddings, and provenance atomically."""
@@ -632,10 +668,18 @@ async def _build_graphrag_payload(
     for node in nodes:
         stable_key = _stable_entity_key(node, version_id)
         identity = node.get("identity") or {}
-        properties = {
-            item["propertyName"]: item.get("value")
-            for item in node.get("properties", [])
-        }
+        properties: dict[str, Any] = {}
+        for item in node.get("properties", []):
+            name = item["propertyName"]
+            value = item.get("value")
+            if name not in properties:
+                properties[name] = value
+            elif properties[name] != value:
+                current = properties[name]
+                values = current if isinstance(current, list) else [current]
+                if value not in values:
+                    values.append(value)
+                properties[name] = values
         normalized = {
             "tempId": node["tempId"],
             "stableKey": stable_key,
@@ -735,9 +779,11 @@ async def _build_graphrag_payload(
 def _merge_fragments(
     fragments: list[dict | Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    nodes_by_key: dict[tuple[str, str], dict] = {}
+    nodes_by_canonical_id: dict[str, dict] = {}
+    temp_id_to_canonical_id: dict[str, str] = {}
     fragment_temp_maps: list[dict[str, str]] = []
     dict_fragments: list[dict[str, Any]] = []
+
     for raw_fragment in fragments:
         fragment = (
             raw_fragment.model_dump(by_alias=True, mode="json")
@@ -747,34 +793,55 @@ def _merge_fragments(
         dict_fragments.append(fragment)
         temp_map: dict[str, str] = {}
         for node in fragment.get("nodes", []):
-            identity_json = _json(node.get("identity") or {"tempId": node["tempId"]})
-            key = (node["className"], identity_json)
-            existing = nodes_by_key.get(key)
-            if existing is None:
-                existing = {
+            orig_temp_id = node["tempId"]
+            target_alias = orig_temp_id
+
+            canonical_id = None
+            identity_json = _json(node.get("identity") or {"tempId": orig_temp_id})
+
+            if target_alias in nodes_by_canonical_id:
+                canonical_id = target_alias
+            else:
+                for existing_id, existing_node in nodes_by_canonical_id.items():
+                    if existing_node["className"] == node["className"]:
+                        existing_ident_json = _json(existing_node.get("identity") or {"tempId": existing_id})
+                        if existing_ident_json == identity_json:
+                            canonical_id = existing_id
+                            break
+
+            if canonical_id is None:
+                canonical_id = target_alias
+                nodes_by_canonical_id[canonical_id] = {
                     **node,
+                    "tempId": canonical_id,
                     "properties": list(node.get("properties", [])),
                     "evidence": list(node.get("evidence", [])),
                 }
-                nodes_by_key[key] = existing
             else:
+                existing = nodes_by_canonical_id[canonical_id]
                 known = {
-                    item["propertyName"] for item in existing.get("properties", [])
+                    (item["propertyName"], _json(item.get("value")))
+                    for item in existing.get("properties", [])
                 }
                 existing["properties"].extend(
                     item
                     for item in node.get("properties", [])
-                    if item["propertyName"] not in known
+                    if (item["propertyName"], _json(item.get("value"))) not in known
                 )
                 existing["evidence"].extend(node.get("evidence", []))
-            temp_map[node["tempId"]] = existing["tempId"]
+
+            temp_map[orig_temp_id] = canonical_id
+            temp_id_to_canonical_id[orig_temp_id] = canonical_id
         fragment_temp_maps.append(temp_map)
-    nodes = list(nodes_by_key.values())
+
+    nodes = list(nodes_by_canonical_id.values())
     edges_by_key: dict[tuple[str, str, str], dict] = {}
     for fragment, temp_map in zip(dict_fragments, fragment_temp_maps, strict=True):
         for edge in fragment.get("edges", []):
             source = temp_map.get(edge["sourceTempId"], edge["sourceTempId"])
             target = temp_map.get(edge["targetTempId"], edge["targetTempId"])
+            source = temp_id_to_canonical_id.get(source, source)
+            target = temp_id_to_canonical_id.get(target, target)
             normalized = {**edge, "sourceTempId": source, "targetTempId": target}
             edges_by_key[(edge["edgeName"], source, target)] = normalized
     return nodes, list(edges_by_key.values())

@@ -5,20 +5,17 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
-from app.core.schemas.ingestion import (
-    DocumentChunk,
-    GraphPatchFragment,
-)
+from app.core.schemas.ingestion import DocumentChunk
 from app.schemas.ingestion_schema import (
     ActiveOntology,
+    GraphPatchFragment,
     IngestionJobStatus,
     PreparedChunk,
+    SemanticGraphPatchFragment,
     SourceVersionStatus,
 )
 from app.services.ingestion.document.strategies import STRUCTURAL_CHUNKER_VERSION
 from app.services.ingestion.workspace.staged_ingestion import (
-    MAX_BATCH_CHARS,
-    MAX_BATCH_CHUNKS,
     IngestionWorkspaceService,
 )
 
@@ -79,6 +76,7 @@ class IngestionBatchData:
     batch_index: int
     chunk_indexes: list[int]
     status: str
+    semantic_fragment: dict | None
     graph_fragment: dict | None
     validation_issues: list[dict]
     validation_attempts: int
@@ -121,13 +119,15 @@ class IngestionRepository:
         skill_digest: str,
         model_id: str,
         compiler_version: str,
+        batch_size: int,
+        max_batch_chars: int,
     ) -> tuple[Workspace, bool, bool]:
         """Tạo mới hoặc tái sử dụng workspace ingestion còn tồn tại trong tiến trình hiện tại (in-process workspace reuse)."""
         config_signature = _digest(
             {
                 "chunker": STRUCTURAL_CHUNKER_VERSION,
-                "maxBatchChunks": MAX_BATCH_CHUNKS,
-                "maxBatchChars": MAX_BATCH_CHARS,
+                "maxBatchChunks": batch_size,
+                "maxBatchChars": max_batch_chars,
             }
         )
         ingestion_signature = _digest(
@@ -197,7 +197,11 @@ class IngestionRepository:
             )
             for chunk in chunks
         )
-        partitioned = IngestionWorkspaceService._partition(chunks)
+        partitioned = IngestionWorkspaceService.partition(
+            chunks,
+            max_batch_chunks=batch_size,
+            max_batch_chars=max_batch_chars,
+        )
         batches = tuple(
             IngestionBatchData(
                 id=uuid.uuid4(),
@@ -205,6 +209,7 @@ class IngestionRepository:
                 batch_index=batch.index,
                 chunk_indexes=batch.chunk_indexes,
                 status="PENDING",
+                semantic_fragment=None,
                 graph_fragment=None,
                 validation_issues=[],
                 validation_attempts=0,
@@ -243,8 +248,11 @@ class IngestionRepository:
         batch_index: int,
         scope_bindings: list[dict[str, str]],
         merged_schema_hash: str | None,
-        fragment: GraphPatchFragment | None,
+        semantic_fragment: SemanticGraphPatchFragment | dict | None,
+        fragment: GraphPatchFragment | dict | None,
         issues: list[dict],
+        *,
+        max_attempts: int,
     ) -> Workspace:
         workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
         if workspace.job.status != IngestionJobStatus.BATCHING:
@@ -255,22 +263,39 @@ class IngestionRepository:
             raise RuntimeError(
                 f"Batch {batch_index} is gated by schema review ({batch.status})"
             )
+        attempts = batch.validation_attempts + 1
+        terminal = bool(issues) and attempts > max_attempts
         updated = replace(
             batch,
-            validation_attempts=batch.validation_attempts + 1,
+            validation_attempts=attempts,
             validation_issues=issues,
             merged_schema_hash=merged_schema_hash,
+            semantic_fragment=semantic_fragment.model_dump(by_alias=True, mode="json")
+            if hasattr(semantic_fragment, "model_dump")
+            else semantic_fragment,
             graph_fragment=fragment.model_dump(by_alias=True, mode="json")
             if hasattr(fragment, "model_dump")
             else fragment,
-            status="REPAIR_REQUIRED" if issues else "STAGED",
+            status="FAILED" if terminal else "REPAIR_REQUIRED" if issues else "STAGED",
             scope_keys=[item["scopeKey"] for item in scope_bindings],
             snapshot_hashes={
                 item["scopeKey"]: item["schemaHash"] for item in scope_bindings
             },
         )
-        workspace.job.status = IngestionJobStatus.BATCHING
-        workspace.job.stage = "batching"
+        workspace.job.status = (
+            IngestionJobStatus.FAILED if terminal else IngestionJobStatus.BATCHING
+        )
+        workspace.job.stage = (
+            "explicit_extraction_failure" if terminal else "batching"
+        )
+        if terminal:
+            workspace.job.error_stage = "explicit_extraction_failure"
+            workspace.job.error_message = (
+                f"Batch {batch_index} exceeded the validation retry limit"
+            )
+            workspace = self._replace_version_status(
+                workspace, SourceVersionStatus.FAILED
+            )
         workspace.job.readiness_fingerprint = None
         return self._replace_batch(workspace, updated)
 
@@ -408,6 +433,12 @@ class IngestionRepository:
                     replace(
                         batch,
                         graph_fragment=graph_fragment,
+                        semantic_fragment={
+                            **batch.semantic_fragment,
+                            "ontologyVersion": target_version_id,
+                        }
+                        if batch.semantic_fragment
+                        else None,
                         validation_issues=[],
                         merged_schema_hash=merged_schema_hashes.get(
                             "\x1f".join(batch.scope_keys),
@@ -421,6 +452,7 @@ class IngestionRepository:
                         batch,
                         status="PENDING",
                         graph_fragment=None,
+                        semantic_fragment=None,
                         validation_issues=[],
                         merged_schema_hash=None,
                         scope_keys=[],
@@ -532,6 +564,47 @@ def workspace_fingerprint(workspace: Workspace) -> str:
     )
 
 
+def stable_entity_key(class_name: str, identity: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {"class": class_name, "identity": identity},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def staged_entity_index(
+    workspace: Workspace, before_batch: int | None = None
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for batch in workspace.batches:
+        if before_batch is not None and batch.batch_index >= before_batch:
+            continue
+        if batch.status != "STAGED" or not batch.graph_fragment:
+            continue
+        for node in batch.graph_fragment.get("nodes", []):
+            identity = node.get("identity") or {}
+            key = stable_entity_key(node["className"], identity)
+            display_properties = {
+                prop.get("propertyName"): prop.get("value")
+                for prop in node.get("properties", [])
+                if prop.get("value") not in (None, "", [], {})
+            }
+            result[f"entity:{key}"] = {
+                "ref": f"entity:{key}",
+                "stableKey": key,
+                "className": node["className"],
+                "identity": identity,
+                "displayProperties": {
+                    **identity,
+                    **display_properties,
+                },
+            }
+    return result
+
+
 def snapshot_bindings_unchanged(
     bindings: list[Any], target_hashes: dict[str, str]
 ) -> bool:
@@ -550,6 +623,8 @@ __all__ = [
     "IngestionRepository",
     "Workspace",
     "snapshot_bindings_unchanged",
+    "stable_entity_key",
+    "staged_entity_index",
     "workspace_chunks",
     "workspace_fingerprint",
 ]

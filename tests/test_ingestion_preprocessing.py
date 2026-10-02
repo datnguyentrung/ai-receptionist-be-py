@@ -18,6 +18,8 @@ def test_markdown_chunking_is_deterministic_and_structural() -> None:
     assert [c.chunk_id for c in first] == [c.chunk_id for c in second]
     assert first[0].structural_path == "Lịch học#0"
     assert first[1].structural_path == "Học phí#0"
+    assert first[0].content.startswith("Lịch học\n\n")
+    assert "Lịch học" in first[0].content
 
 
 @pytest.mark.parametrize("name,data", [("x.csv", b"a,b"), ("x.txt", b"\xff")])

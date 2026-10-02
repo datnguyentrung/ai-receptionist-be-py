@@ -8,11 +8,9 @@ from google.adk.agents import Agent
 from google.adk.apps.app import App
 from google.adk.plugins.context_filter_plugin import ContextFilterPlugin
 from google.adk.plugins.save_files_as_artifacts_plugin import SaveFilesAsArtifactsPlugin
-from google.adk.tools import AgentTool
 from google.adk.tools.skill_toolset import SkillToolset
 from google.genai import types
 
-from app.agent.ingestion_extractor_agent import ingestion_extractor_agent
 from app.agent.skills.local_skill_registry import LocalSkillRegistry
 from app.agent.skills.root_prompt_renderer import render_root_agent_prompt
 from app.agent.skills.skill_loader import (
@@ -20,10 +18,7 @@ from app.agent.skills.skill_loader import (
     discover_skill_tools,
 )
 from app.core.ingestion_runtime import IngestionRuntimePlugin
-from app.utils.ingestion_logger import reset_log_file
-
-# Clean log file every time ADK Web / CLI loads the agent
-reset_log_file()
+from app.utils.ingestion_logger import ADKDetailedLoggerPlugin
 
 BASE_DIR = Path(__file__).resolve().parent
 SKILLS_DIR = BASE_DIR / "skills"
@@ -58,9 +53,6 @@ def create_root_agent() -> Agent:
         ),
         instruction=root_instruction,
         tools=[skill_toolset],
-        sub_agents=[
-            ingestion_extractor_agent,
-        ],
         generate_content_config=types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="MEDIUM"),
         ),
@@ -228,6 +220,12 @@ app = App(
     name="taekwondo_ingestion",
     root_agent=root_agent,
     plugins=[
+        *(
+            [ADKDetailedLoggerPlugin()]
+            if os.getenv("INGESTION_TRACE_VERBOSE", "").casefold()
+            in {"1", "true", "yes", "on"}
+            else []
+        ),
         IngestionRuntimePlugin(),
         ContextFilterPlugin(custom_filter=_compact_ingestion_context),
         SaveFilesAsArtifactsPlugin(),
