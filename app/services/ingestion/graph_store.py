@@ -98,13 +98,21 @@ class Neo4jIngestionStore:
             for statement in constraints:
                 await (await session.run(statement)).consume()
 
-    async def fill(self, workspace: Workspace) -> dict[str, Any]:
+    async def fill(
+        self,
+        workspace: Workspace,
+        merged_fragment: Any | None = None,
+    ) -> dict[str, Any]:
         """Write domain graph, source chunks, facts, embeddings, and provenance atomically."""
 
-        fragments = [
-            item.graph_fragment for item in workspace.batches if item.graph_fragment
-        ]
-        nodes, edges = _merge_fragments(fragments)
+        if merged_fragment is not None:
+            merged = merged_fragment.model_dump(by_alias=True, mode="json")
+            nodes, edges = merged["nodes"], merged["edges"]
+        else:
+            fragments = [
+                item.graph_fragment for item in workspace.batches if item.graph_fragment
+            ]
+            nodes, edges = _merge_fragments(fragments)
         payload = await _build_graphrag_payload(
             workspace,
             nodes,
@@ -675,11 +683,10 @@ async def _build_graphrag_payload(
             if name not in properties:
                 properties[name] = value
             elif properties[name] != value:
-                current = properties[name]
-                values = current if isinstance(current, list) else [current]
-                if value not in values:
-                    values.append(value)
-                properties[name] = values
+                raise ValueError(
+                    f"Unvalidated scalar conflict for property {name}; "
+                    "workspace readiness validation must run before persistence"
+                )
         normalized = {
             "tempId": node["tempId"],
             "stableKey": stable_key,

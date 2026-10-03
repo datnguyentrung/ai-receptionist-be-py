@@ -32,6 +32,7 @@ from app.schemas.ingestion_schema import (
     SemanticGraphPatchFragment,
     ValidationIssue,
 )
+from app.services.ingestion.fact_references import duplicate_quote_matches
 
 COMPILER_VERSION = "ontology-compiler-v2"
 logger = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ def validate_coverage_integrity(
     fragment: GraphPatchFragment,
     chunks: Iterable[PreparedChunk],
     external_node_types: dict[str, str] | None = None,
+    *,
+    available_facts: dict[str, dict[str, Any]] | None = None,
+    artifact_name: str | None = None,
 ) -> list[ValidationIssue]:
     """Validate that coverage decisions correspond to real graph contributions."""
     issues: list[ValidationIssue] = []
@@ -103,17 +107,46 @@ def validate_coverage_integrity(
                     )
                 )
         elif item.decision == "DUPLICATE_EVIDENCE":
-            # Must resolve to existing fact in current fragment or prior staged entities
-            if not fact_chunks and not external_node_types:
+            facts = available_facts or {}
+            matched = False
+            chunk = chunk_by_index[item.chunk_index]
+            for claim in item.duplicate_claims:
+                fact = facts.get(claim.fact_ref)
+                evidence = claim.evidence
+                grounded = (
+                    evidence.chunk_index == item.chunk_index
+                    and bool(evidence.text)
+                    and _normalize_quote(evidence.text)
+                    in _normalize_quote(chunk.text)
+                )
+                if fact and grounded and duplicate_quote_matches(fact, evidence.text):
+                    matched = True
+                    break
+            if not matched:
                 issues.append(
                     ValidationIssue(
-                        code="DUPLICATE_WITHOUT_PRIOR_FACT",
+                        code="DUPLICATE_WITHOUT_MATCHING_FACT",
                         message=(
                             f"Chunk {item.chunk_index} is marked DUPLICATE_EVIDENCE "
-                            "but no prior or current knowledge facts exist to duplicate"
+                            "but has no grounded claim matching an existing logical fact"
                         ),
                         location=f"coverage.{coverage_index}.decision",
                         retryable=True,
+                    )
+                )
+        elif item.decision in {"NO_RELEVANT_FACT", "NOT_RELEVANT"}:
+            if not _is_machine_provable_non_fact(
+                chunk_by_index[item.chunk_index], artifact_name
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="COVERAGE_REVIEW_REQUIRED",
+                        message=(
+                            f"Chunk {item.chunk_index} contains substantive text; "
+                            f"{item.decision} cannot be proven deterministically"
+                        ),
+                        location=f"coverage.{coverage_index}.decision",
+                        retryable=False,
                     )
                 )
         elif item.decision in {"SCHEMA_GAP", "UNSUPPORTED_BY_ONTOLOGY"}:
@@ -151,6 +184,31 @@ def validate_coverage_integrity(
                 )
             )
     return issues
+
+
+def _is_machine_provable_non_fact(
+    chunk: PreparedChunk, artifact_name: str | None
+) -> bool:
+    """Conservative whitelist; substantive prose always requires review."""
+
+    text = unicodedata.normalize("NFKC", chunk.text).strip()
+    if not re.search(r"\w", text, flags=re.UNICODE):
+        return True
+    normalized = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).strip().casefold()
+    if chunk.section:
+        section = re.sub(
+            r"[^\w]+", " ", unicodedata.normalize("NFKC", chunk.section), flags=re.UNICODE
+        ).strip().casefold()
+        if normalized == section:
+            return True
+    if artifact_name:
+        title = re.sub(r"\.[^.]+$", "", artifact_name)
+        title = re.sub(
+            r"[^\w]+", " ", unicodedata.normalize("NFKC", title), flags=re.UNICODE
+        ).strip().casefold()
+        if normalized == title:
+            return True
+    return normalized in {"mục lục", "table of contents"}
 
 
 class OntologyRegistry:
@@ -277,6 +335,9 @@ class OntologyRegistry:
         fragment: GraphPatchFragment,
         chunks: Iterable[PreparedChunk],
         external_node_types: dict[str, str] | None = None,
+        *,
+        available_facts: dict[str, dict[str, Any]] | None = None,
+        artifact_name: str | None = None,
     ) -> list[ValidationIssue]:
         """Xác thực toàn diện mảnh đồ thị (GraphPatchFragment) đối chiếu với các chunks văn bản.
 
@@ -316,6 +377,8 @@ class OntologyRegistry:
                 fragment,
                 chunk_by_index.values(),
                 external_node_types=external_node_types,
+                available_facts=available_facts,
+                artifact_name=artifact_name,
             )
         )
 

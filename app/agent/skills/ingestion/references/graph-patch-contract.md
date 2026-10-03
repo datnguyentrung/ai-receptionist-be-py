@@ -80,24 +80,58 @@ Hợp đồng phân mảnh đồ thị ngữ nghĩa (`SemanticGraphPatchFragment
 
 ## 3. Độ phủ Đoạn nguồn (ChunkCoverage)
 
-Mọi chunk trong batch bắt buộc phải có đúng 1 mục `coverage`:
+Mỗi chunk trong batch bắt buộc có đúng 1 mục coverage theo thứ tự ưu tiên kiểm tra:
 
-| `decision` | Ý nghĩa | Điều kiện hợp lệ |
-| :--- | :--- | :--- |
-| `MAPPED` | Chunk thực sự đóng góp ít nhất 1 fact (thuộc tính hoặc quan hệ) | Bắt buộc có `chunkIndex` trong ít nhất 1 `property.evidence` hoặc `edge.evidence` |
-| `DUPLICATE_EVIDENCE` | Chunk lặp lại thông tin đã được trích xuất ở chunk/mẻ khác | Có fact tương ứng đã tồn tại trong mẻ hoặc các mẻ trước |
-| `NO_RELEVANT_FACT` | Chunk có nội dung thuộc miền nhưng không tạo ra fact mới cho graph | Cung cấp `reason` nêu rõ lý do |
-| `NOT_RELEVANT` | Chunk nằm ngoài phạm vi tri thức cần nạp | Cung cấp `reason` nêu rõ lý do |
-| `UNSUPPORTED_BY_ONTOLOGY` | Chunk chứa tri thức nhưng ontology hiện hành chưa hỗ trợ | Cung cấp `reason` chi tiết (kích hoạt đề xuất ontology) |
-| `AMBIGUOUS` | Nội dung mập mờ, không đủ cơ sở để trích xuất | Yêu cầu xem xét / làm rõ |
-| `FAILED` | Lỗi trong quá trình phân tích chunk | Yêu cầu xử lý lại |
+| Thứ tự / Quyết định | Ý nghĩa & Ràng buộc hợp lệ |
+| :--- | :--- |
+| **1. UNSUPPORTED_BY_ONTOLOGY** | **Ưu tiên cho tri thức chưa hỗ trợ:** Chunk chứa tri thức nhưng ontology hiện hành chưa hỗ trợ (lịch sử, thành lập, quy mô...). Bắt buộc ghi
+eason chi tiết (kích hoạt đề xuất ontology). |
+| **2. DUPLICATE_EVIDENCE** | Chunk lặp lại fact đã có ➔ duplicateClaims trỏ tới actRef trong canonicalFactContext, kèm evidence quote grounded và khớp fact. |
+| **3. AMBIGUOUS** | Nội dung mập mờ, không đủ cơ sở để trích xuất ➔ Yêu cầu xem xét / làm rõ. |
+| **4. NO_RELEVANT_FACT / NOT_RELEVANT** | Chunk cấu trúc chắc chắn không chứa fact (tiêu đề đơn thuần, ký tự phân cách) hoặc ngoài phạm vi. Prose yêu cầu human review. |
+| **5. MAPPED** | Chunk thực sự đóng góp ít nhất 1 fact (thuộc tính hoặc quan hệ) ➔ Bắt buộc có chunkIndex trong ít nhất 1 property.evidence hoặc edge.evidence. |
+| **6. FAILED** | Lỗi trong quá trình phân tích chunk ➔ Yêu cầu xử lý lại. |
+
+DUPLICATE_EVIDENCE có dạng:
+
+```json
+{
+  "chunkIndex": 7,
+  "decision": "DUPLICATE_EVIDENCE",
+  "reason": "Lặp lại số điện thoại đã biết",
+  "duplicateClaims": [
+    {
+      "factRef": "property:<stable-key>:phone:<value-digest>",
+      "evidence": {"chunkIndex": 7, "text": "0369 222 068"}
+    }
+  ]
+}
+```
+
+Fact đã staged/baseline phải dùng `factRef` do `canonicalFactContext` cung cấp.
+Nếu fact được khai báo ngay trong payload hiện tại, dùng một trong hai ref deterministic:
+
+- `local-property:<tempId>:<propertyName>` — property name phải duy nhất trên node;
+- `local-edge:<edgeIndex>` — index của edge trong payload hiện tại.
+
+Không tự đoán hoặc tự tạo canonical digest.
 
 ---
 
 ## 4. Nguyên tắc Sửa lỗi Mẻ (Batch Repair Policy)
 
-1. **Bảo tồn tri thức hợp lệ:** Backend so khớp thực thể dựa trên **Natural Identity** (`className` + thuộc tính định danh), không phụ thuộc vào chuỗi `tempId`. Bạn có thể thoải mái đặt `tempId` theo ngữ cảnh.
+1. **Bảo tồn tri thức hợp lệ:** Backend so khớp thực thể dựa trên **Natural Identity** (`className` + thuộc tính định danh). Ở lần trích xuất đầu có thể chọn `tempId`; khi repair phải giữ nguyên `tempId` trong `repairTemplate` để payload ổn định và dễ kiểm chứng.
 2. **Không làm mất thuộc tính hợp lệ:** Nếu mẻ trước đã có các thuộc tính hợp lệ (ví dụ `phone`, `address`), lần submit sửa lỗi phải giữ lại các thuộc tính đó trừ khi chính thuộc tính đó bị báo lỗi.
 3. **Sửa lỗi Coverage:**
    - Nếu muốn giữ `MAPPED`: bổ sung thuộc tính/quan hệ trích từ chunk đó.
-   - Nếu chunk không sinh fact mới: chuyển sang `DUPLICATE_EVIDENCE`, `NO_RELEVANT_FACT`, hoặc `NOT_RELEVANT`.
+   - Nếu fact đã có: dùng `DUPLICATE_EVIDENCE` với `duplicateClaims` có thể kiểm chứng.
+   - Nếu ontology thiếu khả năng biểu diễn: dùng `UNSUPPORTED_BY_ONTOLOGY`; không đổi sang negative label để bypass.
+
+Khi batch ở trạng thái repair, `get_ingestion_batch` trả `repairContext`:
+
+- `protectedBaseline`: canonical snapshot backend đang bảo vệ;
+- `repairTemplate`: semantic payload an toàn để làm điểm bắt đầu;
+- `validationIssues`: duy nhất các vị trí được phép sửa.
+
+Phải sao chép nguyên `repairTemplate`, kể cả `tempId` và evidence của edge. Chỉ
+thêm/sửa phần được `validationIssues` chỉ ra.

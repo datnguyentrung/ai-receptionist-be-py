@@ -146,14 +146,16 @@ def test_version_change_preserves_only_unchanged_scope_hashes() -> None:
 
 def test_finalize_rejects_repair_and_blocked_batches_and_accepts_many_staged() -> None:
     async def scenario(statuses):
+        schema = projection("training")
         workspace = SimpleNamespace(
             job=SimpleNamespace(id=uuid4(), ontology_version_id=uuid4(), status=IngestionJobStatus.BATCHING,
                                 readiness_fingerprint=None, error_message=None, error_stage=None),
-            document=SimpleNamespace(id=uuid4()),
-            version=SimpleNamespace(id=uuid4(), content_hash="h", ontology_version_id=uuid4()),
+            document=SimpleNamespace(id=uuid4(), name="empty.md"),
+            version=SimpleNamespace(id=uuid4(), content_hash="h", ontology_version_id=uuid4(), ontology_digest="d"),
             chunks=(),
-            batches=tuple(SimpleNamespace(batch_index=i, status=status, scope_keys=["training"],
-                                          merged_schema_hash="h", graph_fragment={})
+            batches=tuple(SimpleNamespace(batch_index=i, chunk_indexes=[], status=status, scope_keys=["training"],
+                                          merged_schema_hash="h", validated_baseline=None,
+                                          graph_fragment={"ontologyVersion": schema.version_id, "nodes": [], "edges": [], "coverage": []})
                           for i, status in enumerate(statuses)),
         )
 
@@ -163,7 +165,10 @@ def test_finalize_rejects_repair_and_blocked_batches_and_accepts_many_staged() -
                 workspace.job.status = IngestionJobStatus.READY
                 workspace.job.readiness_fingerprint = fingerprint
                 return workspace
-        return await finalize(Repository(), "job")
+            async def mark_batch_for_repair(self, *_args): return workspace
+        class Cache:
+            async def get_many(self, *_args): return schema
+        return await finalize(Repository(), Cache(), "job")
 
     assert asyncio.run(scenario(["REPAIR_REQUIRED"]))["stage"] == "repair_required"
     assert asyncio.run(scenario(["BLOCKED_SCHEMA"]))["stage"] == "awaiting_schema_approval"
@@ -559,7 +564,11 @@ def test_finalize_reopens_legacy_staged_batch_with_fake_mapped_coverage() -> Non
             ],
         }
 
-        result = await finalize(repository, str(workspace.job.id))
+        class Cache:
+            async def get_many(self, *_args):
+                return projection("core")
+
+        result = await finalize(repository, Cache(), str(workspace.job.id))
         current = await repository.get_workspace(str(workspace.job.id))
         return result, current
 

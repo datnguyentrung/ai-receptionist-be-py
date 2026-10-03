@@ -160,12 +160,7 @@ app = App(
     name="taekwondo_ingestion",
     root_agent=root_agent,
     plugins=[
-        *(
-            [ADKDetailedLoggerPlugin()]
-            if os.getenv("INGESTION_TRACE_VERBOSE", "").casefold()
-            in {"1", "true", "yes", "on"}
-            else []
-        ),
+        ADKDetailedLoggerPlugin(),
         IngestionRuntimePlugin(),
         ContextFilterPlugin(custom_filter=_compact_ingestion_context),
         SaveFilesAsArtifactsPlugin(),

@@ -20,6 +20,7 @@ from app.services.ingestion.workspace.staged_ingestion import (
 )
 
 MAPPER_VERSION = "taekwondo-mapper-v2"
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -145,8 +146,12 @@ class IngestionRepository:
         existing_id = self._by_signature.get(ingestion_signature)
         if existing_id:
             workspace = self._workspaces[existing_id]
-            committed = workspace.version.status == SourceVersionStatus.COMMITTED
-            return workspace, not committed, committed
+            if (
+                workspace.job.status != IngestionJobStatus.FAILED
+                and workspace.version.status != SourceVersionStatus.FAILED
+            ):
+                committed = workspace.version.status == SourceVersionStatus.COMMITTED
+                return workspace, not committed, committed
 
         document_id = uuid.uuid5(
             uuid.NAMESPACE_URL, f"ingestion-document:{document_key}"
@@ -255,6 +260,7 @@ class IngestionRepository:
         *,
         max_attempts: int,
         validated_baseline: GraphPatchFragment | dict | None = None,
+        count_attempt: bool = True,
     ) -> Workspace:
         workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
         if workspace.job.status != IngestionJobStatus.BATCHING:
@@ -265,8 +271,8 @@ class IngestionRepository:
             raise RuntimeError(
                 f"Batch {batch_index} is gated by schema review ({batch.status})"
             )
-        attempts = batch.validation_attempts + 1
-        terminal = bool(issues) and attempts > max_attempts
+        attempts = batch.validation_attempts + (1 if count_attempt else 0)
+        terminal = bool(issues) and count_attempt and attempts > max_attempts
 
         if not issues and fragment is not None:
             baseline_dict = (
@@ -317,14 +323,27 @@ class IngestionRepository:
         return self._replace_batch(workspace, updated)
 
     async def mark_batch_for_repair(
-        self, ingestion_id: str, batch_index: int, issues: list[dict]
+        self,
+        ingestion_id: str,
+        batch_index: int,
+        issues: list[dict],
+        *,
+        validated_baseline: GraphPatchFragment | dict | None | object = _UNSET,
     ) -> Workspace:
         """Reopen a staged batch when a deterministic finalize-time invariant fails."""
         workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
+        baseline = batch.validated_baseline
+        if validated_baseline is not _UNSET:
+            baseline = (
+                validated_baseline.model_dump(by_alias=True, mode="json")
+                if hasattr(validated_baseline, "model_dump")
+                else validated_baseline
+            )
         updated = replace(
             batch,
             status="REPAIR_REQUIRED",
             validation_issues=issues,
+            validated_baseline=baseline,
         )
         workspace.job.status = IngestionJobStatus.BATCHING
         workspace.job.stage = "batching"
@@ -577,12 +596,16 @@ def workspace_chunks(
     ]
 
 
-def workspace_fingerprint(workspace: Workspace) -> str:
+def workspace_fingerprint(
+    workspace: Workspace, *, merged_graph_digest: str | None = None
+) -> str:
     return _digest(
         {
             "versionId": str(workspace.version.id),
             "ontologyVersionId": str(workspace.job.ontology_version_id),
+            "ontologyDigest": getattr(workspace.version, "ontology_digest", None),
             "contentHash": workspace.version.content_hash,
+            "mergedGraphDigest": merged_graph_digest,
             "staged": [
                 {
                     "batchIndex": item.batch_index,

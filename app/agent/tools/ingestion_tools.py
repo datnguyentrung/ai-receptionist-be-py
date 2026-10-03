@@ -232,7 +232,9 @@ async def finalize_ingestion(
     try:
         container = await get_service_container()
         workspace = await operations.required_workspace(container.repository, ingestion_id)
-        result = await operations.finalize(container.repository, ingestion_id)
+        result = await operations.finalize(
+            container.repository, container.ontology_cache, ingestion_id
+        )
         _store_checkpoint(tool_context, result)
 
         # Đóng gói danh sách batches cho MERGE_RESULT phân tích cross-batch
@@ -279,7 +281,10 @@ async def fill_ingestion(
         }
 
         result = await operations.fill(
-            container.repository, container.graph_store, ingestion_id
+            container.repository,
+            container.ontology_cache,
+            container.graph_store,
+            ingestion_id,
         )
         _store_checkpoint(tool_context, result)
         merged_payload = {

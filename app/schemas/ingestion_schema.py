@@ -103,6 +103,13 @@ class GraphEdge(IngestionModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
 
 
+class DuplicateFactClaim(IngestionModel):
+    """Machine-checkable evidence that a chunk repeats an existing logical fact."""
+
+    fact_ref: str = Field(min_length=1)
+    evidence: Evidence
+
+
 CoverageDecision = Literal[
     "MAPPED",
     "NOT_RELEVANT",
@@ -119,6 +126,7 @@ class ChunkCoverage(IngestionModel):
     chunk_index: int = Field(ge=0)
     decision: CoverageDecision
     reason: str = Field(min_length=1)
+    duplicate_claims: list[DuplicateFactClaim] = Field(default_factory=list)
 
 
 class SemanticGraphPatchFragment(IngestionModel):
@@ -188,6 +196,7 @@ class ActiveOntology(IngestionModel):
 __all__ = [
     "ActiveOntology",
     "ChunkCoverage",
+    "DuplicateFactClaim",
     "Evidence",
     "FreeformDict",
     "GraphEdge",

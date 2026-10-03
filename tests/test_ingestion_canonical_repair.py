@@ -1,26 +1,26 @@
 import asyncio
-from uuid import uuid4
 from types import SimpleNamespace
-import pytest
+from uuid import uuid4
 
 from app.schemas.ingestion_schema import (
     ChunkCoverage,
+    DuplicateFactClaim,
     Evidence,
     GraphNode,
     GraphPatchFragment,
     OntologyProjection,
     PreparedChunk,
     PropertyFact,
-    SemanticGraphEdge,
-    SemanticGraphNode,
     SemanticGraphPatchFragment,
-    ValidationIssue,
 )
+from app.services.ingestion.fact_references import build_fact_index, property_fact_ref
 from app.services.ingestion.graph_patch_compiler import GraphPatchCompiler
-from app.services.ingestion.ontology import OntologyRegistry, validate_coverage_integrity
-from app.services.ingestion.operations import finalize, submit_batch
+from app.services.ingestion.ontology import (
+    OntologyRegistry,
+    validate_coverage_integrity,
+)
+from app.services.ingestion.operations import finalize
 from app.services.ingestion.repair_guard import RepairGuard
-from app.services.ingestion.repository import stable_entity_key
 
 
 def _proj() -> OntologyProjection:
@@ -403,8 +403,8 @@ def test_case_8_mapped_with_property_evidence_passes() -> None:
 # Case 9: DUPLICATE_EVIDENCE + resolvable prior fact -> PASS
 def test_case_9_duplicate_evidence_with_resolvable_fact_passes() -> None:
     chunks = [
-        PreparedChunk(chunk_id="c0", chunk_index=0, text="Thành lập 15/05/2012", content_hash="h0", token_count=5, source_anchor="doc#0"),
-        PreparedChunk(chunk_id="c1", chunk_index=1, text="Thành lập ngày 15/05/2012", content_hash="h1", token_count=5, source_anchor="doc#1"),
+        PreparedChunk(chunk_id="c0", chunk_index=0, text="HLV Phùng Thế Lịch", content_hash="h0", token_count=5, source_anchor="doc#0"),
+        PreparedChunk(chunk_id="c1", chunk_index=1, text="Phùng Thế Lịch là huấn luyện viên", content_hash="h1", token_count=5, source_anchor="doc#1"),
     ]
     fragment = GraphPatchFragment(
         ontology_version="v1.1.0",
@@ -417,7 +417,7 @@ def test_case_9_duplicate_evidence_with_resolvable_fact_passes() -> None:
                     PropertyFact(
                         property_name="name",
                         value="Phùng Thế Lịch",
-                        evidence=[Evidence(source="doc.md", chunk_index=0, text="Thành lập 15/05/2012")],
+                            evidence=[Evidence(source="doc.md", chunk_index=0, text="HLV Phùng Thế Lịch")],
                     )
                 ],
             )
@@ -425,10 +425,24 @@ def test_case_9_duplicate_evidence_with_resolvable_fact_passes() -> None:
         edges=[],
         coverage=[
             ChunkCoverage(chunk_index=0, decision="MAPPED", reason="Fact"),
-            ChunkCoverage(chunk_index=1, decision="DUPLICATE_EVIDENCE", reason="Duplicates chunk 0 date"),
+            ChunkCoverage(
+                chunk_index=1,
+                decision="DUPLICATE_EVIDENCE",
+                reason="Duplicates the established person name",
+                duplicate_claims=[DuplicateFactClaim(
+                    fact_ref=property_fact_ref("p1", "name", "Phùng Thế Lịch"),
+                    evidence=Evidence(
+                        source="doc.md",
+                        chunk_index=1,
+                        text="Phùng Thế Lịch",
+                    ),
+                )],
+            ),
         ],
     )
-    issues = validate_coverage_integrity(fragment, chunks)
+    issues = validate_coverage_integrity(
+        fragment, chunks, available_facts=build_fact_index([fragment])
+    )
     assert issues == []
 
 
@@ -442,7 +456,7 @@ def test_case_10_duplicate_evidence_without_prior_fact_fails() -> None:
         coverage=[ChunkCoverage(chunk_index=0, decision="DUPLICATE_EVIDENCE", reason="No prior facts exist")],
     )
     issues = validate_coverage_integrity(fragment, chunks, external_node_types={})
-    assert any(i.code == "DUPLICATE_WITHOUT_PRIOR_FACT" for i in issues)
+    assert any(i.code == "DUPLICATE_WITHOUT_MATCHING_FACT" for i in issues)
 
 
 # Case 11: UNSUPPORTED_BY_ONTOLOGY -> schema_gap_candidate
@@ -515,7 +529,16 @@ def test_case_14_finalize_catches_bad_staged_batch() -> None:
         async def mark_batch_for_repair(self, *_args, **_kwargs):
             return workspace
 
-    result = asyncio.run(finalize(Repo(), "ingestion-id"))
+    class Cache:
+        async def get_many(self, *_args):
+            return _proj()
+
+    workspace.document.name = "test.md"
+    workspace.version.content_hash = "h"
+    workspace.version.ontology_digest = "d1"
+    batch.scope_keys = ["taekwondo"]
+    batch.validated_baseline = None
+    result = asyncio.run(finalize(Repo(), Cache(), "ingestion-id"))
     assert result["success"] is False
     assert result["stage"] == "repair_required"
     assert 0 in result["repairBatchIndexes"]
@@ -555,7 +578,7 @@ def test_case_15_taekwondo_document_batch_flow() -> None:
         for i in range(5)
     ]
     issues0 = validate_coverage_integrity(can0, chunks0)
-    assert issues0 == []
+    assert any(issue.code == "COVERAGE_REVIEW_REQUIRED" for issue in issues0)
 
     # Batch 1: Chunks 5..9 with location and schedule
     b1_payload = {
@@ -612,7 +635,7 @@ def test_case_15_taekwondo_document_batch_flow() -> None:
         for i in range(5, 10)
     ]
     issues1 = validate_coverage_integrity(can1, chunks1)
-    assert issues1 == []
+    assert any(issue.code == "COVERAGE_REVIEW_REQUIRED" for issue in issues1)
 
 
 # Case 16: Auto-evidence resolves from section and text even when LLM provides empty text quote
