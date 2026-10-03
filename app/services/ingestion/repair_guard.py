@@ -3,12 +3,19 @@
 import logging
 from typing import Any
 
-from app.schemas.ingestion_schema import GraphPatchFragment, ValidationIssue
+from app.schemas.ingestion_schema import GraphNode, GraphPatchFragment, ValidationIssue
+from app.services.ingestion.repository import stable_entity_key
 
 logger = logging.getLogger(__name__)
 
 
 class RepairGuard:
+    @classmethod
+    def _node_key(cls, node: GraphNode) -> str:
+        if node.identity:
+            return stable_entity_key(node.class_name, node.identity)
+        return node.temp_id
+
     @classmethod
     def compare(
         cls,
@@ -24,10 +31,12 @@ class RepairGuard:
         }
         issues: list[ValidationIssue] = []
         old_nodes = {
-            node.temp_id: (index, node)
+            cls._node_key(node): (index, node)
             for index, node in enumerate(previous_canonical_fragment.nodes)
         }
-        new_nodes = {node.temp_id: node for node in new_canonical_fragment.nodes}
+        new_nodes = {
+            cls._node_key(node): node for node in new_canonical_fragment.nodes
+        }
 
         for stable_key, (node_index, old_node) in old_nodes.items():
             node_location = f"nodes.{node_index}"

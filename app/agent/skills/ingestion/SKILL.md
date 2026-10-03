@@ -23,310 +23,112 @@ metadata:
     - rollback_document_version
 ---
 
-# Ingestion với bản thể động
+# Ingestion Skill - Quy Chuẩn Điều Phối & Trích Xuất Toàn Diện
 
-Skill này là nguồn điều khiển thứ tự nghiệp vụ của toàn bộ quá trình ingestion tài liệu vào Knowledge Graph.
-
-## Kiến trúc cốt lõi
-
-**Agent/LLM chỉ chịu trách nhiệm semantic intelligence:**
-- Hiểu nội dung ngữ nghĩa từng chunk;
-- Xác định các knowledge facts (thuộc tính, sự kiện, mối quan hệ);
-- Chọn entity type, property hoặc relationship phù hợp trong ontology đã nạp;
-- Trích xuất semantic value và chỉ ra chunk nguồn (provenance);
-- Phân loại độ phủ (Coverage decision) cho từng chunk;
-- Phát hiện tri thức mới không thể biểu diễn bằng ontology hiện tại (Schema Gap).
-
-**Python/Backend chịu trách nhiệm deterministic bookkeeping:**
-- Chuẩn hóa evidence thành văn bản nguồn nguyên vẹn (verbatim canonical text);
-- Dựng natural identity dựa trên `identityStrategy.required` của ontology;
-- Canonicalize entity, sinh/quản lý local handle và stable entity key (`ref`);
-- Quản lý phiên bản ontology, deduplicate, validate grounding;
-- Bảo vệ baseline đã hợp lệ (repair guard), chống mất mát dữ liệu;
-- Quản lý trạng thái workspace (RAM in-memory), staging, và persistence vào Neo4j.
-
-> **Nguyên tắc vàng:** Tuyệt đối không đẩy các nhiệm vụ bookkeeping tất định sang LLM. Nếu một thao tác có thể thực hiện chính xác, lặp lại và tất định bằng Python, hệ thống sẽ do Python đảm nhiệm.
+## 1. Mệnh Lệnh Bất Biến (Top Invariant Rules)
+1. **Quy tắc `MAPPED` (Sống còn):** CHỈ đánh dấu `MAPPED` khi có ít nhất 1 `property` hoặc 1 `edge` mang `evidence.chunkIndex` trỏ đúng vào chunk đó. `node.evidence` hoặc việc chunk chỉ nhắc tên entity KHÔNG TÍNH là đã map fact. Nếu thông tin không có thuộc tính trong Ontology để điền -> BẮT BUỘC chọn `NO_RELEVANT_FACT` (hoặc `UNSUPPORTED_BY_ONTOLOGY`).
+2. **Thực Thể Xuyên Batch (`canonicalGraphContext`):** Khi bắt đầu một batch mới, kiểm tra danh sách thực thể đã `STAGED` trong `canonicalGraphContext` từ `get_ingestion_batch`. Nếu quan hệ trỏ tới thực thể đã có (ví dụ Tổ chức, HLV), **BẮT BUỘC dùng reference `entity:<stableKey>`** làm `sourceTempId` hoặc `targetTempId`. **KHÔNG tạo lại node cũ** trong batch mới chỉ để nối quan hệ.
+3. **Bảo Toàn Tri Thức Khi Sửa Lỗi (Repair Guard):** Khi Repair, **BẮT BUỘC giữ nguyên danh sách các Node và trường `name`** (định danh tự nhiên) đã hợp lệ ở lượt trước. Tuyệt đối không xóa bỏ node hoặc tự ý xóa bớt property cũ (tránh lỗi `REPAIR_DROPPED_VALID_NODE` và `REPAIR_DROPPED_VALID_FACT`).
+4. **Dừng lại khi Terminal:** Nếu tool trả về `terminal=true` hoặc `nextAction` là `explicit_extraction_failure` / `report_tool_failure` -> Dừng workflow ngay lập tức, báo cáo lỗi cho người dùng; không cố thử lại.
+5. **Không tự quyết định ghi/xóa:** Chỉ gọi `fill_ingestion`, xóa, rollback hoặc duyệt schema proposal khi có yêu cầu tường minh từ người dùng.
+6. **Đơn nhiệm LLM:** Sau khi tải scope qua `load_ontology_scopes`, LLM trực tiếp tạo JSON và gọi `submit_ingestion_batch`; không ủy quyền cho sub-agent trung gian khác.
 
 ---
 
-# 1. Quy tắc bất biến
+## 2. Quy Trình Chuẩn Từng Batch (SOP 5 Bước)
 
-1. `scope_hint` chỉ là gợi ý ban đầu; không coi là lựa chọn duy nhất hoặc cuối cùng.
-2. Không mặc định phạm vi và không hiểu `core` là toàn bộ ontology.
-3. Mỗi batch có thể chọn một hoặc nhiều scope (`scope_keys`).
-4. Chỉ sử dụng bản chụp lược đồ thuộc `ontologyVersionId` đã ghim cho phiên ingestion hiện tại.
-5. Không tạo hoặc sử dụng schema mới trước khi người dùng phê duyệt tường minh.
-6. Không gọi `fill_ingestion` nếu người dùng chưa yêu cầu ghi/lưu/import tri thức vào cơ sở dữ liệu.
-7. Không gọi `review_schema_proposal`, `apply_schema_proposal`, xóa hoặc rollback nếu người dùng chưa quyết định tường minh.
-8. Chỉ chuyển sang batch tiếp theo sau khi batch hiện tại đã chuyển trạng thái `STAGED` hoặc workflow chủ động dừng chờ phê duyệt proposal.
-9. Kết quả trả về từ Tool là nguồn sự thật (single source of truth) của workflow.
-10. Nếu tool trả `terminal=true`, hoặc `nextAction` là `explicit_extraction_failure` / `report_tool_failure`, dừng ingestion ngay lập tức và báo cáo lỗi; không cố retry thêm.
-11. Conversation history không phải bộ nhớ ingestion. Workspace Python (RAM) là nguồn state tin cậy.
-12. Agent không tự viết SQL/Cypher, không tự tạo `identity` hoặc stable key, không tự gắn `ontologyVersion` vào semantic draft.
-13. Agent không cần phải duy trì cùng một `tempId` cố định qua các lần sửa lỗi (repair).
-14. Agent không cần copy nguyên văn tuyệt đối từng khoảng trắng trong `evidence.text`; Python Evidence Resolver sẽ tự động căn chỉnh (alignment) với văn bản nguồn verbatim.
+Với mỗi `batchIndex` cần xử lý:
 
----
-
-# 2. Semantic Extraction Contract
-
-Sau khi nhận chunks từ `get_ingestion_batch` và ontology projection từ `load_ontology_scopes`, Agent trả lời các câu hỏi ngữ nghĩa:
-1. Chunk đang nói những fact nào?
-2. Fact thuộc entity nào?
-3. Ontology đã load có property/relationship phù hợp không?
-4. Nếu có, semantic value là gì và đến từ chunk nào (`chunkIndex`)?
-5. Nếu không biểu diễn được hoặc chunk là bối cảnh chung, coverage tương ứng là gì?
-
-## 2.1 Node
-- Chọn `className` đúng với ontology projection.
-- Điền các thuộc tính (properties) phù hợp.
-- **Không tự tạo trường `identity`**: Python sẽ tự động trích xuất các trường định danh dựa trên `identityStrategy.required` để sinh natural identity và canonical key.
-- `tempId`: Chuỗi định danh tạm thời trong nội bộ batch (ví dụ: `node_1`, `coach_kim`). Không cần giữ cố định chuỗi này giữa các lần repair.
-
-## 2.2 Property
-Mỗi property phải:
-- Tồn tại trong ontology projection đã nạp;
-- Thuộc đúng entity type;
-- Mang giá trị ngữ nghĩa (semantic value) có căn cứ từ văn bản;
-- Có `chunkIndex` trỏ tới chunk chứa fact đó.
-
-Về trường `evidence.text`: Agent chỉ cần cung cấp cụm từ khóa hoặc câu ngắn làm gợi ý (evidence hint). Python Evidence Resolver sẽ tự động đối chiếu và lấy chính xác câu nguyên văn từ `chunks[*].text`.
-
-## 2.3 Relationship
-Chỉ tạo relationship khi:
-- Tên quan hệ (`edgeName`) tồn tại trong ontology đã load;
-- Source/Target phù hợp với domain và range của quan hệ;
-- Quan hệ thực sự được văn bản nguồn hỗ trợ và có `chunkIndex` chứng minh.
-
-**Tham chiếu thực thể xuyên batch (`ref`):**
-Nếu một đầu mút (source/target) đã tồn tại trong `canonicalGraphContext` (đã `STAGED` ở batch trước), sử dụng reference dạng `entity:<stable-key>` (ví dụ: `entity:person:kim_chul_soo`) làm `sourceTempId` hoặc `targetTempId`. Không phát lại node cũ chỉ để tạo edge.
-
-## 2.4 Evidence
-Agent cung cấp **semantic provenance**:
-- `chunkIndex`: Số thứ tự chunk chứa dữ liệu (bắt buộc, 0-indexed);
-- `text`: Cụm từ/câu gợi ý (evidence hint).
-
-Python chịu trách nhiệm tìm kiếm trong `chunk.text`, giải quyết sai khác khoảng trắng/xuống dòng/Markdown, căn chỉnh về source verbatim và kiểm tra tính xác thực (grounding validation).
+```
+[1. get_ingestion_batch] ──> Lấy chunks nguồn và canonicalGraphContext (các thực thể đã staged)
+           │
+           ▼
+[2. load_ontology_scopes] ──> Nạp tập scope nhỏ nhất đủ bao phủ khái niệm trong batch
+           │
+           ▼
+[3. Trích xuất Semantic] ──> Tạo SemanticGraphPatchFragment (Nodes, Edges, Coverage)
+           │
+           ▼
+[4. submit_ingestion_batch] ──> Gửi fragment để hệ thống xác thực, guard và staging
+           │
+           ▼
+[5. Đọc kết quả & Thực thi Next Action]:
+     ├─ STAGED: Chuyển sang batch tiếp theo.
+     ├─ REPAIR: Thực hiện Quy trình Sửa lỗi (Mục 5).
+     └─ SCHEMA_GAP: Tạo Proposal và chờ người dùng phê duyệt (Mục 6).
+```
 
 ---
 
-# 3. Coverage Contract
+## 3. Bản Đặc Tả Trích Xuất Semantic (Extraction Contract)
 
-Mỗi chunk trong batch **bắt buộc** phải có đúng một mục phân loại `coverage` (`ChunkCoverage`):
+### 3.1 Node
+- `className`: Tên kiểu thực thể chính xác từ ontology đã nạp.
+- `tempId`: Chuỗi định danh tạm thời trong batch (ví dụ: `loc_1`, `sch_1`). **Khi repair, phải giữ nguyên chuỗi tempId này cho cùng một thực thể.**
+- `properties`: Danh sách thuộc tính của thực thể. Bắt buộc điền các thuộc tính định danh (như `name`).
+- **Không tự tạo trường `identity`**: Backend sẽ tự động sinh natural identity và stable key dựa trên các trường định danh.
 
-| Quyết định (`decision`) | Ý nghĩa & Điều kiện sử dụng |
+### 3.2 Property Fact (Nơi chứa Fact)
+Mỗi property bắt buộc có:
+- `propertyName`: Thuộc tính tồn tại trong ontology đã nạp.
+- `value`: Giá trị ngữ nghĩa trích xuất được từ văn bản.
+- `evidence`: Danh sách bằng chứng `[{"chunkIndex": X, "text": "cụm từ gợi ý ngắn"}]`. Python Evidence Resolver sẽ tự động căn chỉnh (alignment) với văn bản nguồn verbatim.
+
+### 3.3 Relationship (Edge) & Tham Chiếu Xuyên Batch (`ref`)
+- `edgeName`: Tên quan hệ hợp lệ theo ontology (đúng domain và range).
+- `sourceTempId` & `targetTempId`:
+  - Nếu đầu mút là thực thể mới trong batch: Dùng `tempId` cục bộ (ví dụ: `loc_1`).
+  - Nếu đầu mút là thực thể đã có từ batch trước (nằm trong `canonicalGraphContext`): Dùng reference dạng `entity:<stable-key>` (ví dụ: `entity:26b5331b...`).
+- `evidence`: Bắt buộc có `chunkIndex` và `text` chứng minh quan hệ.
+
+---
+
+## 4. Quy Chuẩn Coverage (Phân Định Rạch Ròi 1-1)
+
+Mỗi chunk trong batch bắt buộc có đúng 1 mục phân loại:
+
+| Quyết định | Khi nào sử dụng? (Ràng buộc bắt buộc) |
 | :--- | :--- |
-| `MAPPED` | Chunk đóng góp ít nhất một **knowledge fact thực sự** (ít nhất 1 property fact hoặc 1 relationship edge). *Lưu ý: Không được đánh `MAPPED` nếu không có bất kỳ property hay edge nào trỏ tới chunk đó (tránh lỗi `MAPPED_WITHOUT_MAPPING`).* |
-| `DUPLICATE_EVIDENCE` | Chunk chứa fact liên quan nhưng fact này đã được trích xuất ở các batch trước/canonical context và chunk hiện tại không tạo ra fact mới. |
-| `NO_RELEVANT_FACT` | Chunk thuộc tài liệu/domain nhưng chỉ là câu dẫn, lời mở đầu, câu chuyển ý hoặc mô tả chung không tạo tri thức cấu trúc. |
-| `NOT_RELEVANT` | Chunk nằm ngoài phạm vi tài liệu cần ingestion. |
-| `UNSUPPORTED_BY_ONTOLOGY` *(hoặc `SCHEMA_GAP`)* | Chunk chứa tri thức quan trọng liên quan đến miền dữ liệu nhưng ontology hiện tại thiếu entity/property/relationship để biểu diễn. Bắt buộc nêu rõ lý do trong `reason`. |
-| `AMBIGUOUS` | Nội dung nguồn quá mơ hồ, không đủ dữ liệu để ánh xạ chắc chắn. Tuyệt đối không suy đoán vô căn cứ. |
-| `FAILED` | Lỗi trích xuất ngữ nghĩa thực sự từ phía LLM khiến không thể xử lý chunk. |
+| `MAPPED` | Có ít nhất 1 `property` hoặc 1 `edge` mang `evidence.chunkIndex` trỏ đúng vào chunk này. |
+| `NO_RELEVANT_FACT` | Chunk là slogan, giới thiệu chung, lời mở đầu, hoặc thông tin (lịch sử, giải thưởng, quy mô) mà **Ontology không có thuộc tính để lưu**. |
+| `DUPLICATE_EVIDENCE` | Chunk chứa fact đã được trích xuất ở các batch trước / canonical context và chunk hiện tại không tạo ra fact mới. |
+| `UNSUPPORTED_BY_ONTOLOGY` *(hoặc `SCHEMA_GAP`)* | Chunk chứa tri thức cấu trúc cốt lõi mà Ontology hoàn toàn thiếu entity/property/relationship để biểu diễn -> Ghi rõ lý do vào `reason` để tạo Schema Proposal. |
+| `NOT_RELEVANT` | Nội dung hoàn toàn nằm ngoài phạm vi tài liệu cần nạp. |
+| `AMBIGUOUS` | Nội dung nguồn quá mơ hồ, không đủ căn cứ để trích xuất chắc chắn. |
+| `FAILED` | Lỗi trích xuất ngữ nghĩa thực sự từ LLM khiến không thể xử lý chunk. |
 
-### Quy tắc bất biến về Coverage:
-- Không đánh `MAPPED` chỉ vì Agent "hiểu" chunk hoặc chunk chỉ nhắc tên một entity đã biết.
-- Không tạo property/edge giả chỉ để vượt qua bộ kiểm tra coverage.
-- Không nhét các sự kiện, thành tích, lịch sử vào trường `description` hoặc `notes` một cách gượng ép nếu ontology thiếu quan hệ/thực thể chuyên biệt; thay vào đó, hãy dùng `UNSUPPORTED_BY_ONTOLOGY` để mở đề xuất schema.
+> ⚠️ **Quy tắc kiểm tra chéo (Sanity Check):** Trước khi submit, lướt qua toàn bộ chunk đánh dấu `MAPPED`. Nếu không chỉ ra được `property` hoặc `edge` cụ thể nào mang `chunkIndex` đó -> **BẮT BUỘC chuyển thành `NO_RELEVANT_FACT`**.
 
 ---
 
-# 4. Quy trình xử lý bắt buộc cho mỗi Batch
+## 5. Quy Trình Sửa Lỗi Batch (Repair Checklist 3 Bước)
 
-Với mỗi `nextBatch.batchIndex`:
+Khi `submit_ingestion_batch` trả về lỗi (`success=false`, `terminal=false`):
 
-```
-┌─────────────────────────┐
-│ 1. get_ingestion_batch  │ ──> Lấy danh sách chunks và canonical context
-└───────────┬─────────────┘
-            ▼
-┌─────────────────────────┐
-│ 2. list_ontology_scopes │ ──> Liệt kê danh mục scope gọn nhẹ (nếu cần)
-└───────────┬─────────────┘
-            ▼
-┌─────────────────────────┐
-│ 3. load_ontology_scopes │ ──> Tải compiled snapshot của tập scope nhỏ nhất đủ bao phủ
-└───────────┬─────────────┘
-            ▼
-┌─────────────────────────┐
-│ 4. Trích xuất Semantic  │ ──> LLM tạo trực tiếp SemanticGraphPatchFragment
-└───────────┬─────────────┘
-            ▼
-┌─────────────────────────┐
-│5. submit_ingestion_batch│ ──> Gửi fragment để Python validate, guard và stage
-└───────────┬─────────────┘
-            ▼
-┌─────────────────────────┐
-│ 6. Đọc kết quả / Action │ ──> STAGED (qua batch mới) hoặc REPAIR / SCHEMA_PROPOSAL
-└─────────────────────────┘
-```
-
-> **Tuyệt đối không gọi extraction sub-agent hoặc LLM trung gian khác sau bước `load_ontology_scopes`.**
+1. **Bước 1 (Giữ nguyên nền tảng & Không xóa Node):** 
+   - Sao chép toàn bộ các node, properties và edges đã hợp lệ ở lượt trước. 
+   - Giữ nguyên chuỗi `tempId` và thuộc tính định danh `name` của các node cũ. Tuyệt đối không xóa bỏ node đã được chấp nhận ở lượt trước.
+2. **Bước 2 (Khắc phục lỗi cục bộ theo chẩn đoán):**
+   - Lỗi `EVIDENCE_NOT_GROUNDED`: Giữ nguyên fact/value, chỉ rút ngắn `evidence.text` thành cụm từ nguyên văn xuất hiện chính xác trong chunk nguồn.
+   - Lỗi `MAPPED_WITHOUT_MAPPING`: Chuyển chunk bị phạt sang `NO_RELEVANT_FACT` (nếu không có fact mới) hoặc bổ sung property/edge có chứa chunk đó.
+3. **Bước 3 (Kiểm tra chéo và Submit):** Đảm bảo giữ đủ các properties cũ và mọi chunk `MAPPED` đều có fact bảo chứng. Sau đó gọi lại `submit_ingestion_batch`.
 
 ---
 
-# 5. Khởi tạo Ingestion (`begin_ingestion`)
+## 6. Xử Lý Lỗi Ontology & Schema Proposal
 
-1. Gọi `begin_ingestion(artifact_name, document_key?, scope_hint?)`.
-2. Lưu `ingestionId` và metadata trả về.
-3. Python tự động thực hiện: kiểm tra file, parse, deduplicate, clean, chia chunk và gom batch.
-4. Trạng thái workspace/batches/chunks được lưu trữ in-memory (RAM) trong `ServiceContainer`. PostgreSQL lưu trữ ontology version và schema proposals. Neo4j lưu Knowledge Graph hoàn chỉnh sau khi fill.
-5. Nếu tool trả về workspace có thể tái sử dụng (in-process reuse), tiếp tục từ `nextBatch.batchIndex`.
-
----
-
-# 6. Chọn Ontology Scope
-
-1. Sau `get_ingestion_batch`, gọi `list_ontology_scopes(ingestion_id)` nếu chưa rõ các scope có sẵn.
-2. Đọc `scopeKey`, `description`, `summary`, `schemaHash`.
-3. Xét nội dung toàn bộ batch, chọn hợp của các scope nhỏ nhất nhưng đủ bao phủ các khái niệm trong batch.
-4. Gọi `load_ontology_scopes(ingestion_id, scope_keys)`.
-5. Nếu tool báo lỗi snapshot, sai hash, merge conflict hoặc sai ontology version: dừng batch và báo lỗi ontology data.
+Khi gặp lỗi ontology (`UNKNOWN_ENTITY_TYPE`, `UNKNOWN_PROPERTY`, `UNKNOWN_RELATIONSHIP`):
+1. **Kiểm tra mã chẩn đoán:**
+   - `RELATIONSHIP_MAPPING_MISMATCH`: Sửa lại `edgeName` theo danh sách quan hệ tương thích, không tạo proposal.
+   - `MISSING_SCOPE`: Nạp thêm scope bị thiếu qua `load_ontology_scopes` rồi submit lại.
+   - `SCHEMA_GAP_CANDIDATE`: Gọi `create_schema_proposal` với `proposal_type` hợp lệ (`NEW_RELATIONSHIP`, `NEW_ENTITY_TYPE`, `NEW_PROPERTY`...).
+2. **Dừng batch & Chờ phê duyệt từ người dùng:**
+   - **Người dùng từ chối:** Gọi `review_schema_proposal(approved=false)`, đổi chunk liên quan sang `NO_RELEVANT_FACT` hoặc `UNSUPPORTED_BY_ONTOLOGY` và trích xuất tiếp.
+   - **Người dùng đồng ý:** Gọi `review_schema_proposal(approved=true)` -> `apply_schema_proposal(version)` -> `rebase_ingestion` -> Tiếp tục xử lý batch với ontology mới.
 
 ---
 
-# 7. Gửi Semantic Fragment (`submit_ingestion_batch`)
-
-Gọi `submit_ingestion_batch(ingestion_id, batch_index, scope_keys, graph_fragment)`.
-
-Python sẽ tự động:
-- Canonicalize tên kỹ thuật;
-- Dựng natural identity và stable key;
-- Căn chỉnh evidence về văn bản nguồn (Evidence Resolver);
-- Kiểm tra tính hợp lệ với ontology và ràng buộc dữ liệu;
-- Kiểm tra Repair Guard (đảm bảo không làm mất fact hợp lệ);
-- Chuyển trạng thái batch thành `STAGED`.
-
-Chỉ khi tool trả về trạng thái `STAGED` mới chuyển sang batch tiếp theo.
-
----
-
-# 8. Quy trình Sửa lỗi Batch (Repair Workflow)
-
-Khi `submit_ingestion_batch` trả về lỗi kiểm tra (`success=false`), hệ thống sẽ trả về danh sách `errors` chi tiết và `affectedChunkIndexes`.
-
-### 8.1 Các bước Repair:
-1. **Không gọi lại `begin_ingestion`** và không chuyển sang batch khác.
-2. Đọc kỹ checkpoint: `batchIndex`, `scopeKeys`, `affectedChunkIndexes`, `errors`.
-3. Gọi lại `get_ingestion_batch(ingestion_id, batchIndex)`.
-4. Gọi `load_ontology_scopes` với đúng các scope cần thiết.
-5. **Tạo lại Semantic Fragment hoàn chỉnh**, khắc phục các lỗi được chỉ ra.
-6. Submit lại với `submit_ingestion_batch`.
-
-### 8.2 Nguyên tắc bảo toàn Knowledge (Repair Guard):
-- **BẢO TỒN CÁC FACT ĐÃ HỢP LỆ**: Giữ lại toàn bộ các node, property facts và edges đã được trích xuất chính xác ở lần trước nếu chúng không vi phạm lỗi (tránh kích hoạt lỗi `REPAIR_DROPPED_VALID_FACT`).
-- **Sửa lỗi trích dẫn (`EVIDENCE_NOT_GROUNDED`)**:
-  - Giữ nguyên entity, property, value và `chunkIndex`.
-  - Rút ngắn hoặc chỉnh lại `evidence.text` thành cụm từ/từ khóa có mặt trực tiếp trong chunk nguồn để Evidence Resolver tự căn chỉnh.
-- **Sửa lỗi độ phủ (`MAPPED_WITHOUT_MAPPING`)**:
-  - Nếu chunk có chứa fact: bổ sung property/edge có `chunkIndex` trỏ tới chunk đó.
-  - Nếu chunk không tạo fact mới: chuyển coverage sang `DUPLICATE_EVIDENCE` hoặc `NO_RELEVANT_FACT`.
-  - Nếu ontology thiếu khả năng biểu diễn: chuyển sang `UNSUPPORTED_BY_ONTOLOGY` (hoặc `SCHEMA_GAP`).
-
----
-
-# 9. Xử lý Lỗi Ontology & Đề xuất Schema Proposal
-
-Khi gặp lỗi liên quan đến ontology (`UNKNOWN_ENTITY_TYPE`, `UNKNOWN_PROPERTY`, `UNKNOWN_RELATIONSHIP`), kiểm tra mã chẩn đoán từ tool:
-
-1. `RELATIONSHIP_MAPPING_MISMATCH`: Ontology hiện tại đã có quan hệ tương thích giữa cặp thực thể → Sửa lại `edgeName` theo `candidateRelationships`, không tạo proposal.
-2. `MISSING_SCOPE`: Khái niệm nằm ở scope khác trong cùng ontology version → Nạp thêm scope đó qua `load_ontology_scopes` rồi submit lại.
-3. `SCHEMA_GAP_CANDIDATE`: Toàn bộ ontology hiện tại không có cấu trúc phù hợp → Tiến hành tạo Schema Proposal.
-
-### 9.1 Tạo đề xuất (`create_schema_proposal`):
-Gọi `create_schema_proposal` với các tham số chuẩn:
-- `proposal_type`: Bắt buộc chọn đúng 1 trong các giá trị enum sau:
-  - `NEW_RELATIONSHIP`: Thêm quan hệ mới giữa hai loại thực thể.
-    - Payload mẫu: `{"technicalName": "has_policy", "sourceEntityType": "organization", "targetEntityType": "policy", "displayName": "Có chính sách", "cardinality": "MANY_TO_MANY", "description": "Quan hệ chính sách từ tổ chức"}`
-  - `NEW_ENTITY_TYPE`: Thêm loại thực thể mới.
-    - Payload mẫu: `{"technicalName": "event", "displayName": "Sự kiện", "identityFields": ["name"]}`
-  - `NEW_PROPERTY`: Thêm thuộc tính mới.
-    - Payload mẫu: `{"entityType": "class_program", "technicalName": "tuition", "dataType": "FLOAT", "displayName": "Học phí", "required": false}`
-  - `MODIFY_ENTITY_TYPE` / `MODIFY_PROPERTY` / `MODIFY_RELATIONSHIP`
-  - `NEW_ALIAS` / `NEW_SCOPE` / `MODIFY_SCOPE`
-- `technical_name`: Tên kỹ thuật của đối tượng (ví dụ: `has_policy`, `tuition`).
-- `reason`: Lý do chi tiết từ tài liệu nguồn.
-- `evidence`: Bằng chứng nguồn (ví dụ: `{"chunkIndex": 5, "quote": "..."}`).
-- `affected_scope_keys`: Danh sách scope bị ảnh hưởng (ví dụ: `["core", "training"]`).
-
-**Sau khi gọi proposal:** Dừng batch ở trạng thái `awaiting_schema_approval`. Tuyệt đối không tự phê duyệt proposal.
-
----
-
-# 10. Phê duyệt & Áp dụng Thay đổi Bản thể
-
-1. Dùng `get_schema_proposal` để lấy thông tin chi tiết, sau đó trình bày cho người dùng kèm bằng chứng và đề xuất.
-2. Chờ quyết định tường minh từ người dùng:
-   - **Người dùng từ chối**:
-     - Gọi `review_schema_proposal(..., approved=false, ...)`.
-     - Trích xuất lại theo ontology cũ (đánh dấu chunk liên quan là `UNSUPPORTED_BY_ONTOLOGY` hoặc `NOT_RELEVANT`).
-   - **Người dùng đồng ý**:
-     - Gọi `review_schema_proposal(..., approved=true, ...)`.
-     - Gọi `apply_schema_proposal` với mã phiên bản mới (ví dụ: `v1.1.0`).
-     - Python tự động tạo ontology version mới, biên dịch snapshot và kích hoạt phiên bản.
-     - Gọi `rebase_ingestion` để cập nhật lại phiên ingestion sang ontology version mới.
-     - Tiếp tục xử lý batch theo hướng dẫn của `nextBatch` trả về từ `rebase_ingestion`.
-
----
-
-# 11. Finalize & Ghi Dữ liệu vào Neo4j (`fill_ingestion`)
-
-1. **Finalize**: Khi toàn bộ các batch đã `STAGED`, gọi `finalize_ingestion(ingestion_id)`.
-   - Tool sẽ kiểm tra toàn diện: độ phủ (coverage completeness), grounding, tính toàn vẹn của đồ thị (canonical integrity).
-   - Nếu còn batch lỗi hoặc proposal chưa duyệt: quay lại xử lý đúng batch đó, không ép finalize.
-2. **Fill (Persistence)**:
-   - Khi trạng thái là `ready_to_fill`:
-     - Nếu người dùng chỉ yêu cầu trích xuất/kiểm thử: Dừng lại và thông báo rõ dữ liệu chưa ghi vào Neo4j.
-     - Nếu người dùng đã yêu cầu lưu/ghi/import: Gọi `fill_ingestion(ingestion_id)`.
-   - `fill_ingestion` sẽ:
-     - Tạo embedding cho các thực thể;
-     - Ghi các Nodes, Properties, Edges bền vững vào Neo4j;
-     - Đọc lại (read-back verification) để kiểm tra tính toàn vẹn;
-     - Cập nhật trạng thái workspace thành `COMMITTED`.
-3. Chỉ báo thành công khi tool trả về `readbackVerified=true`.
-
----
-
-# 12. Báo cáo Kết quả Cuối cùng
-
-Báo cáo tóm tắt bắt buộc gồm các thông tin:
-- `ingestionId`;
-- Phiên bản Ontology đã sử dụng;
-- Số batch đã `STAGED` thành công;
-- Số batch bị chặn / gặp lỗi (nếu có);
-- Các Schema Proposals và quyết định phê duyệt của người dùng (nếu có);
-- Trạng thái Finalize & Trạng thái ghi Neo4j (`COMMITTED`);
-- Tổng kết số lượng: Nodes, Edges, Chunks, Property facts;
-- Kết quả kiểm chứng đọc lại (`readbackVerified`).
-
-> **Tuyệt đối không gọi dữ liệu đang ở trạng thái Staged (tạm thời) là đã ghi vào cơ sở dữ liệu chính thức.**
-
----
-
-# 13. Sơ đồ Phân chia Trách nhiệm
-
-``` text
-┌────────────────────────────────────────────────────────┐
-│                      LLM / AGENT                       │
-├────────────────────────────────────────────────────────┤
-│ • Semantic Understanding & Chunk Analysis              │
-│ • Knowledge Fact Extraction (Nodes, Properties, Edges) │
-│ • Dynamic Ontology Scope Selection                     │
-│ • Chunk Coverage Classification                        │
-│ • Schema Gap Detection & Proposal Authoring            │
-└───────────────────────────┬────────────────────────────┘
-                            │ (SemanticGraphPatchFragment)
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                   PYTHON / BACKEND                     │
-├────────────────────────────────────────────────────────┤
-│ • Ingestion Workspace & Batch Management (RAM)         │
-│ • Verbatim Evidence Resolution & Alignment             │
-│ • Natural Identity & Stable Entity Key Generation      │
-│ • Canonicalization, Deduplication & Grounding Guard    │
-│ • Repair Guard (Preserving Valid Baseline Facts)       │
-│ • Ontology Versioning & Snapshot Compilation (Postgres)│
-│ • Vector Embedding & Persistent Commit (Neo4j)         │
-│ • Readback Verification                                │
-└────────────────────────────────────────────────────────┘
-```
+## 7. Hoàn Tất (Finalize & Fill)
+1. **Finalize:** Khi tất cả các batch đã `STAGED`, gọi `finalize_ingestion(ingestion_id)`.
+2. **Fill (Persistence):** Chỉ gọi `fill_ingestion(ingestion_id)` khi người dùng yêu cầu lưu/nhập dữ liệu vào Knowledge Graph Neo4j.
+3. **Báo cáo tổng kết:** Báo cáo `ingestionId`, phiên bản Ontology, số node, edges, batches và trạng thái commit (`readbackVerified`).
