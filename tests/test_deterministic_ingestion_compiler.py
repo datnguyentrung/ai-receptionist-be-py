@@ -8,6 +8,7 @@ from app.agent.tools.ingestion_tools import submit_ingestion_batch
 from app.core.config import Settings
 from app.core.schemas.ingestion import DocumentChunk
 from app.schemas.ingestion_schema import (
+    GraphPatchFragment,
     OntologyProjection,
     SemanticGraphPatchFragment,
 )
@@ -131,14 +132,19 @@ def test_casefold_entity_name_is_canonicalized_without_schema_gap() -> None:
     assert canonical.nodes[0].class_name == "person"
 
 
+def _canonical(properties: list[tuple[str, str]]) -> GraphPatchFragment:
+    compiled = GraphPatchCompiler().compile(_semantic(properties), _projection())
+    return compiled.fragment
+
+
 def test_repair_cannot_drop_unrelated_valid_fact() -> None:
-    old = _semantic(
+    old = _canonical(
         [("name", "Phùng Thế Lịch"), ("address", "Văn Quán"), ("phone", "0900")]
     )
-    new = _semantic([("name", "Phùng Thế Lịch"), ("phone", "0900")])
+    new = _canonical([("name", "Phùng Thế Lịch"), ("phone", "0900")])
     issues = RepairGuard.compare(
-        previous_semantic_fragment=old,
-        new_semantic_fragment=new,
+        previous_canonical_fragment=old,
+        new_canonical_fragment=new,
         previous_validation_issues=[
             {
                 "code": "EVIDENCE_NOT_GROUNDED",
@@ -149,121 +155,34 @@ def test_repair_cannot_drop_unrelated_valid_fact() -> None:
     assert [issue.code for issue in issues] == ["REPAIR_DROPPED_VALID_FACT"]
 
 
-def test_evidence_only_repair_cannot_mutate_edge_endpoint() -> None:
-    old = SemanticGraphPatchFragment.model_validate(
-        {
-            "ontologyVersion": "v1",
-            "nodes": [],
-            "edges": [
-                {
-                    "edgeName": "knows",
-                    "sourceTempId": "entity:abc",
-                    "targetTempId": "entity:def",
-                    "evidence": [
-                        {"source": "people.md", "chunkIndex": 0, "text": "abc def"}
-                    ],
-                }
-            ],
-            "coverage": [
-                {"chunkIndex": 0, "decision": "MAPPED", "reason": "relationship"}
-            ],
-        }
-    )
-    new = SemanticGraphPatchFragment.model_validate(
-        {
-            "ontologyVersion": "v1",
-            "nodes": [],
-            "edges": [
-                {
-                    "edgeName": "knows",
-                    "sourceTempId": "abc",
-                    "targetTempId": "def",
-                    "evidence": [
-                        {"source": "people.md", "chunkIndex": 0, "text": "abc def"}
-                    ],
-                }
-            ],
-            "coverage": [
-                {"chunkIndex": 0, "decision": "MAPPED", "reason": "relationship"}
-            ],
-        }
-    )
-
+def test_repair_guard_allows_adding_properties_on_coverage_repair() -> None:
+    old = _canonical([("name", "Phùng Thế Lịch")])
+    new = _canonical([("name", "Phùng Thế Lịch"), ("description", "HLV")])
     issues = RepairGuard.compare(
-        previous_semantic_fragment=old,
-        new_semantic_fragment=new,
-        previous_validation_issues=[
-            {
-                "code": "EVIDENCE_NOT_GROUNDED",
-                "location": "edges.0.evidence.0.text",
-            }
-        ],
-    )
-
-    assert [issue.code for issue in issues] == ["REPAIR_MUTATED_UNRELATED_EDGE"]
-
-
-def test_evidence_only_repair_allows_evidence_text_change() -> None:
-    old = _semantic([("name", "Phùng Thế Lịch")])
-    new_node = old.nodes[0].model_copy(
-        update={
-            "properties": [
-                old.nodes[0].properties[0].model_copy(
-                    update={
-                        "evidence": [
-                            old.nodes[0].properties[0].evidence[0].model_copy(
-                                update={"text": "Phùng Thế Lịch"}
-                            )
-                        ]
-                    }
-                )
-            ]
-        }
-    )
-    new = old.model_copy(update={"nodes": [new_node]})
-
-    issues = RepairGuard.compare(
-        previous_semantic_fragment=old,
-        new_semantic_fragment=new,
-        previous_validation_issues=[
-            {
-                "code": "EVIDENCE_NOT_GROUNDED",
-                "location": "nodes.0.properties.0.evidence.0.text",
-            }
-        ],
-    )
-
-    assert issues == []
-
-
-def test_evidence_only_repair_cannot_add_properties() -> None:
-    old = _semantic([("name", "Phùng Thế Lịch")])
-    new = _semantic([("name", "Phùng Thế Lịch"), ("description", "HLV")])
-    issues = RepairGuard.compare(
-        previous_semantic_fragment=old,
-        new_semantic_fragment=new,
-        previous_validation_issues=[
-            {
-                "code": "EVIDENCE_NOT_GROUNDED",
-                "location": "nodes.0.properties.0.evidence.0.text",
-            }
-        ],
-    )
-    assert any(issue.code == "REPAIR_MUTATED_UNRELATED_NODE" for issue in issues)
-
-
-def test_non_evidence_repair_can_add_properties() -> None:
-    old = _semantic([("name", "Phùng Thế Lịch")])
-    new = _semantic([("name", "Phùng Thế Lịch"), ("description", "HLV")])
-    issues = RepairGuard.compare(
-        previous_semantic_fragment=old,
-        new_semantic_fragment=new,
+        previous_canonical_fragment=old,
+        new_canonical_fragment=new,
         previous_validation_issues=[
             {
                 "code": "MAPPED_WITHOUT_MAPPING",
                 "location": "coverage.0.decision",
             }
         ],
+    )
+    assert issues == []
+
+
+def test_repair_guard_transparent_to_tempid_change_with_same_identity() -> None:
+    proj = _projection()
+    sem1 = _semantic([("name", "Phùng Thế Lịch"), ("phone", "0900")])
+    sem2 = _semantic([("name", "Phùng Thế Lịch"), ("phone", "0900")])
+    sem2.nodes[0].temp_id = "completely_different_tempid"
+    can1 = GraphPatchCompiler().compile(sem1, proj).fragment
+    can2 = GraphPatchCompiler().compile(sem2, proj).fragment
+
+    issues = RepairGuard.compare(
+        previous_canonical_fragment=can1,
+        new_canonical_fragment=can2,
+        previous_validation_issues=[],
     )
     assert issues == []
 

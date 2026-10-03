@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 def validate_coverage_integrity(
     fragment: GraphPatchFragment,
     chunks: Iterable[PreparedChunk],
+    external_node_types: dict[str, str] | None = None,
 ) -> list[ValidationIssue]:
     """Validate that coverage decisions correspond to real graph contributions."""
     issues: list[ValidationIssue] = []
@@ -78,30 +79,44 @@ def validate_coverage_integrity(
                 )
             )
 
-    mapped_evidence_chunks: set[int] = set()
+    fact_chunks: set[int] = set()
     for node in fragment.nodes:
-        mapped_evidence_chunks.update(item.chunk_index for item in node.evidence)
         for fact in node.properties:
-            mapped_evidence_chunks.update(item.chunk_index for item in fact.evidence)
+            fact_chunks.update(item.chunk_index for item in fact.evidence)
     for edge in fragment.edges:
-        mapped_evidence_chunks.update(item.chunk_index for item in edge.evidence)
+        fact_chunks.update(item.chunk_index for item in edge.evidence)
 
     for coverage_index, item in enumerate(fragment.coverage):
         if item.chunk_index not in expected_coverage:
             continue
-        if item.decision == "MAPPED" and item.chunk_index not in mapped_evidence_chunks:
-            issues.append(
-                ValidationIssue(
-                    code="MAPPED_WITHOUT_MAPPING",
-                    message=(
-                        f"Chunk {item.chunk_index} is marked MAPPED but no "
-                        "node, property, or edge carries evidence from that chunk"
-                    ),
-                    location=f"coverage.{coverage_index}.decision",
-                    retryable=True,
+        if item.decision == "MAPPED":
+            if item.chunk_index not in fact_chunks:
+                issues.append(
+                    ValidationIssue(
+                        code="MAPPED_WITHOUT_MAPPING",
+                        message=(
+                            f"Chunk {item.chunk_index} is marked MAPPED but no "
+                            "property or edge carries evidence from that chunk"
+                        ),
+                        location=f"coverage.{coverage_index}.decision",
+                        retryable=True,
+                    )
                 )
-            )
-        elif item.decision == "SCHEMA_GAP":
+        elif item.decision == "DUPLICATE_EVIDENCE":
+            # Must resolve to existing fact in current fragment or prior staged entities
+            if not fact_chunks and not external_node_types:
+                issues.append(
+                    ValidationIssue(
+                        code="DUPLICATE_WITHOUT_PRIOR_FACT",
+                        message=(
+                            f"Chunk {item.chunk_index} is marked DUPLICATE_EVIDENCE "
+                            "but no prior or current knowledge facts exist to duplicate"
+                        ),
+                        location=f"coverage.{coverage_index}.decision",
+                        retryable=True,
+                    )
+                )
+        elif item.decision in {"SCHEMA_GAP", "UNSUPPORTED_BY_ONTOLOGY"}:
             issues.append(
                 ValidationIssue(
                     code="SCHEMA_GAP_CANDIDATE",
@@ -111,6 +126,28 @@ def validate_coverage_integrity(
                     ),
                     location=f"coverage.{coverage_index}.decision",
                     retryable=False,
+                )
+            )
+        elif item.decision == "AMBIGUOUS":
+            issues.append(
+                ValidationIssue(
+                    code="COVERAGE_AMBIGUOUS",
+                    message=(
+                        f"Chunk {item.chunk_index} is marked AMBIGUOUS: {item.reason}"
+                    ),
+                    location=f"coverage.{coverage_index}.decision",
+                    retryable=True,
+                )
+            )
+        elif item.decision == "FAILED":
+            issues.append(
+                ValidationIssue(
+                    code="COVERAGE_FAILED",
+                    message=(
+                        f"Chunk {item.chunk_index} extraction failed: {item.reason}"
+                    ),
+                    location=f"coverage.{coverage_index}.decision",
+                    retryable=True,
                 )
             )
     return issues
@@ -274,7 +311,13 @@ class OntologyRegistry:
             )
 
         # 2. Kiểm tra semantic coverage của từng chunk.
-        issues.extend(validate_coverage_integrity(fragment, chunk_by_index.values()))
+        issues.extend(
+            validate_coverage_integrity(
+                fragment,
+                chunk_by_index.values(),
+                external_node_types=external_node_types,
+            )
+        )
 
         # 3. Kiểm tra tính hợp lệ của từng Thực thể (Node) và các Thuộc tính (Properties)
         node_types: dict[str, str] = dict(external_node_types or {})
@@ -435,11 +478,17 @@ class OntologyRegistry:
                     )
                 )
             else:
+                chunk_surfaces = [chunk.text]
+                if chunk.section:
+                    chunk_surfaces.extend([
+                        f"{chunk.section}\n\n{chunk.text}",
+                        f"{chunk.section}\n{chunk.text}",
+                        chunk.section,
+                    ])
                 evidence_text = _normalize_quote(evidence.text)
-                chunk_text = _normalize_quote(chunk.text)
-                if evidence_text in chunk_text:
+                if any(evidence_text in _normalize_quote(surface) for surface in chunk_surfaces):
                     continue
-                reason, preview = _evidence_failure_reason(evidence_text, chunk_text)
+                reason, preview = _evidence_failure_reason(evidence_text, _normalize_quote(chunk.text))
                 logger.info(
                     "EVIDENCE_GROUNDING location=%s chunkIndex=%s reason=%s evidence=%r nearest=%r",
                     f"{location}.{index}.text",

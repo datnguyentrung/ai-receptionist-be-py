@@ -759,7 +759,9 @@ async def _build_graphrag_payload(
         "version_id": version_id,
         "document_id": document_id,
         "document_name": getattr(workspace.document, "name", ""),
-        "ontology_version_id": str(getattr(workspace.version, "ontology_version_id", "")),
+        "ontology_version_id": str(
+            getattr(workspace.version, "ontology_version_id", "")
+        ),
         "embedding_model": embedding_provider.model,
         "chunks": ordered_chunks,
         "chunk_links": [
@@ -804,7 +806,9 @@ def _merge_fragments(
             else:
                 for existing_id, existing_node in nodes_by_canonical_id.items():
                     if existing_node["className"] == node["className"]:
-                        existing_ident_json = _json(existing_node.get("identity") or {"tempId": existing_id})
+                        existing_ident_json = _json(
+                            existing_node.get("identity") or {"tempId": existing_id}
+                        )
                         if existing_ident_json == identity_json:
                             canonical_id = existing_id
                             break

@@ -272,17 +272,20 @@ async def submit_batch(
             )
         )
 
-    if getattr(batch, "semantic_fragment", None):
-        previous_semantic = SemanticGraphPatchFragment.model_validate(
-            batch.semantic_fragment
-        )
-        validation_issues.extend(
-            RepairGuard.compare(
-                previous_semantic_fragment=previous_semantic,
-                new_semantic_fragment=semantic,
-                previous_validation_issues=batch.validation_issues,
+    if getattr(batch, "validated_baseline", None) and fragment is not None:
+        try:
+            previous_baseline = GraphPatchFragment.model_validate(
+                batch.validated_baseline
             )
-        )
+            validation_issues.extend(
+                RepairGuard.compare(
+                    previous_canonical_fragment=previous_baseline,
+                    new_canonical_fragment=fragment,
+                    previous_validation_issues=batch.validation_issues,
+                )
+            )
+        except ValidationError:
+            pass
 
     issues = [
         item.model_dump(by_alias=True, mode="json")
@@ -305,6 +308,11 @@ async def submit_batch(
                 ref: item["className"] for ref, item in entity_index.items()
             },
         )
+        new_baseline = (
+            RepairGuard.extract_validated_baseline(fragment, validation_issues)
+            if fragment is not None
+            else None
+        )
         workspace = await repository.store_batch_result(
             ingestion_id,
             batch_index,
@@ -314,6 +322,7 @@ async def submit_batch(
             fragment,
             issues,
             max_attempts=MAX_BATCH_VALIDATION_ATTEMPTS,
+            validated_baseline=new_baseline,
         )
         result = batch_failure_payload(
             workspace, batch_index, issues, MAX_BATCH_VALIDATION_ATTEMPTS
