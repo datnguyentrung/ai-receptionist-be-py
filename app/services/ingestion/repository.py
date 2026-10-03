@@ -83,6 +83,7 @@ class IngestionBatchData:
     merged_schema_hash: str | None
     scope_keys: list[str] = field(default_factory=list)
     snapshot_hashes: dict[str, str] = field(default_factory=dict)
+    validated_baseline: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,7 @@ class IngestionRepository:
         issues: list[dict],
         *,
         max_attempts: int,
+        validated_baseline: GraphPatchFragment | dict | None = None,
     ) -> Workspace:
         workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
         if workspace.job.status != IngestionJobStatus.BATCHING:
@@ -265,6 +267,22 @@ class IngestionRepository:
             )
         attempts = batch.validation_attempts + 1
         terminal = bool(issues) and attempts > max_attempts
+
+        if not issues and fragment is not None:
+            baseline_dict = (
+                fragment.model_dump(by_alias=True, mode="json")
+                if hasattr(fragment, "model_dump")
+                else fragment
+            )
+        elif validated_baseline is not None:
+            baseline_dict = (
+                validated_baseline.model_dump(by_alias=True, mode="json")
+                if hasattr(validated_baseline, "model_dump")
+                else validated_baseline
+            )
+        else:
+            baseline_dict = batch.validated_baseline
+
         updated = replace(
             batch,
             validation_attempts=attempts,
@@ -276,6 +294,7 @@ class IngestionRepository:
             graph_fragment=fragment.model_dump(by_alias=True, mode="json")
             if hasattr(fragment, "model_dump")
             else fragment,
+            validated_baseline=baseline_dict,
             status="FAILED" if terminal else "REPAIR_REQUIRED" if issues else "STAGED",
             scope_keys=[item["scopeKey"] for item in scope_bindings],
             snapshot_hashes={
@@ -285,9 +304,7 @@ class IngestionRepository:
         workspace.job.status = (
             IngestionJobStatus.FAILED if terminal else IngestionJobStatus.BATCHING
         )
-        workspace.job.stage = (
-            "explicit_extraction_failure" if terminal else "batching"
-        )
+        workspace.job.stage = "explicit_extraction_failure" if terminal else "batching"
         if terminal:
             workspace.job.error_stage = "explicit_extraction_failure"
             workspace.job.error_message = (

@@ -10,11 +10,11 @@ from app.schemas.ingestion_schema import (
     SemanticGraphPatchFragment,
     ValidationIssue,
 )
-from app.services.ingestion.repository import stable_entity_key
 from app.services.ingestion.identity_resolver import (
     IdentityResolutionError,
     OntologyIdentityResolver,
 )
+from app.services.ingestion.repository import stable_entity_key
 
 
 class GraphPatchCompileResult(BaseModel):
@@ -40,6 +40,7 @@ class GraphPatchCompiler:
         }
 
         for node_index, node in enumerate(semantic_fragment.nodes):
+            temp_id = node.temp_id if node.temp_id else f"node_{node_index}"
             try:
                 identity = resolver.resolve(
                     class_name=node.class_name,
@@ -70,7 +71,15 @@ class GraphPatchCompiler:
                         )
                 continue
             key = stable_entity_key(node.class_name, identity)
-            local_entity_keys[node.temp_id] = key
+            local_entity_keys[temp_id] = key
+            local_entity_keys[f"node_{node_index}"] = key
+            local_entity_keys[str(node_index)] = key
+            for prop in node.properties:
+                if isinstance(prop.value, str) and prop.value.strip():
+                    local_entity_keys[prop.value.strip()] = key
+            for ident_val in identity.values():
+                if isinstance(ident_val, str) and ident_val.strip():
+                    local_entity_keys[ident_val.strip()] = key
             node_types[key] = node.class_name
             canonical_nodes.append(
                 GraphNode(
@@ -88,7 +97,11 @@ class GraphPatchCompiler:
 
         canonical_edges: list[GraphEdge] = []
         relationships_by_sig = {
-            (item["technicalName"], item["sourceEntityType"], item["targetEntityType"]): item
+            (
+                item["technicalName"],
+                item["sourceEntityType"],
+                item["targetEntityType"],
+            ): item
             for item in projection.relationships
         }
         relationships = {}
@@ -124,8 +137,10 @@ class GraphPatchCompiler:
                 source_type = node_types.get(source_key)
                 target_type = node_types.get(target_key)
                 if (
-                    source_type and target_type
-                    and (edge.edge_name, source_type, target_type) not in relationships_by_sig
+                    source_type
+                    and target_type
+                    and (edge.edge_name, source_type, target_type)
+                    not in relationships_by_sig
                 ):
                     expected_pairs = [
                         f"{c['sourceEntityType']} -> {c['targetEntityType']}"
@@ -156,7 +171,7 @@ class GraphPatchCompiler:
             return GraphPatchCompileResult(issues=issues)
         return GraphPatchCompileResult(
             fragment=GraphPatchFragment(
-                ontology_version=semantic_fragment.ontology_version,
+                ontology_version=projection.version_id,
                 nodes=canonical_nodes,
                 edges=canonical_edges,
                 coverage=semantic_fragment.coverage,
@@ -172,7 +187,9 @@ class GraphPatchCompiler:
     ) -> str | None:
         if value in local_entity_keys:
             return local_entity_keys[value]
-        if value.startswith("entity:"):
+        if isinstance(value, str) and value.strip() in local_entity_keys:
+            return local_entity_keys[value.strip()]
+        if isinstance(value, str) and value.startswith("entity:"):
             staged = staged_entities.get(value)
             return staged["stableKey"] if staged else None
         return None

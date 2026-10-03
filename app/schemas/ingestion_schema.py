@@ -51,9 +51,9 @@ class SourceVersionStatus(StrEnum):
 
 
 class Evidence(IngestionModel):
-    source: str = Field(min_length=1)
+    source: str = Field(default="document.md")
     chunk_index: int = Field(ge=0)
-    text: str = Field(min_length=1)
+    text: str = Field(default="")
     section: str | None = None
     page: int | None = Field(default=None, ge=1)
 
@@ -67,7 +67,7 @@ class PropertyFact(IngestionModel):
 class SemanticGraphNode(IngestionModel):
     """LLM-facing node. Identity is deliberately absent."""
 
-    temp_id: str = Field(min_length=1)
+    temp_id: str = Field(default="")
     class_name: str = Field(min_length=1)
     properties: list[PropertyFact] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
@@ -103,16 +103,27 @@ class GraphEdge(IngestionModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
 
 
+CoverageDecision = Literal[
+    "MAPPED",
+    "NOT_RELEVANT",
+    "NO_RELEVANT_FACT",
+    "DUPLICATE_EVIDENCE",
+    "UNSUPPORTED_BY_ONTOLOGY",
+    "AMBIGUOUS",
+    "FAILED",
+    "SCHEMA_GAP",
+]
+
+
 class ChunkCoverage(IngestionModel):
     chunk_index: int = Field(ge=0)
-    decision: Literal["MAPPED", "NOT_RELEVANT", "SCHEMA_GAP"]
+    decision: CoverageDecision
     reason: str = Field(min_length=1)
 
 
 class SemanticGraphPatchFragment(IngestionModel):
     """The only graph-fragment contract exposed to the language model."""
 
-    ontology_version: str = Field(min_length=1)
     nodes: list[SemanticGraphNode] = Field(default_factory=list)
     edges: list[SemanticGraphEdge] = Field(default_factory=list)
     coverage: list[ChunkCoverage] = Field(min_length=1)
@@ -123,7 +134,7 @@ class GraphPatchFragment(IngestionModel):
     ontology_version: str = Field(min_length=1)
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
-    coverage: list[ChunkCoverage] = Field(min_length=1)
+    coverage: list[ChunkCoverage] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 

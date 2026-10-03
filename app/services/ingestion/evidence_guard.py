@@ -1,6 +1,6 @@
 """Canonicalize evidence excerpts against prepared chunk text before validation."""
 
-from __future__ import annotations
+from typing import Any
 
 import logging
 import re
@@ -11,6 +11,17 @@ from app.schemas.ingestion_schema import Evidence, GraphPatchFragment, PreparedC
 logger = logging.getLogger(__name__)
 
 
+def _chunk_surfaces(chunk: PreparedChunk) -> list[str]:
+    surfaces = [chunk.text]
+    if chunk.section:
+        surfaces.extend([
+            f"{chunk.section}\n\n{chunk.text}",
+            f"{chunk.section}\n{chunk.text}",
+            chunk.section,
+        ])
+    return surfaces
+
+
 def canonical_whitespace_excerpt(chunk: PreparedChunk, quote: str) -> str:
     """Return the chunk surface when the quote only differs by whitespace."""
     if not quote.strip():
@@ -19,7 +30,7 @@ def canonical_whitespace_excerpt(chunk: PreparedChunk, quote: str) -> str:
     if not parts:
         return quote
     pattern = r"\s+".join(parts)
-    for surface in (chunk.section or "", chunk.text):
+    for surface in _chunk_surfaces(chunk):
         match = re.search(pattern, surface, flags=re.MULTILINE)
         if match is not None:
             return match.group(0)
@@ -28,8 +39,9 @@ def canonical_whitespace_excerpt(chunk: PreparedChunk, quote: str) -> str:
 
 def canonical_markdown_excerpt(chunk: PreparedChunk, quote: str) -> str:
     """Return a chunk line/paragraph when markdown markers are the only mismatch."""
-    if quote in chunk.text or quote in (chunk.section or ""):
-        return quote
+    for surface in _chunk_surfaces(chunk):
+        if quote in surface:
+            return quote
 
     def plain(value: str) -> str:
         value = re.sub(r"(\*\*|__|`|\*)", "", value)
@@ -38,12 +50,13 @@ def canonical_markdown_excerpt(chunk: PreparedChunk, quote: str) -> str:
     target = plain(quote)
     if not target:
         return quote
-    for line in chunk.text.splitlines():
-        if target in plain(line):
-            return line.strip()
-    for paragraph in _paragraphs(chunk.text):
-        if target in plain(paragraph):
-            return paragraph
+    for surface in _chunk_surfaces(chunk):
+        for line in surface.splitlines():
+            if target in plain(line):
+                return line.strip()
+        for paragraph in _paragraphs(surface):
+            if target in plain(paragraph):
+                return paragraph
     return quote
 
 
@@ -53,26 +66,28 @@ def canonical_table_excerpt(chunk: PreparedChunk, quote: str) -> str:
     if ":" not in normalized and "|" not in normalized:
         return quote
     target = _plain_line(normalized)
-    for line in chunk.text.splitlines():
-        candidate = line.strip()
-        if target and target in _plain_line(candidate):
-            return candidate
+    for surface in _chunk_surfaces(chunk):
+        for line in surface.splitlines():
+            candidate = line.strip()
+            if target and target in _plain_line(candidate):
+                return candidate
     return quote
 
 
 def canonical_bullet_excerpt(chunk: PreparedChunk, quote: str) -> str:
     """Return the matching bullet/list line from the chunk when available."""
-    if quote in chunk.text or quote in (chunk.section or ""):
-        return quote
-    for line in reversed(quote.splitlines()):
-        candidate = line.strip()
-        if candidate.startswith(("- ", "* ")) and candidate in chunk.text:
-            return candidate
-    plain_candidate = quote.strip().lstrip("-* ").strip()
-    for line in chunk.text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("- ", "* ")) and plain_candidate in stripped:
-            return stripped
+    for surface in _chunk_surfaces(chunk):
+        if quote in surface:
+            return quote
+        for line in reversed(quote.splitlines()):
+            candidate = line.strip()
+            if candidate.startswith(("- ", "* ")) and candidate in surface:
+                return candidate
+        plain_candidate = quote.strip().lstrip("-* ").strip()
+        for line in surface.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("- ", "* ")) and plain_candidate in stripped:
+                return stripped
     return quote
 
 
@@ -80,18 +95,44 @@ def canonical_prefix_completion_excerpt(chunk: PreparedChunk, quote: str) -> str
     """Complete a truncated quote when its normalized prefix is unique in the chunk."""
     if not quote.strip():
         return quote
-    if quote in chunk.text and not _looks_truncated_prefix(chunk.text, quote):
+    for surface in _chunk_surfaces(chunk):
+        if quote in surface and not _looks_truncated_prefix(surface, quote):
+            return quote
+        normalized_chunk = _collapse_space(surface)
+        normalized_quote = _collapse_space(quote)
+        if not normalized_quote:
+            continue
+        start = normalized_chunk.find(normalized_quote)
+        if start >= 0 and normalized_chunk.find(normalized_quote, start + 1) < 0:
+            end = _sentence_end(normalized_chunk, start + len(normalized_quote))
+            completed = normalized_chunk[start:end].strip()
+            res = _surface_for_collapsed(surface, completed) or completed
+            if res:
+                return res
+    return quote
+
+
+def canonical_sentence_window_excerpt(
+    chunk: PreparedChunk, quote: str, fallback_value: Any = None
+) -> str:
+    """Locate the exact verbatim sentence/line containing the quote or property value."""
+    target = quote.strip() if quote.strip() else (str(fallback_value).strip() if fallback_value is not None else "")
+    if not target:
         return quote
-    normalized_chunk = _collapse_space(chunk.text)
-    normalized_quote = _collapse_space(quote)
-    if not normalized_quote:
-        return quote
-    start = normalized_chunk.find(normalized_quote)
-    if start < 0 or normalized_chunk.find(normalized_quote, start + 1) >= 0:
-        return quote
-    end = _sentence_end(normalized_chunk, start + len(normalized_quote))
-    completed = normalized_chunk[start:end].strip()
-    return _surface_for_collapsed(chunk.text, completed) or completed or quote
+    for surface in _chunk_surfaces(chunk):
+        if target in surface:
+            for line in surface.splitlines():
+                if target in line:
+                    return line.strip()
+            for para in _paragraphs(surface):
+                if target in para:
+                    return para.strip()
+        # Case-insensitive / whitespace-insensitive match
+        norm_target = _collapse_space(target).casefold()
+        for line in surface.splitlines():
+            if norm_target in _collapse_space(line).casefold():
+                return line.strip()
+    return quote
 
 
 class GraphFragmentEvidenceGuard:
@@ -103,6 +144,7 @@ class GraphFragmentEvidenceGuard:
         canonical_whitespace_excerpt,
         canonical_markdown_excerpt,
         canonical_bullet_excerpt,
+        canonical_sentence_window_excerpt,
     )
 
     def canonicalize(
@@ -112,7 +154,9 @@ class GraphFragmentEvidenceGuard:
     ) -> GraphPatchFragment:
         chunk_by_index = {chunk.chunk_index: chunk for chunk in chunks}
 
-        def normalize(items: list[Evidence], location: str) -> list[Evidence]:
+        def normalize(
+            items: list[Evidence], location: str, fallback_value: Any = None
+        ) -> list[Evidence]:
             normalized_items: list[Evidence] = []
             for index, item in enumerate(items):
                 chunk = chunk_by_index.get(item.chunk_index)
@@ -120,12 +164,23 @@ class GraphFragmentEvidenceGuard:
                     normalized_items.append(item)
                     continue
                 text = item.text
+                surfaces = _chunk_surfaces(chunk)
+                
+                # If text is empty, seed with fallback_value
+                if not text.strip() and fallback_value is not None:
+                    text = canonical_sentence_window_excerpt(chunk, "", fallback_value)
+
                 for normalizer in self._normalizers:
-                    candidate = normalizer(chunk, text)
+                    candidate = (
+                        normalizer(chunk, text, fallback_value)
+                        if normalizer is canonical_sentence_window_excerpt
+                        else normalizer(chunk, text)
+                    )
                     if candidate != text:
                         text = candidate
-                    if text in chunk.text and not _looks_truncated_prefix(chunk.text, text):
+                    if any(text in s and not _looks_truncated_prefix(s, text) for s in surfaces):
                         break
+
                 update = {
                     "source": chunk.source_anchor,
                     "section": chunk.section,
@@ -150,6 +205,7 @@ class GraphFragmentEvidenceGuard:
                         "evidence": normalize(
                             prop.evidence,
                             f"nodes.{node_index}.properties.{property_index}.evidence",
+                            fallback_value=prop.value,
                         )
                     }
                 )
@@ -160,7 +216,9 @@ class GraphFragmentEvidenceGuard:
                     update={
                         "properties": properties,
                         "evidence": normalize(
-                            node.evidence, f"nodes.{node_index}.evidence"
+                            node.evidence,
+                            f"nodes.{node_index}.evidence",
+                            fallback_value=node.class_name,
                         ),
                     }
                 )
@@ -168,7 +226,11 @@ class GraphFragmentEvidenceGuard:
         edges = [
             edge.model_copy(
                 update={
-                    "evidence": normalize(edge.evidence, f"edges.{edge_index}.evidence")
+                    "evidence": normalize(
+                        edge.evidence,
+                        f"edges.{edge_index}.evidence",
+                        fallback_value=edge.edge_name,
+                    )
                 }
             )
             for edge_index, edge in enumerate(fragment.edges)
