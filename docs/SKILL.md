@@ -285,8 +285,8 @@ Không coi failed fragment gần nhất là baseline tuyệt đối.
     `errors`.
 4.  Gọi lại `get_ingestion_batch`.
 5.  Load lại đúng scope cần thiết.
-6.  Tạo lại semantic mapping từ source + ontology + validation errors +
-    canonical/validated context backend cung cấp.
+6.  Nếu backend trả `repairContext.repairTemplate`, copy nguyên template và
+    chỉ patch các vị trí trong `validationIssues`; không dựng lại từ trí nhớ.
 7.  Submit lại cùng batch.
 
 Agent không cần nhớ raw fragment cũ từ conversation history.
@@ -305,8 +305,8 @@ Không viết lại toàn graph chỉ vì formatting evidence.
 Nếu lỗi `MAPPED_WITHOUT_MAPPING`:
 
 -   Có fact biểu diễn được → tạo property/relationship đúng ontology.
--   Fact đã tồn tại → `DUPLICATE_EVIDENCE`.
--   Không có fact mới → `NO_RELEVANT_FACT`.
+-   Fact đã tồn tại → `DUPLICATE_EVIDENCE` với `factRef` và grounded quote.
+-   Chỉ structural boilerplate được chứng minh deterministic → `NO_RELEVANT_FACT`.
 -   Ontology không biểu diễn được → `UNSUPPORTED_BY_ONTOLOGY`.
 -   Source mơ hồ → `AMBIGUOUS`.
 
@@ -386,8 +386,9 @@ dụng canonical knowledge còn hợp lệ theo tool result.
 
 Khi mọi batch đã `STAGED`, gọi `finalize_ingestion`.
 
-Finalize kiểm tra tối thiểu: - coverage completeness; - grounding; -
-unresolved schema gaps; - failed/ambiguous chunks theo policy; - batch
+Finalize kiểm tra tối thiểu: - coverage completeness và semantic proof; -
+grounding; - unresolved schema gaps; - failed/ambiguous chunks theo policy;
+- repair baseline preservation; - scalar conflicts theo `multiValue`; - batch
 consistency; - canonical graph integrity.
 
 Nếu phát hiện batch không hợp lệ: - không ép READY; - mở lại đúng batch

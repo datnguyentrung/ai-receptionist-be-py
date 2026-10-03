@@ -26,13 +26,20 @@ from app.schemas.ingestion_schema import (
 )
 from app.services.ingestion.document.reader import DocumentReader
 from app.services.ingestion.evidence_guard import GraphFragmentEvidenceGuard
+from app.services.ingestion.fact_references import (
+    add_local_fact_aliases,
+    build_fact_index,
+)
 from app.services.ingestion.graph_patch_compiler import GraphPatchCompiler
 from app.services.ingestion.graph_store import Neo4jIngestionStore
 from app.services.ingestion.ontology import (
     COMPILER_VERSION,
     OntologyCache,
     OntologyRegistry,
-    validate_coverage_integrity,
+)
+from app.services.ingestion.readiness import (
+    ReadinessResult,
+    WorkspaceReadinessValidator,
 )
 from app.services.ingestion.repair_guard import RepairGuard
 from app.services.ingestion.repository import (
@@ -139,6 +146,10 @@ async def get_batch(
             "selectedScopeKeys": batch.scope_keys,
             "chunks": [item.model_dump(by_alias=True, mode="json") for item in chunks],
             "canonicalGraphContext": _canonical_context(workspace, batch_index),
+            "canonicalFactContext": _canonical_fact_context(
+                workspace, batch_index, include_repair_baseline=True
+            ),
+            "repairContext": _repair_context(workspace, batch_index),
         },
     }
 
@@ -261,6 +272,10 @@ async def submit_batch(
     chunks = workspace_chunks(workspace, batch.chunk_indexes)
     if fragment is not None:
         fragment = GraphFragmentEvidenceGuard().canonicalize(fragment, chunks)
+        fact_fragments = _staged_fragments(workspace, before_batch=batch_index)
+        fact_fragments.append(fragment)
+        available_facts = build_fact_index(fact_fragments)
+        add_local_fact_aliases(available_facts, canonical_semantic, fragment)
         validation_issues.extend(
             registry.validate_fragment(
                 fragment,
@@ -269,21 +284,24 @@ async def submit_batch(
                     item["stableKey"]: item["className"]
                     for item in entity_index.values()
                 },
+                available_facts=available_facts,
+                artifact_name=getattr(workspace.document, "name", None),
             )
         )
 
+    previous_baseline: GraphPatchFragment | None = None
+    repair_issues = []
     if getattr(batch, "validated_baseline", None) and fragment is not None:
         try:
             previous_baseline = GraphPatchFragment.model_validate(
                 batch.validated_baseline
             )
-            validation_issues.extend(
-                RepairGuard.compare(
-                    previous_canonical_fragment=previous_baseline,
-                    new_canonical_fragment=fragment,
-                    previous_validation_issues=batch.validation_issues,
-                )
+            repair_issues = RepairGuard.compare(
+                previous_canonical_fragment=previous_baseline,
+                new_canonical_fragment=fragment,
+                previous_validation_issues=batch.validation_issues,
             )
+            validation_issues.extend(repair_issues)
         except ValidationError:
             pass
 
@@ -308,10 +326,18 @@ async def submit_batch(
                 ref: item["className"] for ref, item in entity_index.items()
             },
         )
-        new_baseline = (
+        issue_codes = {item.get("code") for item in issues}
+        count_attempt = not bool(
+            issue_codes & {"COVERAGE_REVIEW_REQUIRED", "SCHEMA_GAP_CANDIDATE"}
+        )
+        extracted_baseline = (
             RepairGuard.extract_validated_baseline(fragment, validation_issues)
             if fragment is not None
             else None
+        )
+        new_baseline = RepairGuard.merge_baselines(
+            previous_baseline,
+            None if repair_issues else extracted_baseline,
         )
         workspace = await repository.store_batch_result(
             ingestion_id,
@@ -323,6 +349,7 @@ async def submit_batch(
             issues,
             max_attempts=MAX_BATCH_VALIDATION_ATTEMPTS,
             validated_baseline=new_baseline,
+            count_attempt=count_attempt,
         )
         result = batch_failure_payload(
             workspace, batch_index, issues, MAX_BATCH_VALIDATION_ATTEMPTS
@@ -378,6 +405,7 @@ async def submit_batch(
 
 async def finalize(
     repository: IngestionRepository,
+    ontology_cache: OntologyCache,
     ingestion_id: str,
 ) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
@@ -412,64 +440,20 @@ async def finalize(
             ],
         }
 
-    coverage_errors: dict[int, list[dict[str, Any]]] = {}
-    for batch in workspace.batches:
-        if not batch.graph_fragment:
-            continue
-        try:
-            fragment = GraphPatchFragment.model_validate(batch.graph_fragment)
-        except ValidationError as exc:
-            coverage_errors[batch.batch_index] = [
-                {
-                    "code": "INVALID_STAGED_GRAPH_FRAGMENT",
-                    "message": item["msg"],
-                    "location": ".".join(str(part) for part in item["loc"]),
-                    "retryable": True,
-                }
-                for item in exc.errors()
-            ]
-            continue
+    projection = await _workspace_projection(ontology_cache, workspace)
+    readiness = WorkspaceReadinessValidator().validate(workspace, projection)
+    if readiness.issues:
+        return await _block_on_readiness(repository, workspace, readiness)
 
-        issues = validate_coverage_integrity(
-            fragment,
-            workspace_chunks(workspace, batch.chunk_indexes),
-        )
-        if issues:
-            coverage_errors[batch.batch_index] = [
-                issue.model_dump(by_alias=True, mode="json") for issue in issues
-            ]
-
-    if coverage_errors:
-        for batch_index, issues in coverage_errors.items():
-            workspace = await repository.mark_batch_for_repair(
-                ingestion_id, batch_index, issues
-            )
-        flattened = [
-            {**issue, "batchIndex": batch_index}
-            for batch_index, issues in coverage_errors.items()
-            for issue in issues
-        ]
-        has_schema_gap = any(
-            item.get("code") == "SCHEMA_GAP_CANDIDATE" for item in flattened
-        )
-        return {
-            "success": False,
-            "stage": "schema_gap_candidate" if has_schema_gap else "repair_required",
-            "terminal": False,
-            "retryRequired": not has_schema_gap,
-            "nextAction": "assess_schema_gap" if has_schema_gap else "repair_batches",
-            "ingestionId": ingestion_id,
-            "repairBatchIndexes": sorted(coverage_errors),
-            "errors": flattened,
-        }
-
-    return status_payload(
-        await repository.mark_ready(ingestion_id, workspace_fingerprint(workspace))
-    )
+    return status_payload(await repository.mark_ready(
+        ingestion_id,
+        workspace_fingerprint(workspace, merged_graph_digest=readiness.digest),
+    ))
 
 
 async def fill(
     repository: IngestionRepository,
+    ontology_cache: OntologyCache,
     graph_store: Neo4jIngestionStore,
     ingestion_id: str,
 ) -> dict[str, Any]:
@@ -480,7 +464,11 @@ async def fill(
         return guarded
     if workspace.job.status == IngestionJobStatus.COMMITTED:
         return status_payload(workspace, idempotent=True)
-    expected = workspace_fingerprint(workspace)
+    projection = await _workspace_projection(ontology_cache, workspace)
+    readiness = WorkspaceReadinessValidator().validate(workspace, projection)
+    if readiness.issues:
+        return await _block_on_readiness(repository, workspace, readiness)
+    expected = workspace_fingerprint(workspace, merged_graph_digest=readiness.digest)
     if (
         workspace.job.status != IngestionJobStatus.READY
         or workspace.job.readiness_fingerprint != expected
@@ -493,7 +481,7 @@ async def fill(
         )
     await repository.mark_writing(ingestion_id)
     try:
-        result = await graph_store.fill(workspace)
+        result = await graph_store.fill(workspace, readiness.fragment)
         previous_version_id = workspace.document.current_version_id
         if previous_version_id and previous_version_id != workspace.version.id:
             result["superseded"] = await graph_store.deactivate_version(
@@ -800,6 +788,70 @@ async def required_workspace(
     return workspace
 
 
+async def _workspace_projection(
+    ontology_cache: OntologyCache, workspace: Workspace
+):
+    scope_keys = sorted(
+        {scope for batch in workspace.batches for scope in batch.scope_keys}
+    )
+    if not scope_keys:
+        raise RuntimeError("Cannot validate readiness without pinned ontology scopes")
+    return await ontology_cache.get_many(
+        scope_keys, str(workspace.job.ontology_version_id)
+    )
+
+
+async def _block_on_readiness(
+    repository: IngestionRepository,
+    workspace: Workspace,
+    readiness: ReadinessResult,
+) -> dict[str, Any]:
+    serialized: dict[int, list[dict[str, Any]]] = {
+        batch_index: [issue.model_dump(by_alias=True, mode="json") for issue in issues]
+        for batch_index, issues in readiness.issues_by_batch.items()
+    }
+    for batch_index, issues in serialized.items():
+        batch = next(item for item in workspace.batches if item.batch_index == batch_index)
+        baseline = None
+        if batch.graph_fragment:
+            try:
+                baseline = RepairGuard.extract_validated_baseline(
+                    GraphPatchFragment.model_validate(batch.graph_fragment), issues
+                )
+            except ValidationError:
+                baseline = None
+        await repository.mark_batch_for_repair(
+            str(workspace.job.id),
+            batch_index,
+            issues,
+            validated_baseline=baseline,
+        )
+    flattened = [
+        {**issue, "batchIndex": batch_index}
+        for batch_index, issues in serialized.items()
+        for issue in issues
+    ]
+    codes = {item["code"] for item in flattened}
+    if "SCHEMA_GAP_CANDIDATE" in codes:
+        stage, next_action, retry = "schema_gap_candidate", "assess_schema_gap", False
+    elif "COVERAGE_REVIEW_REQUIRED" in codes:
+        stage, next_action, retry = "coverage_review_required", "request_coverage_review", False
+    elif "SCALAR_PROPERTY_CONFLICT" in codes:
+        stage, next_action, retry = "semantic_conflict", "repair_batches", True
+    else:
+        stage, next_action, retry = "repair_required", "repair_batches", True
+    return {
+        "success": False,
+        "stage": stage,
+        "terminal": False,
+        "retryRequired": retry,
+        "nextAction": next_action,
+        "ingestionId": str(workspace.job.id),
+        "repairBatchIndexes": sorted(serialized),
+        "errors": flattened,
+    }
+
+
 def workflow_guard_payload(
     workspace: Workspace,
     action: str,
@@ -842,12 +894,27 @@ def batch_failure_payload(
                 *issues,
             ],
         }
+    codes = {item.get("code") for item in issues}
+    if "SCHEMA_GAP_CANDIDATE" in codes:
+        stage, retry_required, next_action = (
+            "schema_gap_candidate",
+            False,
+            "assess_schema_gap",
+        )
+    elif "COVERAGE_REVIEW_REQUIRED" in codes:
+        stage, retry_required, next_action = (
+            "coverage_review_required",
+            False,
+            "request_coverage_review",
+        )
+    else:
+        stage, retry_required, next_action = "repair_required", True, "repair_batch"
     return {
         "success": False,
-        "stage": "repair_required",
+        "stage": stage,
         "terminal": False,
-        "retryRequired": True,
-        "nextAction": "repair_batch",
+        "retryRequired": retry_required,
+        "nextAction": next_action,
         "ingestionId": str(workspace.job.id),
         "batchIndex": batch_index,
         "scopeKeys": getattr(batch, "scope_keys", []),
@@ -855,6 +922,7 @@ def batch_failure_payload(
         "errors": issues,
         "validationAttempts": getattr(batch, "validation_attempts", 0),
         "maxAttempts": max_attempts,
+        "repairContext": _repair_context(workspace, batch_index),
     }
 
 
@@ -954,6 +1022,123 @@ def _canonical_context(workspace: Workspace, before_batch: int) -> list[dict[str
         [item["stableKey"] for item in context],
     )
     return context
+
+
+def _staged_fragments(
+    workspace: Workspace, before_batch: int | None = None
+) -> list[GraphPatchFragment]:
+    fragments: list[GraphPatchFragment] = []
+    for batch in workspace.batches:
+        if before_batch is not None and batch.batch_index >= before_batch:
+            continue
+        if batch.status != "STAGED" or not batch.graph_fragment:
+            continue
+        fragments.append(GraphPatchFragment.model_validate(batch.graph_fragment))
+    return fragments
+
+
+def _canonical_fact_context(
+    workspace: Workspace,
+    before_batch: int,
+    *,
+    include_repair_baseline: bool = False,
+) -> list[dict[str, Any]]:
+    fragments = _staged_fragments(workspace, before_batch)
+    if include_repair_baseline:
+        batch = next(
+            (item for item in workspace.batches if item.batch_index == before_batch),
+            None,
+        )
+        if batch and batch.validated_baseline:
+            fragments.append(GraphPatchFragment.model_validate(batch.validated_baseline))
+    return list(build_fact_index(fragments).values())[:100]
+
+
+def _repair_context(workspace: Workspace, batch_index: int) -> dict[str, Any] | None:
+    batch = next(
+        (item for item in workspace.batches if item.batch_index == batch_index), None
+    )
+    if batch is None or batch.status != "REPAIR_REQUIRED":
+        return None
+    baseline_data = getattr(batch, "validated_baseline", None)
+    baseline = (
+        GraphPatchFragment.model_validate(baseline_data) if baseline_data else None
+    )
+    return {
+        "mode": "PATCH_PROTECTED_BASELINE",
+        "validationIssues": getattr(batch, "validation_issues", []),
+        "protectedBaseline": (
+            baseline.model_dump(by_alias=True, mode="json") if baseline else None
+        ),
+        "repairTemplate": _semantic_repair_template(baseline) if baseline else None,
+        "instructions": [
+            "Start from repairTemplate; do not rebuild the batch from memory.",
+            "Keep every supplied node, property value/evidence, edge/evidence, and coverage item unchanged.",
+            "Add or change only semantics identified by validationIssues.",
+            "Use canonicalFactContext factRef values for DUPLICATE_EVIDENCE claims.",
+        ],
+    }
+
+
+def _semantic_repair_template(baseline: GraphPatchFragment) -> dict[str, Any]:
+    local_ids = {node.temp_id for node in baseline.nodes}
+    nodes = [
+        {
+            "tempId": node.temp_id,
+            "className": node.class_name,
+            "properties": [
+                fact.model_dump(by_alias=True, mode="json") for fact in node.properties
+            ],
+            "evidence": [
+                item.model_dump(by_alias=True, mode="json") for item in node.evidence
+            ],
+            "confidence": node.confidence,
+        }
+        for node in baseline.nodes
+    ]
+    edges = []
+    for edge in baseline.edges:
+        source = (
+            edge.source_temp_id
+            if edge.source_temp_id in local_ids
+            else f"entity:{edge.source_temp_id}"
+        )
+        target = (
+            edge.target_temp_id
+            if edge.target_temp_id in local_ids
+            else f"entity:{edge.target_temp_id}"
+        )
+        edges.append(
+            {
+                "edgeName": edge.edge_name,
+                "sourceTempId": source,
+                "targetTempId": target,
+                "properties": [
+                    {
+                        "propertyName": name,
+                        "value": value,
+                        "evidence": [
+                            item.model_dump(by_alias=True, mode="json")
+                            for item in edge.evidence
+                        ],
+                    }
+                    for name, value in edge.properties.items()
+                ],
+                "evidence": [
+                    item.model_dump(by_alias=True, mode="json")
+                    for item in edge.evidence
+                ],
+                "confidence": edge.confidence,
+            }
+        )
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "coverage": [
+            item.model_dump(by_alias=True, mode="json") for item in baseline.coverage
+        ],
+        "warnings": list(baseline.warnings),
+    }
 
 
 def _chunks_from_evidence(fragment: GraphPatchFragment) -> list[PreparedChunk]:

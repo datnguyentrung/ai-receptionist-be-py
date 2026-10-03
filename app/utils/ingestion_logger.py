@@ -619,55 +619,10 @@ from google.adk.plugins.base_plugin import BasePlugin
 
 
 class ADKDetailedLoggerPlugin(BasePlugin):
-    """Plugin tự động ghi nhận mọi Trace, Event, Request, Response, Tool Call, Model Input/Output vào log.txt."""
+    """Plugin ghi nhận tinh gọn Token Usage của mỗi lượt gọi Model/Trace vào log.txt."""
 
     def __init__(self) -> None:
         super().__init__(name="adk_detailed_logger")
-
-    async def on_event_callback(self, *, invocation_context, event):
-        author = getattr(event, "author", "system")
-        event_id = getattr(event, "id", None)
-        write_raw_trace(f"⚡ [ADK EVENT TRACE] author={author} id={event_id}", event)
-        return None
-
-    async def on_user_message_callback(self, *, invocation_context, user_message):
-        text = ""
-        for part in getattr(user_message, "parts", []):
-            if hasattr(part, "text") and part.text:
-                text += part.text + "\n"
-        write_raw_trace("👤 USER INPUT MESSAGE", {"message": text.strip(), "raw": user_message})
-        return None
-
-    async def before_agent_callback(self, *, agent, callback_context):
-        agent_name = getattr(agent, "name", "unknown_agent")
-        write_raw_trace(f"🤖 [AGENT START] {agent_name}", {"agent": agent_name, "model": getattr(agent, "model", None)})
-        return None
-
-    async def after_agent_callback(self, *, agent, callback_context):
-        agent_name = getattr(agent, "name", "unknown_agent")
-        write_raw_trace(f"🏁 [AGENT FINISH] {agent_name}")
-        return None
-
-    async def before_tool_callback(self, *, tool, tool_args, tool_context):
-        tool_name = getattr(tool, "name", str(tool))
-        write_raw_trace(f"🛠️ [TOOL REQUEST] {tool_name}", {"tool": tool_name, "arguments": tool_args})
-        return None
-
-    async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
-        tool_name = getattr(tool, "name", str(tool))
-        write_raw_trace(f"📦 [TOOL RESPONSE] {tool_name}", {"tool": tool_name, "result": result})
-        return None
-
-    async def before_model_callback(self, *, callback_context, llm_request):
-        agent_name = getattr(getattr(callback_context, "agent", None), "name", "unknown")
-        req_data = {
-            "agent": agent_name,
-            "model": getattr(llm_request, "model", None),
-            "contents": getattr(llm_request, "contents", None),
-            "tools": [getattr(t, "name", str(t)) for t in (getattr(llm_request, "tools", []) or [])],
-        }
-        write_raw_trace(f"📤 [MODEL CALL REQUEST] ({agent_name})", req_data)
-        return None
 
     async def after_model_callback(self, *, callback_context, llm_response):
         agent_name = getattr(getattr(callback_context, "agent", None), "name", "unknown")
@@ -685,24 +640,92 @@ class ADKDetailedLoggerPlugin(BasePlugin):
                         "args": getattr(fc, "args", None),
                     })
 
-        resp_data = {
-            "agent": agent_name,
-            "text": text.strip() if text else None,
-            "functionCalls": function_calls if function_calls else None,
-            "usage": getattr(llm_response, "usage_metadata", None),
-        }
-        write_raw_trace(f"📥 [MODEL CALL RESPONSE] ({agent_name})", resp_data)
+        usage = getattr(llm_response, "usage_metadata", None)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"[{now_str}] === ⚡ MODEL TRACE ({agent_name}) ==="]
+        if function_calls:
+            calls_str = ", ".join(f"{fc.get('name')}(...)" for fc in function_calls)
+            lines.append(f"  🎯 Action / Function Calls: {calls_str}")
+        elif text:
+            preview = text.strip().replace("\n", " ")[:150]
+            lines.append(f"  💬 Text Response: \"{preview}...\"" if len(preview) >= 150 else f"  💬 Text Response: \"{preview}\"")
+
+        lines.extend(_format_token_usage(usage))
+        lines.append("")
+
+        try:
+            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+                f.flush()
+        except Exception as e:
+            print(f"Failed to write trace token log: {e}")
+
         return None
 
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         tool_name = getattr(tool, "name", str(tool))
-        write_raw_trace(f"❌ [TOOL ERROR] {tool_name}", {"tool": tool_name, "error": str(error), "arguments": tool_args})
+        write_raw_trace(f"❌ [TOOL ERROR] {tool_name}", {"tool": tool_name, "error": str(error)})
         return None
 
     async def on_agent_error_callback(self, *, agent, callback_context, error):
         agent_name = getattr(agent, "name", "unknown_agent")
         write_raw_trace(f"❌ [AGENT ERROR] {agent_name}", {"agent": agent_name, "error": str(error)})
         return None
+
+
+def _format_token_usage(usage: Any) -> list[str]:
+    """Định dạng chi tiết mọi thông số token của lượt gọi Model/Trace."""
+    lines = ["  📊 TOKEN USAGE BREAKDOWN:"]
+    if not usage:
+        lines.append("     (Không có thông tin usage metadata)")
+        return lines
+
+    def get_val(names: list[str]) -> Any:
+        for name in names:
+            if hasattr(usage, name):
+                v = getattr(usage, name)
+                if v is not None:
+                    return v
+            if isinstance(usage, dict) and name in usage:
+                v = usage[name]
+                if v is not None:
+                    return v
+        return None
+
+    prompt_tokens = get_val(["prompt_token_count", "promptTokenCount"]) or 0
+    candidates_tokens = get_val(["candidates_token_count", "candidatesTokenCount"]) or 0
+    total_tokens = get_val(["total_token_count", "totalTokenCount"]) or 0
+    cached_tokens = get_val(["cached_content_token_count", "cachedContentTokenCount"]) or 0
+    thoughts_tokens = get_val(["thoughts_token_count", "thoughtsTokenCount"]) or 0
+    prompt_details = get_val(["prompt_tokens_details", "promptTokensDetails"])
+    cache_details = get_val(["cache_tokens_details", "cacheTokensDetails"])
+
+    lines.append(f"     • promptTokenCount:        {prompt_tokens:,}")
+    if prompt_details:
+        if isinstance(prompt_details, (list, tuple)):
+            for d in prompt_details:
+                mod = getattr(d, "modality", None) or (d.get("modality") if isinstance(d, dict) else "TEXT")
+                cnt = getattr(d, "token_count", None) or (d.get("tokenCount") or d.get("token_count") if isinstance(d, dict) else 0)
+                lines.append(f"       - promptTokensDetails:   {mod} -> {cnt:,}")
+        else:
+            lines.append(f"       - promptTokensDetails:   {prompt_details}")
+
+    lines.append(f"     • candidatesTokenCount:    {candidates_tokens:,}")
+    if thoughts_tokens:
+        lines.append(f"     • thoughtsTokenCount:      {thoughts_tokens:,}")
+    lines.append(f"     • cachedContentTokenCount: {cached_tokens:,}")
+    if cache_details:
+        if isinstance(cache_details, (list, tuple)):
+            for d in cache_details:
+                mod = getattr(d, "modality", None) or (d.get("modality") if isinstance(d, dict) else "TEXT")
+                cnt = getattr(d, "token_count", None) or (d.get("tokenCount") or d.get("token_count") if isinstance(d, dict) else 0)
+                lines.append(f"       - cacheTokensDetails:    {mod} -> {cnt:,}")
+        else:
+            lines.append(f"       - cacheTokensDetails:    {cache_details}")
+
+    lines.append(f"     • totalTokenCount:         {total_tokens:,}")
+    return lines
 
 
 __all__ = [
