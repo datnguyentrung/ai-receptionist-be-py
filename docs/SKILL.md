@@ -11,6 +11,7 @@ metadata:
   - list_ontology_scopes
   - load_ontology_scopes
   - submit_ingestion_batch
+  - repair_ingestion_batch
   - create_schema_proposal
   - get_schema_proposal
   - review_schema_proposal
@@ -33,13 +34,14 @@ Skill này điều phối ingestion tài liệu vào Knowledge Graph.
 **Agent/LLM chỉ chịu trách nhiệm semantic intelligence:** - hiểu nội
 dung chunk; - xác định fact; - chọn entity type, property hoặc
 relationship phù hợp; - trích xuất semantic value; - chỉ ra chunk
-nguồn; - phân loại coverage; - phát hiện tri thức không thể biểu diễn
+nguồn; - quyết định coverage cho từng chunk; - phát hiện tri thức không thể biểu diễn
 bằng ontology hiện tại.
 
 **Python/backend chịu trách nhiệm deterministic bookkeeping:** - chuẩn
 hóa evidence thành verbatim source; - dựng natural identity; -
 canonicalize entity; - sinh/quản lý local handle và stable entity key; -
-gắn ontology version; - deduplicate; - validate grounding; - bảo vệ
+gắn ontology version; - deduplicate; - validate grounding và kiểm tra coverage
+do LLM khai báo có evidence bảo chứng; - bảo vệ
 validated baseline; - quản lý retry, repair và staging.
 
 Không đẩy các nhiệm vụ bookkeeping tất định sang LLM.
@@ -78,7 +80,7 @@ Sau khi nhận chunks và ontology projection, Agent chỉ trả lời:
 2.  Fact thuộc entity nào?
 3.  Ontology đã load có property/relationship phù hợp không?
 4.  Nếu có, semantic value là gì và đến từ chunk nào?
-5.  Nếu không biểu diễn được, coverage phù hợp là gì?
+5.  Toàn bộ chunk đã được biểu diễn, mới được biểu diễn một phần, hay không biểu diễn được?
 
 ## 2.1 Node
 
@@ -129,15 +131,22 @@ Không sửa semantic value chỉ để evidence pass.
 
 # 3. Coverage Contract
 
-Mỗi chunk có đúng một coverage decision.
+LLM phải gửi đúng một coverage decision cho mỗi chunk. Python không tự hiểu
+ngữ nghĩa để chọn nhãn; Python chỉ xác thực evidence và invariant.
 
 ## `MAPPED`
 
-Chunk đóng góp ít nhất một **knowledge fact thực sự** dưới dạng: -
-property fact; hoặc - relationship edge.
+LLM dùng `MAPPED` chỉ khi mọi knowledge fact liên quan trong chunk đã được
+biểu diễn đầy đủ bằng property fact hoặc relationship edge có evidence.
 
 `node.evidence` hoặc việc chunk chỉ nhắc tên entity không đủ chứng minh
 `MAPPED`.
+
+## `PARTIALLY_MAPPED`
+
+Chunk có ít nhất một property/edge fact hợp lệ nhưng vẫn còn knowledge fact
+liên quan chưa thể biểu diễn. `reason` phải nêu rõ phần còn thiếu để đi vào
+schema-gap workflow.
 
 ## `DUPLICATE_EVIDENCE`
 
@@ -178,9 +187,9 @@ Không dùng thay `UNSUPPORTED_BY_ONTOLOGY`.
 
 ## 3.1 Quy tắc coverage
 
--   Không đánh `MAPPED` chỉ vì Agent hiểu chunk.
--   Không đánh `MAPPED` chỉ vì chunk nhắc entity đã biết.
--   `MAPPED` phải có property hoặc relationship fact từ chính chunk.
+-   Agent phát đúng một coverage decision cho mỗi chunk.
+-   Chỉ dùng `MAPPED` khi toàn bộ relevant facts đã được biểu diễn.
+-   Dùng `PARTIALLY_MAPPED` khi vừa có mapping vừa còn fact chưa được hỗ trợ.
 -   Nếu chunk vừa có fact map được vừa có fact quan trọng không thể biểu
     diễn, không âm thầm coi toàn chunk đã hoàn tất.
 -   Không tạo property/edge giả để vượt coverage validator.
@@ -244,7 +253,7 @@ semantic value
     ↓
 chunkIndex
     ↓
-coverage
+LLM coverage decision cho toàn bộ chunk
 ```
 
 Agent không tập trung vào:
@@ -256,7 +265,7 @@ stable_entity_key
 exact evidence substring
 canonical whitespace
 dedup keys
-repair baseline
+semantic coverage inference
 staging mechanics
 ```
 
@@ -270,7 +279,7 @@ Chỉ khi tool xác nhận `STAGED` mới chuyển batch.
 
 # 8. Repair batch
 
-Repair không có nghĩa là tái tạo chính xác JSON lần submit trước.
+Repair là additive delta, không phải tái tạo hoặc resubmit JSON cũ.
 
 Mục tiêu: **sửa semantic mapping bị lỗi nhưng bảo toàn knowledge đã được
 backend xác nhận hợp lệ.**
@@ -285,9 +294,10 @@ Không coi failed fragment gần nhất là baseline tuyệt đối.
     `errors`.
 4.  Gọi lại `get_ingestion_batch`.
 5.  Load lại đúng scope cần thiết.
-6.  Nếu backend trả `repairContext.repairTemplate`, copy nguyên template và
-    chỉ patch các vị trí trong `validationIssues`; không dựng lại từ trí nhớ.
-7.  Submit lại cùng batch.
+6.  Đọc `repairContext.protectedBaseline` như dữ liệu read-only và giữ nguyên
+    `baselineFingerprint`.
+7.  Chỉ tạo additions cần giải quyết `validationIssues`.
+8.  Gọi `repair_ingestion_batch`; không gọi lại `submit_ingestion_batch`.
 
 Agent không cần nhớ raw fragment cũ từ conversation history.
 
@@ -302,15 +312,16 @@ Không viết lại toàn graph chỉ vì formatting evidence.
 
 ## 8.3 Repair coverage
 
-Nếu lỗi `MAPPED_WITHOUT_MAPPING`:
+Nếu có lỗi coverage:
 
--   Có fact biểu diễn được → tạo property/relationship đúng ontology.
+-   Có fact biểu diễn được → thêm property/relationship đúng ontology và để LLM
+    gửi `MAPPED` hoặc `PARTIALLY_MAPPED` theo toàn bộ nội dung chunk.
 -   Fact đã tồn tại → `DUPLICATE_EVIDENCE` với `factRef` và grounded quote.
 -   Chỉ structural boilerplate được chứng minh deterministic → `NO_RELEVANT_FACT`.
 -   Ontology không biểu diễn được → `UNSUPPORTED_BY_ONTOLOGY`.
 -   Source mơ hồ → `AMBIGUOUS`.
 
-Không tạo description/node/edge giả chỉ để giữ `MAPPED`.
+Không tạo description/node/edge giả chỉ để làm quyết định `MAPPED` vượt validator.
 
 ## 8.4 Bảo toàn knowledge
 

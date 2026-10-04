@@ -127,7 +127,7 @@ def test_current_submission_exposes_predictable_local_fact_reference() -> None:
             }],
         }],
         "edges": [],
-        "coverage": [{"chunkIndex": 1, "decision": "MAPPED", "reason": "name"}],
+        "coverage": [],
     })
     canonical = GraphPatchFragment(
         ontology_version=ONTOLOGY_ID,
@@ -229,7 +229,7 @@ def test_finalize_and_fill_both_block_scalar_conflict() -> None:
     assert result["stage"] == "semantic_conflict"
 
 
-def test_get_batch_exposes_protected_repair_template_and_current_fact_refs() -> None:
+def test_get_batch_exposes_protected_baseline_and_current_fact_refs() -> None:
     baseline = GraphPatchFragment(
         ontology_version=ONTOLOGY_ID,
         nodes=[
@@ -292,10 +292,22 @@ def test_get_batch_exposes_protected_repair_template_and_current_fact_refs() -> 
             return workspace
 
     result = asyncio.run(get_batch(Repository(), str(workspace.job.id), 0))
+    assert result["batch"]["chunks"][0]["evidenceUnits"] == [
+        {
+            "evidenceRef": "chunk:1:line:1",
+            "chunkIndex": 1,
+            "kind": "LINE",
+            "text": "Văn Quán do Phùng Thế Lịch sáng lập",
+            "startLine": 1,
+            "endLine": 1,
+        }
+    ]
     context = result["batch"]["repairContext"]
-    assert context["mode"] == "PATCH_PROTECTED_BASELINE"
-    assert context["repairTemplate"]["edges"][0]["evidence"][0]["text"] == "Phùng Thế Lịch"
-    assert context["repairTemplate"]["nodes"][0]["tempId"] == "org-key"
+    assert context["mode"] == "ADDITIVE_DELTA"
+    assert context["protectedBaseline"]["edges"][0]["evidence"][0]["text"] == "Phùng Thế Lịch"
+    assert context["protectedBaseline"]["nodes"][0]["tempId"] == "org-key"
+    assert context["baselineFingerprint"]
+    assert context["deltaTemplate"]["baselineFingerprint"] == context["baselineFingerprint"]
     assert any(
         item["propertyName"] == "name" and item["value"] == "Văn Quán"
         for item in result["batch"]["canonicalFactContext"]

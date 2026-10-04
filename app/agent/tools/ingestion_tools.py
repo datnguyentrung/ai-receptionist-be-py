@@ -9,7 +9,10 @@ from typing import Any, Literal
 from google.adk.tools import ToolContext
 
 from app.core.ingestion_runtime import get_service_container
-from app.schemas import SemanticGraphPatchFragment
+from app.schemas import (
+    SemanticBatchExtraction,
+    SemanticGraphRepairDelta,
+)
 from app.services.ingestion import operations
 from app.utils.ingestion_logger import log_ingestion_event
 
@@ -84,7 +87,7 @@ async def get_ingestion_batch(
     batch_index: int,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Lấy nội dung chi tiết các đoạn văn bản (chunks) và ngữ cảnh đã có của một batch."""
+    """Lấy chunks, source-owned evidenceUnits và ngữ cảnh canonical của một batch."""
     del tool_context
     req = {"ingestion_id": ingestion_id, "batch_index": batch_index}
     try:
@@ -158,55 +161,54 @@ async def submit_ingestion_batch(
     ingestion_id: str,
     batch_index: int,
     scope_keys: list[str],
-    graph_fragment: SemanticGraphPatchFragment,
+    extraction: SemanticBatchExtraction,
     tool_context: ToolContext,
+    *,
+    graph_fragment: Any = None,
 ) -> dict[str, Any]:
-    """Compile, validate and stage one LLM-facing semantic graph fragment."""
-    fragment_dict = (
-        graph_fragment.model_dump(by_alias=True, mode="json")
-        if hasattr(graph_fragment, "model_dump")
-        else graph_fragment
+    """Gửi toàn bộ trích xuất Claim Ledger cho một batch trong duy nhất một lượt gọi LLM.
+
+    Args:
+        ingestion_id: ID phiên ingestion hiện tại.
+        batch_index: Số thứ tự batch cần xử lý (0-indexed).
+        scope_keys: Danh sách ontology scopes đã chọn cho batch.
+        extraction: Claim ledger hoàn chỉnh; mỗi claim mới phải chọn evidence.evidenceRef từ evidenceUnits của chunk thay vì tự sinh evidence text.
+        tool_context: Context ADK tự động inject.
+        graph_fragment: Tùy chọn legacy cho fragment cũ nếu có.
+    """
+    actual_payload = extraction if extraction is not None else graph_fragment
+    payload_dict = (
+        actual_payload.model_dump(by_alias=True, mode="json")
+        if hasattr(actual_payload, "model_dump")
+        else (actual_payload if isinstance(actual_payload, dict) else {})
     )
     req = {
         "ingestion_id": ingestion_id,
         "batch_index": batch_index,
         "scope_keys": scope_keys,
-        "fragment_summary": {
-            "nodes_count": len(fragment_dict.get("nodes", [])),
-            "edges_count": len(fragment_dict.get("edges", [])),
-            "coverage_count": len(fragment_dict.get("coverage", [])),
+        "extraction_summary": {
+            "entities_count": len(payload_dict.get("entities", [])),
+            "chunks_count": len(payload_dict.get("chunks", [])),
+            "claims_count": sum(len(c.get("claims", [])) for c in payload_dict.get("chunks", [])),
         },
     }
     try:
         container = await get_service_container()
-        # Lấy thông tin phiên bản fragment và lỗi trước đó nếu có (phục vụ tính REPAIR_DIFF)
-        workspace = await operations.required_workspace(container.repository, ingestion_id)
-        prev_batch = next(
-            (b for b in workspace.batches if b.batch_index == batch_index), None
-        )
-        prev_fragment = prev_batch.semantic_fragment if prev_batch else None
-        prev_issues = prev_batch.validation_issues if prev_batch else []
-        prev_attempts = prev_batch.validation_attempts if prev_batch else 0
-
         result = await operations.submit_batch(
             container.repository,
             container.ontology_cache,
             ingestion_id,
             batch_index,
             scope_keys,
-            graph_fragment,
+            actual_payload,
         )
 
         tool_context.state["active_ingestion_id"] = ingestion_id
         _store_checkpoint(tool_context, result)
 
-        # Đóng gói payload chi tiết cho logger: EXTRACT_RESULT + REPAIR_DIFF
         merged_payload = {
             **result,
-            "extractResult": fragment_dict,
-            "previousFragment": prev_fragment,
-            "previousIssues": prev_issues,
-            "validationAttempts": prev_attempts + 1 if prev_fragment or prev_issues else 0,
+            "extraction": payload_dict,
         }
         log_ingestion_event(
             f"SUBMIT_BATCH [idx={batch_index}, scopes={scope_keys}]",
@@ -219,6 +221,54 @@ async def submit_ingestion_batch(
         _store_checkpoint(tool_context, result)
         log_ingestion_event(
             f"SUBMIT_BATCH [idx={batch_index}]", payload=result, request=req
+        )
+        return result
+
+
+
+async def repair_ingestion_batch(
+    ingestion_id: str,
+    batch_index: int,
+    scope_keys: list[str],
+    repair_delta: SemanticGraphRepairDelta,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Add facts/dispositions to a protected baseline; never resend or replace it."""
+
+    delta_dict = repair_delta.model_dump(by_alias=True, mode="json")
+    req = {
+        "ingestion_id": ingestion_id,
+        "batch_index": batch_index,
+        "scope_keys": scope_keys,
+        "delta_summary": {
+            "nodes_count": len(delta_dict.get("nodes", [])),
+            "edges_count": len(delta_dict.get("edges", [])),
+            "coverage_count": len(delta_dict.get("coverage", [])),
+        },
+    }
+    try:
+        container = await get_service_container()
+        result = await operations.repair_batch(
+            container.repository,
+            container.ontology_cache,
+            ingestion_id,
+            batch_index,
+            scope_keys,
+            repair_delta,
+        )
+        tool_context.state["active_ingestion_id"] = ingestion_id
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event(
+            f"REPAIR_BATCH_DELTA [idx={batch_index}, scopes={scope_keys}]",
+            payload={**result, "repairDelta": delta_dict},
+            request=req,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 - ADK tool boundary returns structured errors
+        result = _tool_exception("batch_repair", ingestion_id, exc)
+        _store_checkpoint(tool_context, result)
+        log_ingestion_event(
+            f"REPAIR_BATCH_DELTA [idx={batch_index}]", payload=result, request=req
         )
         return result
 
@@ -461,13 +511,18 @@ async def review_schema_proposal(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Ghi nhận quyết định phê duyệt hoặc từ chối đề xuất lược đồ vào PostgreSQL; không bao giờ tự gọi nếu không có hướng dẫn từ người dùng."""
-    del tool_context
-    req = {"proposal_id": proposal_id, "approved": approved, "reviewed_by": reviewed_by}
+    effective_proposal_id = (
+        str(proposal_id).strip()
+        if proposal_id and str(proposal_id).strip()
+        else tool_context.state.get("pending_schema_proposal_id", "")
+    )
+    req = {"proposal_id": effective_proposal_id, "approved": approved, "reviewed_by": reviewed_by}
     try:
         container = await get_service_container()
         proposal = await container.ontology_lifecycle.review_proposal(
-            proposal_id, approved=approved, reviewed_by=reviewed_by
+            effective_proposal_id, approved=approved, reviewed_by=reviewed_by
         )
+        tool_context.state["pending_schema_proposal_id"] = str(proposal.id)
         if (
             not approved
             and proposal.source_ingestion_id
@@ -509,21 +564,25 @@ async def apply_schema_proposal(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Áp dụng đề xuất đã APPROVED bằng cách biên dịch và kích hoạt phiên bản ontology mới trong PostgreSQL."""
-    del tool_context
+    effective_proposal_id = (
+        str(proposal_id).strip()
+        if proposal_id and str(proposal_id).strip()
+        else tool_context.state.get("pending_schema_proposal_id", "")
+    )
     req = {
-        "proposal_id": proposal_id,
+        "proposal_id": effective_proposal_id,
         "new_version_code": new_version_code,
         "applied_by": applied_by,
     }
     try:
         container = await get_service_container()
         version = await container.ontology_lifecycle.apply_proposal(
-            proposal_id, new_version_code=new_version_code, applied_by=applied_by
+            effective_proposal_id, new_version_code=new_version_code, applied_by=applied_by
         )
         result = {
             "success": True,
             "stage": "schema_proposal_applied",
-            "proposalId": proposal_id,
+            "proposalId": effective_proposal_id,
             "ontologyVersionId": str(version.id),
             "ontologyVersion": version.version,
             "nextAction": "rebase_ingestion",
@@ -576,8 +635,26 @@ async def rebase_ingestion(
         workspace = await container.repository.rebase_ontology_version(
             ingestion_id, target_ontology_version_id, hashes, merged_hashes
         )
+        for batch in workspace.batches:
+            if batch.claim_ledger and batch.status != "STAGED":
+                try:
+                    await operations.recompile_batch_from_ledger(
+                        container.repository,
+                        container.ontology_cache,
+                        ingestion_id,
+                        batch.batch_index,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log_ingestion_event(
+                        f"REBASE_AUTO_RECOMPILE_FAILED [idx={batch.batch_index}]",
+                        payload={"error": str(exc)},
+                        request=req,
+                    )
+        refreshed_workspace = await operations.required_workspace(
+            container.repository, ingestion_id
+        )
         tool_context.state["active_ingestion_id"] = ingestion_id
-        res = operations.status_payload(workspace)
+        res = operations.status_payload(refreshed_workspace)
         _store_checkpoint(tool_context, res)
         log_ingestion_event("REBASE_INGESTION", payload=res, request=req)
         return res
@@ -654,6 +731,7 @@ INGESTION_TOOLS = (
     delete_document,
     rollback_document_version,
 )
+
 
 
 def get_ingestion_tools() -> list:

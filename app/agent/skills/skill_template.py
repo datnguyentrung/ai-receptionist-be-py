@@ -1,8 +1,9 @@
 """Helpers for loading ADK SKILL.md files as rendered templates."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from string import Template
-from typing import Any, Mapping
+from typing import Any
 
 from google.adk import skills
 from google.adk.skills import models

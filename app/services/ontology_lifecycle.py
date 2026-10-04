@@ -106,15 +106,67 @@ class OntologyLifecycle:
             await session.flush()
             return proposal
 
+    async def _lookup_proposal(
+        self,
+        session: AsyncSession,
+        proposal_id: str,
+        *,
+        for_update: bool = False,
+        preferred_status: SchemaProposalStatus | None = None,
+    ) -> OntologySchemaProposal | None:
+        raw_id = str(proposal_id).strip()
+        parsed_uuid: uuid.UUID | None = None
+        try:
+            parsed_uuid = uuid.UUID(raw_id)
+        except (ValueError, TypeError):
+            pass
+
+        # 1. Direct ID match
+        if parsed_uuid is not None:
+            query = select(OntologySchemaProposal).where(OntologySchemaProposal.id == parsed_uuid)
+            if for_update:
+                query = query.with_for_update()
+            prop = await session.scalar(query)
+            if prop is not None:
+                return prop
+
+        # 2. Source Ingestion ID match (fallback if ingestion_id was passed instead of proposal_id)
+        query = select(OntologySchemaProposal).where(OntologySchemaProposal.source_ingestion_id == raw_id)
+        if preferred_status is not None:
+            query = query.where(OntologySchemaProposal.status == preferred_status)
+        query = query.order_by(OntologySchemaProposal.created_at.desc())
+        if for_update:
+            query = query.with_for_update()
+        prop = await session.scalar(query)
+        if prop is not None:
+            return prop
+
+        # 3. Ontology Version ID match (fallback if ontology_version_id was passed)
+        if parsed_uuid is not None:
+            query = select(OntologySchemaProposal).where(OntologySchemaProposal.ontology_version_id == parsed_uuid)
+            if preferred_status is not None:
+                query = query.where(OntologySchemaProposal.status == preferred_status)
+            query = query.order_by(OntologySchemaProposal.created_at.desc())
+            if for_update:
+                query = query.with_for_update()
+            prop = await session.scalar(query)
+            if prop is not None:
+                return prop
+
+        return None
+
     async def review_proposal(
         self, proposal_id: str, *, approved: bool, reviewed_by: str
     ) -> OntologySchemaProposal:
         if not reviewed_by.strip():
             raise ValueError("reviewed_by is required")
         async with self._session_factory() as session, session.begin():
-            proposal = await session.scalar(select(OntologySchemaProposal).where(
-                OntologySchemaProposal.id == uuid.UUID(proposal_id)
-            ).with_for_update())
+            proposal = await self._lookup_proposal(
+                session,
+                proposal_id,
+                for_update=True,
+                preferred_status=SchemaProposalStatus.PROPOSED,
+            )
             if proposal is None:
                 raise KeyError(proposal_id)
             if proposal.status != SchemaProposalStatus.PROPOSED:
@@ -128,9 +180,12 @@ class OntologyLifecycle:
         self, proposal_id: str, *, new_version_code: str, applied_by: str
     ) -> OntologyVersion:
         async with self._session_factory() as session, session.begin():
-            proposal = await session.scalar(select(OntologySchemaProposal).where(
-                OntologySchemaProposal.id == uuid.UUID(proposal_id)
-            ).with_for_update())
+            proposal = await self._lookup_proposal(
+                session,
+                proposal_id,
+                for_update=True,
+                preferred_status=SchemaProposalStatus.APPROVED,
+            )
             if proposal is None:
                 raise KeyError(proposal_id)
             if proposal.status == SchemaProposalStatus.APPLIED and proposal.applied_ontology_version_id:
@@ -168,7 +223,7 @@ class OntologyLifecycle:
 
     async def get_proposal(self, proposal_id: str) -> OntologySchemaProposal | None:
         async with self._session_factory() as session:
-            return await session.get(OntologySchemaProposal, uuid.UUID(proposal_id))
+            return await self._lookup_proposal(session, proposal_id)
 
     async def _clone_version(
         self, session: AsyncSession, source_id: uuid.UUID, version_code: str, created_by: str

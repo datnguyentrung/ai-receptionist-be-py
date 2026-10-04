@@ -1,137 +1,204 @@
-# Semantic Graph Patch Contract
+# Claim Ledger Batch Extraction Contract
 
-Hợp đồng phân mảnh đồ thị ngữ nghĩa (`SemanticGraphPatchFragment`) dành cho mô hình trích xuất.
+Hợp đồng phân mảnh trích xuất Claim Ledger (`SemanticBatchExtraction`) dành cho mô hình trích xuất.
 
 ## Cấu trúc Cấp cao nhất (Top-Level Schema)
 
 ```json
 {
-  "nodes": [ ... ],
-  "edges": [ ... ],
-  "coverage": [ ... ],
-  "warnings": [ ... ]
-}
-```
-
-> **Lưu ý quan trọng:** Không truyền trường `ontologyVersion` hay `identity` trong Semantic Graph Patch. Backend sẽ tự động gán phiên bản bản thể và suy diễn identity từ chiến lược định danh (identityStrategy).
-
----
-
-## 1. Nút Thực thể (SemanticGraphNode)
-
-```json
-{
-  "tempId": "org_vanquan",
-  "className": "organization",
-  "properties": [
+  "entities": [
     {
-      "propertyName": "name",
-      "value": "Hệ Thống Taekwondo Văn Quán",
-      "evidence": [
-        {
-          "source": "he-thong-taekwondo-van-quan-gioi-thieu.md",
-          "chunkIndex": 2,
-          "text": "Tên chính thức: Hệ Thống Taekwondo Văn Quán"
-        }
-      ]
+      "tempId": "org_1",
+      "className": "organization"
     }
   ],
-  "evidence": [
+  "chunks": [
     {
-      "source": "he-thong-taekwondo-van-quan-gioi-thieu.md",
       "chunkIndex": 0,
-      "text": "HỆ THỐNG TAEKWONDO VĂN QUÁN"
+      "claims": [ ... ],
+      "noRelevantFactReason": null
     }
   ],
-  "confidence": 1.0
+  "warnings": []
 }
 ```
 
-- `tempId`: Mã định danh tạm thời trong mẻ (ví dụ `org_1`, `pers_lich`).
-- `className`: Tên loại thực thể trong ontology (ví dụ: `organization`, `person`, `location`, `schedule`).
-- `properties`: Danh sách các thuộc tính mang bằng chứng nguyên văn.
-- `evidence`: Bằng chứng đề cập thực thể (Entity Mention). Lưu ý: Chỉ `node.evidence` là không đủ để chứng minh fact cho một chunk.
+Mỗi batch bắt buộc có đúng một entry trong `chunks[]` cho mỗi chunk đầu vào.
+
+### Evidence contract: source-owned `evidenceUnits`
+
+`get_ingestion_batch` trả về mỗi chunk cùng danh sách `evidenceUnits[]`. Mỗi unit có `evidenceRef`, `chunkIndex`, `kind`, `text` nguyên văn và line range.
+
+Trong payload mới, LLM chỉ chọn ref có sẵn:
+
+```json
+"evidence": {
+  "chunkIndex": 0,
+  "evidenceRef": "chunk:0:line:1"
+}
+```
+
+Không tự sinh `evidence.text`, không bỏ Markdown, không nối/rút gọn câu và không paraphrase evidence. Backend là bên duy nhất resolve `evidenceRef` thành nguyên văn source. Trường `text` chỉ còn để tương thích payload legacy.
 
 ---
 
-## 2. Quan hệ (SemanticGraphEdge)
+## 1. Khai báo Thực thể (SemanticEntity)
 
 ```json
 {
-  "edgeName": "located_at",
-  "sourceTempId": "org_vanquan",
-  "targetTempId": "loc_cs1",
-  "properties": [],
-  "evidence": [
-    {
-      "source": "he-thong-taekwondo-van-quan-gioi-thieu.md",
-      "chunkIndex": 8,
-      "text": "Theo thông tin được Hệ Thống Taekwondo Văn Quán công bố..."
-    }
-  ],
-  "confidence": 1.0
+  "tempId": "org_1",
+  "className": "organization",
+  "entityRef": null
 }
 ```
 
-- `edgeName`: Tên quan hệ trong ontology.
-- `sourceTempId`, `targetTempId`: Dùng `tempId` của node mới trong batch hoặc `entity:<stableKey>` từ `canonicalGraphContext`.
+- **Thực thể mới trong batch:** Khai báo `tempId` và `className`.
+- **Thực thể đã staged từ batch trước:** Khai báo `entityRef` (ví dụ `entity:<stableKey>` từ `canonicalGraphContext`) và `className`.
+- Không cần sinh identity hay canonical key — Backend compiler tự tổng hợp identity từ các mapped property claims tương ứng với `identityStrategy.required`.
 
 ---
 
-## 3. Độ phủ Đoạn nguồn (ChunkCoverage)
+## 2. Claim Nguyên Tử (SemanticClaim)
 
-Mỗi chunk trong batch bắt buộc có đúng 1 mục coverage theo thứ tự ưu tiên kiểm tra:
-
-| Thứ tự / Quyết định | Ý nghĩa & Ràng buộc hợp lệ |
-| :--- | :--- |
-| **1. UNSUPPORTED_BY_ONTOLOGY** | **Ưu tiên cho tri thức chưa hỗ trợ:** Chunk chứa tri thức nhưng ontology hiện hành chưa hỗ trợ (lịch sử, thành lập, quy mô...). Bắt buộc ghi
-eason chi tiết (kích hoạt đề xuất ontology). |
-| **2. DUPLICATE_EVIDENCE** | Chunk lặp lại fact đã có ➔ duplicateClaims trỏ tới actRef trong canonicalFactContext, kèm evidence quote grounded và khớp fact. |
-| **3. AMBIGUOUS** | Nội dung mập mờ, không đủ cơ sở để trích xuất ➔ Yêu cầu xem xét / làm rõ. |
-| **4. NO_RELEVANT_FACT / NOT_RELEVANT** | Chunk cấu trúc chắc chắn không chứa fact (tiêu đề đơn thuần, ký tự phân cách) hoặc ngoài phạm vi. Prose yêu cầu human review. |
-| **5. MAPPED** | Chunk thực sự đóng góp ít nhất 1 fact (thuộc tính hoặc quan hệ) ➔ Bắt buộc có chunkIndex trong ít nhất 1 property.evidence hoặc edge.evidence. |
-| **6. FAILED** | Lỗi trong quá trình phân tích chunk ➔ Yêu cầu xử lý lại. |
-
-DUPLICATE_EVIDENCE có dạng:
+Mỗi sự kiện / thông tin có nghĩa trong chunk là một claim độc lập:
 
 ```json
 {
-  "chunkIndex": 7,
-  "decision": "DUPLICATE_EVIDENCE",
-  "reason": "Lặp lại số điện thoại đã biết",
-  "duplicateClaims": [
-    {
-      "factRef": "property:<stable-key>:phone:<value-digest>",
-      "evidence": {"chunkIndex": 7, "text": "0369 222 068"}
-    }
-  ]
+  "claimId": "c_1",
+  "statement": "Câu lạc bộ thành lập ngày 15/05/2012",
+  "evidence": {
+    "chunkIndex": 0,
+    "evidenceRef": "chunk:0:line:1"
+  },
+  "outcome": "MAPPED",
+  "mapping": {
+    "kind": "PROPERTY",
+    "entityRef": "org_1",
+    "propertyName": "founded_date",
+    "value": "2012-05-15"
+  },
+  "factRef": null,
+  "schemaGap": null,
+  "reason": null
 }
 ```
 
-Fact đã staged/baseline phải dùng `factRef` do `canonicalFactContext` cung cấp.
-Nếu fact được khai báo ngay trong payload hiện tại, dùng một trong hai ref deterministic:
-
-- `local-property:<tempId>:<propertyName>` — property name phải duy nhất trên node;
-- `local-edge:<edgeIndex>` — index của edge trong payload hiện tại.
-
-Không tự đoán hoặc tự tạo canonical digest.
+- `claimId`: Chuỗi định danh duy nhất trong batch (ví dụ `c_1`, `c_2`).
+- `statement`: Câu phát biểu ngắn gọn về fact được trích xuất.
+- `evidence`: Bắt buộc trỏ bằng `evidenceRef` tới một source-owned `evidenceUnit` thuộc chính chunk chứa claim. Backend tự lấy nguyên văn; LLM không tự tạo quote.
+- `outcome`: Đúng một trong 4 giá trị: `MAPPED`, `DUPLICATE`, `SCHEMA_GAP`, `AMBIGUOUS`.
 
 ---
 
-## 4. Nguyên tắc Sửa lỗi Mẻ (Batch Repair Policy)
+## 3. Các Loại Mapping và Outcomes
 
-1. **Bảo tồn tri thức hợp lệ:** Backend so khớp thực thể dựa trên **Natural Identity** (`className` + thuộc tính định danh). Ở lần trích xuất đầu có thể chọn `tempId`; khi repair phải giữ nguyên `tempId` trong `repairTemplate` để payload ổn định và dễ kiểm chứng.
-2. **Không làm mất thuộc tính hợp lệ:** Nếu mẻ trước đã có các thuộc tính hợp lệ (ví dụ `phone`, `address`), lần submit sửa lỗi phải giữ lại các thuộc tính đó trừ khi chính thuộc tính đó bị báo lỗi.
-3. **Sửa lỗi Coverage:**
-   - Nếu muốn giữ `MAPPED`: bổ sung thuộc tính/quan hệ trích từ chunk đó.
-   - Nếu fact đã có: dùng `DUPLICATE_EVIDENCE` với `duplicateClaims` có thể kiểm chứng.
-   - Nếu ontology thiếu khả năng biểu diễn: dùng `UNSUPPORTED_BY_ONTOLOGY`; không đổi sang negative label để bypass.
+### 3.1 `MAPPED` — Thuộc tính (Property Claim)
 
-Khi batch ở trạng thái repair, `get_ingestion_batch` trả `repairContext`:
+```json
+{
+  "claimId": "c_prop",
+  "statement": "Tên câu lạc bộ là Taekwondo Văn Quán",
+  "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+  "outcome": "MAPPED",
+  "mapping": {
+    "kind": "PROPERTY",
+    "entityRef": "org_1",
+    "propertyName": "name",
+    "value": "Taekwondo Văn Quán"
+  }
+}
+```
 
-- `protectedBaseline`: canonical snapshot backend đang bảo vệ;
-- `repairTemplate`: semantic payload an toàn để làm điểm bắt đầu;
-- `validationIssues`: duy nhất các vị trí được phép sửa.
+**Deterministic value support:** Với `PROPERTY`, `mapping.value` phải được khôi phục từ evidence đã chọn. Backend cho phép các chuẩn hóa hình thức xác định (ví dụ ngày `15/05/2012` → `2012-05-15`, Markdown/whitespace), nhưng không chấp nhận một value không xuất hiện/có thể khôi phục từ evidence.
 
-Phải sao chép nguyên `repairTemplate`, kể cả `tempId` và evidence của edge. Chỉ
-thêm/sửa phần được `validationIssues` chỉ ra.
+### 3.2 `MAPPED` — Quan hệ (Edge Claim)
+
+```json
+{
+  "claimId": "c_edge",
+  "statement": "Phùng Thế Lịch là người sáng lập câu lạc bộ",
+  "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+  "outcome": "MAPPED",
+  "mapping": {
+    "kind": "EDGE",
+    "edgeName": "founded_by",
+    "sourceRef": "org_1",
+    "targetRef": "coach_1",
+    "properties": {}
+  }
+}
+```
+
+### 3.3 `DUPLICATE` — Fact lặp lại
+
+```json
+{
+  "claimId": "c_dup",
+  "statement": "Trụ sở tại Hà Đông",
+  "evidence": {"chunkIndex": 1, "evidenceRef": "chunk:1:line:1"},
+  "outcome": "DUPLICATE",
+  "factRef": "property:org_vanquan:address:10-tran-phu"
+}
+```
+
+### 3.4 `SCHEMA_GAP` — Đề xuất mở rộng Schema có cấu trúc
+
+**Property Schema Gap:**
+```json
+{
+  "claimId": "c_gap_prop",
+  "statement": "CLB có 6 cơ sở hoạt động",
+  "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+  "outcome": "SCHEMA_GAP",
+  "schemaGap": {
+    "kind": "PROPERTY",
+    "entityRef": "org_1",
+    "technicalName": "facility_count",
+    "displayName": "Số lượng cơ sở",
+    "dataType": "INTEGER",
+    "value": 6,
+    "reason": "Ontology chưa có thuộc tính lưu số cơ sở"
+  }
+}
+```
+
+**Relationship Schema Gap:**
+```json
+{
+  "claimId": "c_gap_edge",
+  "statement": "CLB hợp tác với trường liên cấp Marie Curie",
+  "evidence": {"chunkIndex": 2, "evidenceRef": "chunk:2:line:1"},
+  "outcome": "SCHEMA_GAP",
+  "schemaGap": {
+    "kind": "RELATIONSHIP",
+    "technicalName": "partners_with",
+    "displayName": "Hợp tác đào tạo với",
+    "sourceRef": "org_1",
+    "targetRef": "org_marie_curie",
+    "cardinality": "MANY_TO_MANY",
+    "reason": "Ontology chưa có quan hệ liên kết đào tạo giữa 2 tổ chức"
+  }
+}
+```
+
+### 3.5 `AMBIGUOUS` — Thông tin mơ hồ
+
+```json
+{
+  "claimId": "c_amb",
+  "statement": "Học phí lớp nâng cao có thể thay đổi tùy khóa",
+  "evidence": {"chunkIndex": 3, "evidenceRef": "chunk:3:line:1"},
+  "outcome": "AMBIGUOUS",
+  "reason": "Không đủ thông tin xác định con số học phí cụ thể"
+}
+```
+
+### 3.6 Chunk không có Fact liên quan
+
+```json
+{
+  "chunkIndex": 4,
+  "claims": [],
+  "noRelevantFactReason": "Đoạn văn bản chỉ chứa tiêu đề phân đoạn và lời chào mở đầu"
+}
+```

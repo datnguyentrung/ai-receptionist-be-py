@@ -2,8 +2,8 @@
 
 from app.services.ingestion.document.preparation import DocumentPreparation
 from app.services.ingestion.document.reader import (
-    DocumentReadError,
     DocumentReader,
+    DocumentReadError,
 )
 from app.services.ingestion.document.strategies import (
     DOCUMENT_ID_VERSION,

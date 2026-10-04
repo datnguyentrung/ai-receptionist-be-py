@@ -4,13 +4,18 @@ from pathlib import Path
 from typing import get_type_hints
 
 from app.agent.agent import root_agent
-from app.agent.tools.ingestion_tools import submit_ingestion_batch
+from app.agent.tools.ingestion_tools import (
+    repair_ingestion_batch,
+    submit_ingestion_batch,
+)
 from app.core.config import Settings
 from app.core.schemas.ingestion import DocumentChunk
 from app.schemas.ingestion_schema import (
     GraphPatchFragment,
     OntologyProjection,
+    SemanticBatchExtraction,
     SemanticGraphPatchFragment,
+    SemanticGraphRepairDelta,
 )
 from app.services.ingestion.graph_patch_compiler import GraphPatchCompiler
 from app.services.ingestion.graph_store import _merge_fragments
@@ -83,18 +88,18 @@ def _semantic(properties: list[tuple[str, str]]) -> SemanticGraphPatchFragment:
                 }
             ],
             "edges": [],
-            "coverage": [
-                {"chunkIndex": 0, "decision": "MAPPED", "reason": "person"}
-            ],
+            "coverage": [],
         }
     )
 
 
 def test_llm_schema_has_no_identity() -> None:
-    schema = SemanticGraphPatchFragment.model_json_schema()
+    schema = SemanticBatchExtraction.model_json_schema()
     assert "identity" not in json.dumps(schema)
-    tool_fragment_type = get_type_hints(submit_ingestion_batch)["graph_fragment"]
-    assert tool_fragment_type is SemanticGraphPatchFragment
+    tool_extraction_type = get_type_hints(submit_ingestion_batch)["extraction"]
+    assert tool_extraction_type is SemanticBatchExtraction
+    repair_delta_type = get_type_hints(repair_ingestion_batch)["repair_delta"]
+    assert repair_delta_type is SemanticGraphRepairDelta
 
 
 def test_identity_is_compiled_from_ontology() -> None:
@@ -257,9 +262,7 @@ def test_semantic_edge_can_reference_staged_entity_ref() -> None:
                     ],
                 }
             ],
-            "coverage": [
-                {"chunkIndex": 1, "decision": "MAPPED", "reason": "relationship"}
-            ],
+            "coverage": [],
         }
     )
 
@@ -316,9 +319,7 @@ def test_unknown_staged_entity_ref_returns_validation_issue() -> None:
                     ],
                 }
             ],
-            "coverage": [
-                {"chunkIndex": 0, "decision": "MAPPED", "reason": "person"}
-            ],
+            "coverage": [],
         }
     )
 
@@ -337,7 +338,7 @@ def test_root_has_no_public_ingestion_extractor() -> None:
     ).exists()
 
 
-def test_retry_limit_becomes_terminal_on_third_failed_submit() -> None:
+def test_full_resubmit_is_rejected_after_batch_requires_delta_repair() -> None:
     async def scenario() -> list[dict]:
         repository = IngestionRepository()
         ontology = _projection(identity_field="member_code")
@@ -394,15 +395,10 @@ def test_retry_limit_becomes_terminal_on_third_failed_submit() -> None:
         ]
 
     results = asyncio.run(scenario())
-    assert [item["stage"] for item in results] == [
-        "repair_required",
-        "repair_required",
-        "explicit_extraction_failure",
-        "explicit_extraction_failure",
-    ]
-    assert results[0]["terminal"] is False
-    assert results[0]["nextAction"] == "repair_batch"
-    assert results[0]["affectedChunkIndexes"] == [0]
+    assert results[0]["stage"] == "extraction_rejected"
+    assert results[0]["terminal"] is True
+    assert results[0]["nextAction"] == "report_extraction_failure"
+    assert results[0]["batchIndex"] == 0
     for forbidden in (
         "graphFragment",
         "semanticFragment",
@@ -413,15 +409,9 @@ def test_retry_limit_becomes_terminal_on_third_failed_submit() -> None:
     ):
         assert forbidden not in results[0]
 
-    assert results[2]["terminal"] is True
-    assert results[2]["nextAction"] == "explicit_extraction_failure"
-    assert results[2]["errors"][0]["code"] == (
-        "BATCH_VALIDATION_RETRY_LIMIT_EXCEEDED"
-    )
-    assert results[3]["terminal"] is True
-    assert results[3]["nextAction"] == "explicit_extraction_failure"
-    assert results[3]["blockedAction"] == "submit_batch"
-    assert results[3]["errors"][0]["code"] == "INGESTION_FAILED"
+    for res in results[1:]:
+        assert res["success"] is False
+        assert res["terminal"] is True
 
 
 def test_runtime_batch_size_partitions_23_chunks_into_10_10_3() -> None:
@@ -522,7 +512,7 @@ def test_successful_submit_returns_compact_next_batch_summary() -> None:
     result = asyncio.run(scenario())
 
     assert result["success"] is True
-    assert result["stage"] == "batching"
+    assert result["stage"] == "batch_staged"
     assert result["nextBatch"] == {
         "batchIndex": 1,
         "chunkIndexes": [1],

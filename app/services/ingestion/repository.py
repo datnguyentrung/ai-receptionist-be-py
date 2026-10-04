@@ -80,11 +80,14 @@ class IngestionBatchData:
     semantic_fragment: dict | None
     graph_fragment: dict | None
     validation_issues: list[dict]
-    validation_attempts: int
-    merged_schema_hash: str | None
+    validation_attempts: int = 0
+    merged_schema_hash: str | None = None
     scope_keys: list[str] = field(default_factory=list)
     snapshot_hashes: dict[str, str] = field(default_factory=dict)
     validated_baseline: dict | None = None
+    claim_ledger: dict | None = None
+    schema_gaps: list[dict] = field(default_factory=list)
+
 
 
 @dataclass(frozen=True)
@@ -261,13 +264,16 @@ class IngestionRepository:
         max_attempts: int,
         validated_baseline: GraphPatchFragment | dict | None = None,
         count_attempt: bool = True,
+        claim_ledger: dict | None = None,
+        schema_gaps: list[dict] | None = None,
+        status: str | None = None,
     ) -> Workspace:
         workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
-        if workspace.job.status != IngestionJobStatus.BATCHING:
+        if workspace.job.status not in {IngestionJobStatus.BATCHING, "BLOCKED_SCHEMA"}:
             raise RuntimeError(
                 f"Cannot submit a batch while ingestion is {workspace.job.status}"
             )
-        if batch.status in {"BLOCKED_SCHEMA", "SCHEMA_REJECTED"}:
+        if batch.status in {"BLOCKED_SCHEMA", "SCHEMA_REJECTED"} and status != "STAGED":
             raise RuntimeError(
                 f"Batch {batch_index} is gated by schema review ({batch.status})"
             )
@@ -289,6 +295,8 @@ class IngestionRepository:
         else:
             baseline_dict = batch.validated_baseline
 
+        batch_status = status or ("FAILED" if terminal else "REPAIR_REQUIRED" if issues else "STAGED")
+
         updated = replace(
             batch,
             validation_attempts=attempts,
@@ -301,14 +309,16 @@ class IngestionRepository:
             if hasattr(fragment, "model_dump")
             else fragment,
             validated_baseline=baseline_dict,
-            status="FAILED" if terminal else "REPAIR_REQUIRED" if issues else "STAGED",
+            status=batch_status,
             scope_keys=[item["scopeKey"] for item in scope_bindings],
             snapshot_hashes={
                 item["scopeKey"]: item["schemaHash"] for item in scope_bindings
             },
+            claim_ledger=claim_ledger if claim_ledger is not None else batch.claim_ledger,
+            schema_gaps=schema_gaps if schema_gaps is not None else batch.schema_gaps,
         )
         workspace.job.status = (
-            IngestionJobStatus.FAILED if terminal else IngestionJobStatus.BATCHING
+            IngestionJobStatus.FAILED if (terminal or batch_status == "EXTRACTION_REJECTED") else IngestionJobStatus.BATCHING
         )
         workspace.job.stage = "explicit_extraction_failure" if terminal else "batching"
         if terminal:
@@ -351,7 +361,13 @@ class IngestionRepository:
         return self._replace_batch(workspace, updated)
 
     async def block_batch_for_proposal(
-        self, ingestion_id: str, batch_index: int, issues: list[dict]
+        self,
+        ingestion_id: str,
+        batch_index: int,
+        issues: list[dict],
+        *,
+        claim_ledger: dict | None = None,
+        schema_gaps: list[dict] | None = None,
     ) -> Workspace:
         workspace, batch = self._workspace_and_batch(ingestion_id, batch_index)
         updated = replace(
@@ -359,11 +375,14 @@ class IngestionRepository:
             status="BLOCKED_SCHEMA",
             validation_issues=issues,
             graph_fragment=None,
+            claim_ledger=claim_ledger if claim_ledger is not None else batch.claim_ledger,
+            schema_gaps=schema_gaps if schema_gaps is not None else batch.schema_gaps,
         )
         workspace.job.status = "BLOCKED_SCHEMA"
-        workspace.job.stage = "awaiting_schema_approval"
+        workspace.job.stage = "schema_review_required"
         workspace.job.readiness_fingerprint = None
         return self._replace_batch(workspace, updated)
+
 
     async def reject_batch_schema_proposal(
         self, ingestion_id: str, batch_index: int, issues: list[dict]
@@ -490,6 +509,12 @@ class IngestionRepository:
                         }
                         if batch.semantic_fragment
                         else None,
+                        validated_baseline={
+                            **batch.validated_baseline,
+                            "ontologyVersion": target_version_id,
+                        }
+                        if batch.validated_baseline
+                        else None,
                         validation_issues=[],
                         merged_schema_hash=merged_schema_hashes.get(
                             "\x1f".join(batch.scope_keys),
@@ -505,9 +530,10 @@ class IngestionRepository:
                         validation_attempts=0,
                         graph_fragment=None,
                         semantic_fragment=None,
+                        validated_baseline=None,
                         validation_issues=[],
                         merged_schema_hash=None,
-                        scope_keys=[],
+                        scope_keys=list(batch.scope_keys),
                         snapshot_hashes={},
                     )
                 )

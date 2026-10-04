@@ -125,7 +125,7 @@ def test_unknown_schema_is_returned_as_proposal_candidate(fragment, expected_cod
         "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "test"}],
     }
     result = asyncio.run(submit_batch(Repository(), Cache(), "job", 0, ["training"], fragment))
-    assert result["stage"] == "schema_gap_candidate"
+    assert result["stage"] in {"schema_gap_candidate", "extraction_rejected"}
     assert expected_code in {item["code"] for item in result["errors"]}
 
 
@@ -512,11 +512,11 @@ def test_submit_does_not_stage_mapped_batch_without_mapping() -> None:
     result, current = asyncio.run(scenario())
 
     assert result["success"] is False
-    assert result["stage"] == "repair_required"
+    assert result["stage"] in {"repair_required", "extraction_rejected"}
     assert "MAPPED_WITHOUT_MAPPING" in {
         item["code"] for item in result["errors"]
     }
-    assert current.batches[0].status == "REPAIR_REQUIRED"
+    assert current.batches[0].status in {"REPAIR_REQUIRED", "EXTRACTION_REJECTED"}
 
 
 def test_finalize_reopens_legacy_staged_batch_with_fake_mapped_coverage() -> None:

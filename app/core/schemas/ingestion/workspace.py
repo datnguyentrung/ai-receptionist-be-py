@@ -1,7 +1,5 @@
 """Workspace and batch schemas for ingestion session management."""
 
-import hashlib
-from typing import Any
 
 from pydantic import Field
 

@@ -1,8 +1,6 @@
 """Schemas for document chunks, loaded sources, and ingestion provenance."""
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 

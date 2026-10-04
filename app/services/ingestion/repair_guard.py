@@ -225,27 +225,50 @@ class RepairGuard:
                 nodes[key] = copied
                 continue
             known = {
-                (fact.property_name, canonical_json(fact.value))
+                (fact.property_name, canonical_json(fact.value)): fact
                 for fact in current.properties
             }
-            current.properties.extend(
-                fact.model_copy(deep=True)
-                for fact in node.properties
-                if (fact.property_name, canonical_json(fact.value)) not in known
-            )
-        edge_keys = {cls._edge_key(edge) for edge in merged.edges}
-        merged.edges.extend(
-            edge.model_copy(deep=True)
-            for edge in incoming.edges
-            if cls._edge_key(edge) not in edge_keys
-        )
+            for fact in node.properties:
+                fact_key = (fact.property_name, canonical_json(fact.value))
+                existing = known.get(fact_key)
+                if existing is None:
+                    copied = fact.model_copy(deep=True)
+                    current.properties.append(copied)
+                    known[fact_key] = copied
+                else:
+                    cls._merge_evidence(existing.evidence, fact.evidence)
+            cls._merge_evidence(current.evidence, node.evidence)
+        edges = {cls._edge_key(edge): edge for edge in merged.edges}
+        for edge in incoming.edges:
+            edge_key = cls._edge_key(edge)
+            existing = edges.get(edge_key)
+            if existing is None:
+                copied = edge.model_copy(deep=True)
+                merged.edges.append(copied)
+                edges[edge_key] = copied
+            else:
+                for name, value in edge.properties.items():
+                    existing.properties.setdefault(name, value)
+                cls._merge_evidence(existing.evidence, edge.evidence)
         coverage_chunks = {item.chunk_index for item in merged.coverage}
         merged.coverage.extend(
             item.model_copy(deep=True)
             for item in incoming.coverage
             if item.chunk_index not in coverage_chunks
         )
+        merged.warnings = list(dict.fromkeys([*merged.warnings, *incoming.warnings]))
         return merged
+
+    @classmethod
+    def _merge_evidence(cls, current: list[Any], incoming: list[Any]) -> None:
+        known = cls._evidence_keys(current)
+        for evidence in incoming:
+            encoded = canonical_json(
+                evidence.model_dump(by_alias=True, mode="json", exclude_none=True)
+            )
+            if encoded not in known:
+                current.append(evidence.model_copy(deep=True))
+                known.add(encoded)
 
     @staticmethod
     def _edge_key(edge: Any) -> tuple[str, str, str]:
