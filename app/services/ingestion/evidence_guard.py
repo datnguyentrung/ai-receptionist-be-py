@@ -1,12 +1,20 @@
 """Canonicalize evidence excerpts against prepared chunk text before validation."""
 
-from typing import Any
-
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from app.schemas.ingestion_schema import Evidence, GraphPatchFragment, PreparedChunk
+from app.schemas.ingestion_schema import (
+    Evidence,
+    EvidenceUnit,
+    GraphPatchFragment,
+    PreparedChunk,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,26 +45,36 @@ def canonical_whitespace_excerpt(chunk: PreparedChunk, quote: str) -> str:
     return quote
 
 
+def strip_markdown_text(value: str) -> str:
+    """Remove markdown styling tokens, heading markers, blockquotes, bullets, and table markers."""
+    if not value:
+        return ""
+    cleaned = re.sub(r"(\*\*|__|`|\*|~~)", "", value)
+    cleaned = re.sub(r"^\s*#+\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*>+\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-+*]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = cleaned.replace("|", " ")
+    return re.sub(r"\s+", " ", cleaned).strip().casefold()
+
+
 def canonical_markdown_excerpt(chunk: PreparedChunk, quote: str) -> str:
     """Return a chunk line/paragraph when markdown markers are the only mismatch."""
     for surface in _chunk_surfaces(chunk):
         if quote in surface:
             return quote
 
-    def plain(value: str) -> str:
-        value = re.sub(r"(\*\*|__|`|\*)", "", value)
-        return re.sub(r"\s+", " ", value).strip()
-
-    target = plain(quote)
+    target = strip_markdown_text(quote)
     if not target:
         return quote
     for surface in _chunk_surfaces(chunk):
-        for line in surface.splitlines():
-            if target in plain(line):
-                return line.strip()
-        for paragraph in _paragraphs(surface):
-            if target in plain(paragraph):
-                return paragraph
+        if target in strip_markdown_text(surface):
+            for line in surface.splitlines():
+                if target and target in strip_markdown_text(line):
+                    return line.strip()
+            for paragraph in _paragraphs(surface):
+                if target and target in strip_markdown_text(paragraph):
+                    return paragraph.strip()
+            return surface.strip()
     return quote
 
 
@@ -133,6 +151,310 @@ def canonical_sentence_window_excerpt(
             if norm_target in _collapse_space(line).casefold():
                 return line.strip()
     return quote
+
+
+
+
+@dataclass(frozen=True)
+class EvidenceGroundingResult:
+    """Result of resolving model evidence against immutable source-owned spans."""
+
+    evidence: Evidence | None
+    error_code: str | None = None
+    message: str | None = None
+
+
+class EvidenceGroundingEngine:
+    """Single deterministic authority for source provenance.
+
+    New payloads should reference source-owned EvidenceUnit IDs. Legacy free-text
+    evidence remains supported temporarily and is canonicalized back to source text.
+    """
+
+    _legacy_normalizers: tuple[Callable[[PreparedChunk, str], str], ...] = (
+        canonical_whitespace_excerpt,
+        canonical_markdown_excerpt,
+        canonical_prefix_completion_excerpt,
+        canonical_table_excerpt,
+        canonical_bullet_excerpt,
+        canonical_sentence_window_excerpt,
+    )
+
+    def build_units(self, chunk: PreparedChunk) -> list[EvidenceUnit]:
+        """Build stable line/block evidence units from the exact prepared chunk text."""
+        units: list[EvidenceUnit] = []
+        normalized = chunk.text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized.splitlines()
+
+        if chunk.section and chunk.section.strip():
+            units.append(
+                EvidenceUnit(
+                    evidence_ref=f"chunk:{chunk.chunk_index}:section",
+                    chunk_index=chunk.chunk_index,
+                    kind="SECTION",
+                    text=chunk.section,
+                )
+            )
+
+        for line_no, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            units.append(
+                EvidenceUnit(
+                    evidence_ref=f"chunk:{chunk.chunk_index}:line:{line_no}",
+                    chunk_index=chunk.chunk_index,
+                    kind="LINE",
+                    text=line,
+                    start_line=line_no,
+                    end_line=line_no,
+                )
+            )
+
+        block_start: int | None = None
+        block_lines: list[str] = []
+
+        def flush_block(end_line: int) -> None:
+            nonlocal block_start, block_lines
+            if block_start is None or not block_lines:
+                block_start = None
+                block_lines = []
+                return
+            # A one-line block duplicates the line unit and adds no value.
+            if len(block_lines) > 1:
+                units.append(
+                    EvidenceUnit(
+                        evidence_ref=(
+                            f"chunk:{chunk.chunk_index}:block:{block_start}-{end_line}"
+                        ),
+                        chunk_index=chunk.chunk_index,
+                        kind="BLOCK",
+                        text="\n".join(block_lines),
+                        start_line=block_start,
+                        end_line=end_line,
+                    )
+                )
+            block_start = None
+            block_lines = []
+
+        for line_no, line in enumerate(lines, start=1):
+            if line.strip():
+                if block_start is None:
+                    block_start = line_no
+                block_lines.append(line)
+            else:
+                flush_block(line_no - 1)
+        flush_block(len(lines))
+
+        if not units and chunk.text.strip():
+            units.append(
+                EvidenceUnit(
+                    evidence_ref=f"chunk:{chunk.chunk_index}:block:1-1",
+                    chunk_index=chunk.chunk_index,
+                    kind="BLOCK",
+                    text=chunk.text,
+                    start_line=1,
+                    end_line=1,
+                )
+            )
+        return units
+
+    def canonicalize_quote(self, chunk: PreparedChunk, quote: str) -> str:
+        """Recover an exact source excerpt for legacy free-text evidence."""
+        result = quote
+        for normalizer in self._legacy_normalizers:
+            candidate = normalizer(chunk, result)
+            if candidate and any(candidate in surface for surface in _chunk_surfaces(chunk)):
+                return candidate
+            if candidate:
+                result = candidate
+        return result
+
+    def resolve(self, chunk: PreparedChunk, evidence: Evidence) -> EvidenceGroundingResult:
+        """Resolve evidenceRef authoritatively, or canonicalize legacy evidence text."""
+        if evidence.chunk_index != chunk.chunk_index:
+            return EvidenceGroundingResult(
+                evidence=None,
+                error_code="EVIDENCE_CHUNK_MISMATCH",
+                message=(
+                    f"Evidence references chunk {evidence.chunk_index}, "
+                    f"expected {chunk.chunk_index}"
+                ),
+            )
+
+        if evidence.evidence_ref:
+            unit = next(
+                (
+                    item
+                    for item in self.build_units(chunk)
+                    if item.evidence_ref == evidence.evidence_ref
+                ),
+                None,
+            )
+            if unit is None:
+                return EvidenceGroundingResult(
+                    evidence=None,
+                    error_code="EVIDENCE_REF_NOT_FOUND",
+                    message=(
+                        f"Evidence ref {evidence.evidence_ref!r} does not exist "
+                        f"in chunk {chunk.chunk_index}"
+                    ),
+                )
+            return EvidenceGroundingResult(
+                evidence=evidence.model_copy(
+                    update={
+                        "source": chunk.source_anchor,
+                        "section": chunk.section,
+                        "text": unit.text,
+                    }
+                )
+            )
+
+        if not evidence.text or not evidence.text.strip():
+            return EvidenceGroundingResult(
+                evidence=None,
+                error_code="EVIDENCE_REQUIRED",
+                message="Evidence must provide evidenceRef (preferred) or legacy text",
+            )
+
+        canonical = self.canonicalize_quote(chunk, evidence.text)
+        if not self.is_grounded(chunk, canonical):
+            return EvidenceGroundingResult(
+                evidence=None,
+                error_code="EVIDENCE_NOT_GROUNDED",
+                message=(
+                    f"Evidence text {evidence.text!r} is not grounded "
+                    f"in chunk {chunk.chunk_index}"
+                ),
+            )
+        return EvidenceGroundingResult(
+            evidence=evidence.model_copy(
+                update={
+                    "source": chunk.source_anchor,
+                    "section": chunk.section,
+                    "text": canonical,
+                }
+            )
+        )
+
+    def is_grounded(self, chunk: PreparedChunk, quote: str) -> bool:
+        """Three deterministic tiers: exact, whitespace/casefold, markdown-stripped."""
+        if not quote or not quote.strip():
+            return False
+        clean_quote = quote.strip()
+        surfaces = _chunk_surfaces(chunk)
+
+        if any(clean_quote in surface for surface in surfaces):
+            return True
+
+        norm_quote = _collapse_space(clean_quote).casefold()
+        if norm_quote and any(
+            norm_quote in _collapse_space(surface).casefold() for surface in surfaces
+        ):
+            return True
+
+        md_quote = strip_markdown_text(clean_quote)
+        return bool(md_quote) and any(
+            md_quote in strip_markdown_text(surface) for surface in surfaces
+        )
+
+
+def property_value_supported_by_evidence(value: Any, evidence_text: str) -> bool:
+    """Strict deterministic check that a PROPERTY value is recoverable from its evidence.
+
+    No semantic inference is attempted. This intentionally favors precision over recall.
+    """
+    if not evidence_text or not evidence_text.strip() or value is None:
+        return False
+    if isinstance(value, list):
+        return bool(value) and all(
+            property_value_supported_by_evidence(item, evidence_text) for item in value
+        )
+    if isinstance(value, dict):
+        scalar_values = list(_iter_scalar_values(value))
+        return bool(scalar_values) and all(
+            property_value_supported_by_evidence(item, evidence_text)
+            for item in scalar_values
+        )
+    if isinstance(value, bool):
+        expected = "true" if value else "false"
+        return re.search(rf"(?<!\w){expected}(?!\w)", evidence_text, re.IGNORECASE) is not None
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return _numeric_value_in_text(value, evidence_text)
+
+    rendered = str(value).strip()
+    if not rendered:
+        return False
+
+    plain_value = _normalize_semantic_surface(rendered)
+    plain_evidence = _normalize_semantic_surface(evidence_text)
+    if plain_value and plain_value in plain_evidence:
+        return True
+
+    compact_value = re.sub(r"[\W_]+", "", plain_value, flags=re.UNICODE)
+    compact_evidence = re.sub(r"[\W_]+", "", plain_evidence, flags=re.UNICODE)
+    if len(compact_value) >= 4 and compact_value in compact_evidence:
+        return True
+
+    iso_date = _parse_iso_date(rendered)
+    if iso_date is not None:
+        date_forms = {
+            iso_date.isoformat(),
+            f"{iso_date.day:02d}/{iso_date.month:02d}/{iso_date.year:04d}",
+            f"{iso_date.day}/{iso_date.month}/{iso_date.year:04d}",
+            f"{iso_date.day:02d}-{iso_date.month:02d}-{iso_date.year:04d}",
+            f"{iso_date.day}-{iso_date.month}-{iso_date.year:04d}",
+            f"{iso_date.day:02d}.{iso_date.month:02d}.{iso_date.year:04d}",
+            f"ngày {iso_date.day} tháng {iso_date.month} năm {iso_date.year}",
+        }
+        normalized_forms = {_normalize_semantic_surface(item) for item in date_forms}
+        if any(item and item in plain_evidence for item in normalized_forms):
+            return True
+
+    return False
+
+
+def _normalize_semantic_surface(value: str) -> str:
+    return strip_markdown_text(unicodedata.normalize("NFKC", value))
+
+
+def _iter_scalar_values(value: Any):
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_scalar_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_scalar_values(item)
+    elif value is not None:
+        yield value
+
+
+def _parse_iso_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _numeric_value_in_text(value: float | Decimal, text: str) -> bool:
+    try:
+        expected = Decimal(str(value))
+    except InvalidOperation:
+        return False
+
+    for raw in re.findall(r"(?<!\w)[+-]?\d[\d.,]*(?!\w)", text):
+        cleaned = raw.strip()
+        candidates: set[str] = {cleaned}
+        if re.fullmatch(r"[+-]?\d{1,3}(?:[.,]\d{3})+", cleaned):
+            candidates.add(re.sub(r"[.,]", "", cleaned))
+        if "," in cleaned and "." not in cleaned:
+            candidates.add(cleaned.replace(",", "."))
+        for candidate in candidates:
+            try:
+                if Decimal(candidate) == expected:
+                    return True
+            except InvalidOperation:
+                continue
+    return False
 
 
 class GraphFragmentEvidenceGuard:
@@ -277,10 +599,13 @@ def _looks_truncated_prefix(surface: str, quote: str) -> bool:
 
 
 __all__ = [
+    "EvidenceGroundingEngine",
+    "EvidenceGroundingResult",
     "GraphFragmentEvidenceGuard",
     "canonical_bullet_excerpt",
     "canonical_markdown_excerpt",
     "canonical_prefix_completion_excerpt",
     "canonical_table_excerpt",
     "canonical_whitespace_excerpt",
+    "property_value_supported_by_evidence",
 ]

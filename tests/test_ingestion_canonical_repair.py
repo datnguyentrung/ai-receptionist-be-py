@@ -86,7 +86,7 @@ def test_case_1_missing_ontology_version_passes() -> None:
             }
         ],
         "edges": [],
-        "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "Founder"}],
+        "coverage": [],
     }
     sem = SemanticGraphPatchFragment.model_validate(payload)
     compiled = GraphPatchCompiler().compile(sem, _proj())
@@ -113,7 +113,7 @@ def test_case_2_tempid_changes_same_natural_identity_passes() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "Location"}],
+            "coverage": [],
         }
     )
     sem2 = SemanticGraphPatchFragment.model_validate(
@@ -132,7 +132,7 @@ def test_case_2_tempid_changes_same_natural_identity_passes() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "Location"}],
+            "coverage": [],
         }
     )
     can1 = GraphPatchCompiler().compile(sem1, proj).fragment
@@ -160,7 +160,7 @@ def test_case_3_actual_identity_dropped_detected() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "loc1"}],
+            "coverage": [],
         }
     )
     sem2 = SemanticGraphPatchFragment.model_validate(
@@ -179,7 +179,7 @@ def test_case_3_actual_identity_dropped_detected() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "loc2"}],
+            "coverage": [],
         }
     )
     can1 = GraphPatchCompiler().compile(sem1, proj).fragment
@@ -207,7 +207,7 @@ def test_case_4_coverage_repair_adds_valid_property_passes() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "name"}],
+            "coverage": [],
         }
     )
     sem2 = SemanticGraphPatchFragment.model_validate(
@@ -231,10 +231,7 @@ def test_case_4_coverage_repair_adds_valid_property_passes() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [
-                {"chunkIndex": 0, "decision": "MAPPED", "reason": "name"},
-                {"chunkIndex": 1, "decision": "MAPPED", "reason": "phone"},
-            ],
+            "coverage": [],
         }
     )
     can1 = GraphPatchCompiler().compile(sem1, proj).fragment
@@ -271,7 +268,7 @@ def test_case_5_repair_removes_old_valid_property_fails() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "person"}],
+            "coverage": [],
         }
     )
     sem2 = SemanticGraphPatchFragment.model_validate(
@@ -290,7 +287,7 @@ def test_case_5_repair_removes_old_valid_property_fails() -> None:
                 }
             ],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "person"}],
+            "coverage": [],
         }
     )
     can1 = GraphPatchCompiler().compile(sem1, proj).fragment
@@ -566,7 +563,6 @@ def test_case_15_taekwondo_document_batch_flow() -> None:
         "coverage": [
             {"chunkIndex": 0, "decision": "NO_RELEVANT_FACT", "reason": "Tiêu đề tài liệu"},
             {"chunkIndex": 1, "decision": "NO_RELEVANT_FACT", "reason": "Giới thiệu chung"},
-            {"chunkIndex": 2, "decision": "MAPPED", "reason": "Thông tin tổng quan"},
             {"chunkIndex": 3, "decision": "NO_RELEVANT_FACT", "reason": "Lịch sử thành lập 2012"},
             {"chunkIndex": 4, "decision": "NO_RELEVANT_FACT", "reason": "Phát triển 2019"},
         ],
@@ -625,7 +621,6 @@ def test_case_15_taekwondo_document_batch_flow() -> None:
             {"chunkIndex": 6, "decision": "NO_RELEVANT_FACT", "reason": "Kỷ niệm 10 năm"},
             {"chunkIndex": 7, "decision": "NO_RELEVANT_FACT", "reason": "Tiểu sử thầy Lịch"},
             {"chunkIndex": 8, "decision": "NO_RELEVANT_FACT", "reason": "Tổng quan 6 cơ sở"},
-            {"chunkIndex": 9, "decision": "MAPPED", "reason": "Cơ sở 1 và lịch tập"},
         ],
     }
     sem1 = SemanticGraphPatchFragment.model_validate(b1_payload)
@@ -794,7 +789,7 @@ def test_case_19_node_without_tempid_and_edge_by_natural_name() -> None:
                 "evidence": [{"chunkIndex": 0, "text": "17:30 – 19:00"}],
             }
         ],
-        "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "Full batch"}],
+        "coverage": [],
     }
     sem = SemanticGraphPatchFragment.model_validate(payload)
     compile_res = GraphPatchCompiler().compile(sem, proj)

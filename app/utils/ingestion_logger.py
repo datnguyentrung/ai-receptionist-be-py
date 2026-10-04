@@ -663,6 +663,92 @@ class ADKDetailedLoggerPlugin(BasePlugin):
 
         return None
 
+    async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
+        tool_name = getattr(tool, "name", str(tool))
+        # Pacing delay cho các tools xử lý tài liệu nặng để tránh bùng nổ token/phút
+        pacing_tools = {
+            "submit_ingestion_batch",
+            "repair_ingestion_batch",
+            "rebase_ingestion",
+            "load_ontology_scopes",
+            "get_ingestion_batch",
+            "apply_schema_proposal",
+            "review_schema_proposal",
+            "create_schema_proposal",
+            "finalize_ingestion",
+            "fill_ingestion",
+        }
+        if tool_name in pacing_tools:
+            import asyncio
+            await asyncio.sleep(1.2)
+        return None
+
+    async def on_model_error_callback(self, *, callback_context, llm_request, error):
+        import asyncio
+        import re
+
+        err_str = str(error)
+        is_rate_limit = (
+            "429" in err_str
+            or "RESOURCE_EXHAUSTED" in err_str
+            or "ResourceExhausted" in err_str
+            or "rate-limits" in err_str.lower()
+        )
+        if not is_rate_limit:
+            return None
+
+        # Trích xuất thời gian chờ từ thông báo lỗi (VD: retry in 3.8s)
+        delay = 4.0
+        match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str)
+        if match:
+            delay = max(float(match.group(1)) + 1.0, 3.0)
+
+        agent = getattr(callback_context, "agent", None)
+        agent_name = getattr(agent, "name", "root_agent")
+
+        warn_msg = (
+            f"⏳ [RATE LIMIT 429] Đã chạm giới hạn Quota Gemini Free Tier. "
+            f"Tự động tạm dừng {delay:.1f}s để đợi Quota phục hồi và tiếp tục luồng Ingestion..."
+        )
+        write_raw_trace(
+            f"⏳ [RATE LIMIT 429] {agent_name}",
+            {"message": warn_msg, "retryDelay": delay, "error": err_str},
+        )
+        print(f"\n{warn_msg}\n")
+
+        # Thử retry tối đa 3 lần
+        for attempt in range(1, 4):
+            await asyncio.sleep(delay)
+            try:
+                llm = getattr(agent, "canonical_model", None)
+                if llm is None:
+                    break
+
+                response_gen = llm.generate_content_async(llm_request, stream=False)
+                async for response in response_gen:
+                    success_msg = f"✅ [RATE LIMIT RECOVERED] Phục hồi thành công sau lần retry #{attempt}! Tiếp tục tiến trình."
+                    write_raw_trace(
+                        f"✅ [RATE LIMIT RECOVERED] {agent_name}",
+                        {"attempt": attempt},
+                    )
+                    print(f"\n{success_msg}\n")
+                    return response
+            except Exception as retry_err:
+                retry_err_str = str(retry_err)
+                if "429" in retry_err_str or "RESOURCE_EXHAUSTED" in retry_err_str:
+                    delay = min(delay * 1.5, 15.0)
+                    retry_wait_msg = f"⏳ [RATE LIMIT RETRY #{attempt}/3] Vẫn đang đợi Quota, tiếp tục chờ {delay:.1f}s..."
+                    write_raw_trace(
+                        f"⏳ [RATE LIMIT RETRY #{attempt}] {agent_name}",
+                        {"retryDelay": delay},
+                    )
+                    print(f"\n{retry_wait_msg}\n")
+                    continue
+                else:
+                    break
+
+        return None
+
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         tool_name = getattr(tool, "name", str(tool))
         write_raw_trace(f"❌ [TOOL ERROR] {tool_name}", {"tool": tool_name, "error": str(error)})

@@ -15,3 +15,8 @@ For ingestion, every tool result is the workflow source of truth. If `terminal=t
 `nextAction` is `explicit_extraction_failure` or `report_tool_failure`, stop the ingestion
 workflow immediately and report the returned errors. Do not call batch, scope, finalize, or fill
 tools after a terminal result.
+
+During ingestion, process documents batch by batch. For each batch, submit a complete
+atomic Claim Ledger exactly once through `submit_ingestion_batch`. Do not invoke LLM
+repair loops or resubmit after hard validation failures. All specialized ingestion instructions
+are defined in the `ingestion` skill.

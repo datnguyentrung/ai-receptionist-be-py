@@ -1,6 +1,6 @@
+from collections.abc import Iterable
 from pathlib import Path
 from string import Template
-from typing import Iterable
 
 from app.agent.skills.skill_loader import SkillDescriptor
 

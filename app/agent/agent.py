@@ -62,18 +62,22 @@ def create_root_agent() -> Agent:
 def _compact_ingestion_context(
     contents: list[types.Content],
 ) -> list[types.Content]:
-    last_submit_index = None
-    last_submit_response = None
+    last_checkpoint_index = None
+    last_checkpoint_response = None
 
     for index, content in enumerate(contents):
         for part in content.parts or []:
             response = part.function_response
 
-            if response is not None and response.name == "submit_ingestion_batch":
-                last_submit_index = index
-                last_submit_response = response.response
+            if response is not None and response.name in (
+                "submit_ingestion_batch",
+                "repair_ingestion_batch",
+                "rebase_ingestion",
+            ):
+                last_checkpoint_index = index
+                last_checkpoint_response = response.response
 
-    if last_submit_index is None:
+    if last_checkpoint_index is None:
         return contents
 
     result: list[types.Content] = []
@@ -91,7 +95,7 @@ def _compact_ingestion_context(
             break
 
     # 2. Giữ cặp load_skill để Agent vẫn có SKILL.md.
-    for index, content in enumerate(contents[:last_submit_index]):
+    for index, content in enumerate(contents[:last_checkpoint_index]):
         has_load_skill = any(
             part.function_call is not None and part.function_call.name == "load_skill"
             for part in content.parts or []
@@ -107,8 +111,8 @@ def _compact_ingestion_context(
 
         break
 
-    # 3. Biến submit-result mới nhất thành checkpoint nhỏ.
-    response = last_submit_response or {}
+    # 3. Biến submit/rebase result mới nhất thành checkpoint nhỏ.
+    response = last_checkpoint_response or {}
 
     checkpoint = {
         "ingestionId": response.get("ingestionId"),
@@ -127,6 +131,7 @@ def _compact_ingestion_context(
         "validationAttempts": response.get("validationAttempts"),
         "attempt": response.get("attempt"),
         "maxAttempts": response.get("maxAttempts"),
+        "workspaceStats": response.get("workspaceStats"),
     }
 
     compact_checkpoint = {
@@ -145,10 +150,10 @@ def _compact_ingestion_context(
         )
     )
 
-    # 4. Sau mọi submit, bỏ toàn bộ raw history của batch vừa xử lý.
-    # Nếu cần repair, Agent sẽ lấy lại đúng batch/schema tối thiểu bằng tools.
-    # Chỉ giữ các turn thực sự phát sinh sau submit mới nhất.
-    result.extend(contents[last_submit_index + 1 :])
+    # 4. Sau mọi checkpoint, bỏ toàn bộ raw history trước đó.
+    # Nếu cần repair hoặc rebase, Agent sẽ lấy lại đúng batch/schema tối thiểu bằng tools.
+    # Chỉ giữ các turn thực sự phát sinh sau checkpoint mới nhất.
+    result.extend(contents[last_checkpoint_index + 1 :])
 
     return result
 

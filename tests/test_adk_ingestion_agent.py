@@ -31,6 +31,7 @@ def test_agent_and_ingestion_tools_are_discoverable() -> None:
         "delete_document",
         "rollback_document_version",
     }
+    assert "repair_ingestion_batch" not in names
 
 
 def test_skill_discovery_ignores_cache_directories() -> None:
@@ -179,3 +180,94 @@ def test_repair_compaction_drops_previous_batch_payloads_across_retries() -> Non
     assert '"batchIndex": 1' in checkpoint
     assert "EVIDENCE_NOT_GROUNDED" in checkpoint
     assert "affectedChunkIndexes" in checkpoint
+
+
+def test_rebase_compaction_drops_proposal_and_intermediate_history() -> None:
+    def tool_response(name: str, response: dict) -> types.Content:
+        return types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        name=name,
+                        response=response,
+                    )
+                )
+            ],
+        )
+
+    contents = [
+        types.Content(role="user", parts=[types.Part(text="ingest document")]),
+        tool_response("submit_ingestion_batch", {"ingestionId": "ing-1", "stage": "schema_gap_candidate"}),
+        tool_response("create_schema_proposal", {"proposalId": "prop-123", "technicalName": "achievement"}),
+        tool_response("review_schema_proposal", {"proposalId": "prop-123", "approved": True}),
+        tool_response("apply_schema_proposal", {"version": "v1.1.1"}),
+        tool_response(
+            "rebase_ingestion",
+            {
+                "ingestionId": "ing-1",
+                "success": True,
+                "stage": "batching",
+                "nextAction": "process_batch",
+                "processedBatches": 0,
+                "remainingBatches": 5,
+                "workspaceStats": {"chunks": 23, "batches": 5, "stagedBatches": 0},
+            },
+        ),
+    ]
+
+    compacted = _compact_ingestion_context(contents)
+    serialized = "\n".join(content.model_dump_json() for content in compacted)
+
+    assert "schema_gap_candidate" not in serialized
+    assert "create_schema_proposal" not in serialized
+    assert "prop-123" not in serialized
+
+    checkpoint = next(
+        part.text
+        for content in compacted
+        for part in (content.parts or [])
+        if part.text and part.text.startswith("INGESTION_CHECKPOINT")
+    )
+    assert '"stage": "batching"' in checkpoint
+    assert '"processedBatches": 0' in checkpoint
+    assert '"workspaceStats"' in checkpoint
+
+
+def test_adk_plugin_rate_limit_retry_handler() -> None:
+    from unittest.mock import MagicMock
+
+    from app.utils.ingestion_logger import ADKDetailedLoggerPlugin
+
+    plugin = ADKDetailedLoggerPlugin()
+
+    # Mock agent and canonical model
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+
+    async def fake_gen(*args, **kwargs):
+        yield mock_response
+
+    mock_llm.generate_content_async = MagicMock(side_effect=fake_gen)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "root_agent"
+    mock_agent.canonical_model = mock_llm
+
+    mock_ctx = MagicMock()
+    mock_ctx.agent = mock_agent
+
+    mock_request = MagicMock()
+    error = RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 0.1s.")
+
+    # Call on_model_error_callback
+    res = asyncio.run(
+        plugin.on_model_error_callback(
+            callback_context=mock_ctx,
+            llm_request=mock_request,
+            error=error,
+        )
+    )
+
+    assert res is mock_response
+    assert mock_llm.generate_content_async.called

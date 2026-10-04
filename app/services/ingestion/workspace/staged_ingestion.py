@@ -12,7 +12,6 @@ import os
 from collections.abc import Iterable
 from typing import Any
 
-from app.core.trace_logger import pprint, trace_pprint
 from app.core.schemas.ingestion.document import DocumentChunk
 from app.core.schemas.ingestion.graph_patch import (
     ChunkCoverage,
@@ -27,6 +26,8 @@ from app.core.schemas.ingestion.workspace import (
     IngestionProvenance,
     IngestionWorkspace,
 )
+from app.core.trace_logger import trace_pprint
+
 logger = logging.getLogger(__name__)
 
 
@@ -617,10 +618,10 @@ class IngestionWorkspaceService:
 
 __all__ = [
     "ESTIMATED_CHARS_PER_TOKEN",
-    "IngestionWorkspaceService",
     "MAX_BATCH_CHARS",
     "MAX_BATCH_CHUNKS",
     "MAX_BATCH_ESTIMATED_TOKENS",
     "TRUE_CHUNK_CACHE_MODE",
+    "IngestionWorkspaceService",
     "WorkspaceConflictError",
 ]

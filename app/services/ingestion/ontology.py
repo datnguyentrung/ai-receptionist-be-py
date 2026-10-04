@@ -32,6 +32,7 @@ from app.schemas.ingestion_schema import (
     SemanticGraphPatchFragment,
     ValidationIssue,
 )
+from app.services.ingestion.evidence_guard import EvidenceGroundingEngine
 from app.services.ingestion.fact_references import duplicate_quote_matches
 
 COMPILER_VERSION = "ontology-compiler-v2"
@@ -104,6 +105,31 @@ def validate_coverage_integrity(
                         ),
                         location=f"coverage.{coverage_index}.decision",
                         retryable=True,
+                    )
+                )
+        elif item.decision == "PARTIALLY_MAPPED":
+            if item.chunk_index not in fact_chunks:
+                issues.append(
+                    ValidationIssue(
+                        code="PARTIAL_WITHOUT_MAPPING",
+                        message=(
+                            f"Chunk {item.chunk_index} is PARTIALLY_MAPPED but no "
+                            "property or edge carries evidence from that chunk"
+                        ),
+                        location=f"coverage.{coverage_index}.decision",
+                        retryable=True,
+                    )
+                )
+            else:
+                issues.append(
+                    ValidationIssue(
+                        code="SCHEMA_GAP_CANDIDATE",
+                        message=(
+                            f"Chunk {item.chunk_index} has valid mapped facts and "
+                            f"unresolved semantics: {item.reason}"
+                        ),
+                        location=f"coverage.{coverage_index}.decision",
+                        retryable=False,
                     )
                 )
         elif item.decision == "DUPLICATE_EVIDENCE":
@@ -541,17 +567,13 @@ class OntologyRegistry:
                     )
                 )
             else:
-                chunk_surfaces = [chunk.text]
-                if chunk.section:
-                    chunk_surfaces.extend([
-                        f"{chunk.section}\n\n{chunk.text}",
-                        f"{chunk.section}\n{chunk.text}",
-                        chunk.section,
-                    ])
+                engine = EvidenceGroundingEngine()
                 evidence_text = _normalize_quote(evidence.text)
-                if any(evidence_text in _normalize_quote(surface) for surface in chunk_surfaces):
+                if engine.is_grounded(chunk, evidence.text):
                     continue
-                reason, preview = _evidence_failure_reason(evidence_text, _normalize_quote(chunk.text))
+                reason, preview = _evidence_failure_reason(
+                    evidence_text, _normalize_quote(chunk.text)
+                )
                 logger.info(
                     "EVIDENCE_GROUNDING location=%s chunkIndex=%s reason=%s evidence=%r nearest=%r",
                     f"{location}.{index}.text",

@@ -43,7 +43,7 @@ def test_submit_validates_and_persists_multiple_batch_scopes_without_neo4j_stagi
 
         async def store_batch_result(self, ingestion_id, batch_index, bindings,
                                      merged_hash, semantic_fragment, fragment, issues,
-                                     *, max_attempts):
+                                     *, max_attempts, **kwargs):
             captured.update(bindings=bindings, merged_hash=merged_hash,
                             semantic_fragment=semantic_fragment,
                             fragment=fragment, issues=issues)
@@ -77,7 +77,7 @@ def test_submit_validates_and_persists_multiple_batch_scopes_without_neo4j_stagi
                 }],
             }],
             "edges": [],
-            "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "course"}],
+            "coverage": [],
         },
     ))
     assert result["scopeKeys"] == ["training", "finance"]

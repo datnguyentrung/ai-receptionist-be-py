@@ -41,36 +41,65 @@ class GraphPatchCompiler:
 
         for node_index, node in enumerate(semantic_fragment.nodes):
             temp_id = node.temp_id if node.temp_id else f"node_{node_index}"
-            try:
-                identity = resolver.resolve(
-                    class_name=node.class_name,
-                    properties=node.properties,
+            referenced = staged_entities.get(node.entity_ref or "")
+            if node.entity_ref and referenced is None:
+                issues.append(
+                    ValidationIssue(
+                        code="UNKNOWN_ENTITY_REFERENCE",
+                        message=f"Unknown node entity reference: {node.entity_ref}",
+                        location=f"nodes.{node_index}.entityRef",
+                        retryable=True,
+                    )
                 )
-            except IdentityResolutionError as exc:
-                if exc.unknown_class:
+                continue
+            if referenced is not None:
+                identity = referenced["identity"]
+                class_name = referenced["className"]
+                key = referenced["stableKey"]
+                if node.class_name != class_name:
                     issues.append(
                         ValidationIssue(
-                            code="UNKNOWN_ENTITY_TYPE",
-                            message=f"Unknown entity type: {node.class_name}",
+                            code="ENTITY_REFERENCE_TYPE_MISMATCH",
+                            message=(
+                                f"{node.entity_ref} is {class_name}, not "
+                                f"{node.class_name}"
+                            ),
                             location=f"nodes.{node_index}.className",
+                            retryable=True,
                         )
                     )
-                else:
-                    for field in exc.missing_fields:
+                    continue
+            else:
+                try:
+                    identity = resolver.resolve(
+                        class_name=node.class_name,
+                        properties=node.properties,
+                    )
+                except IdentityResolutionError as exc:
+                    if exc.unknown_class:
                         issues.append(
                             ValidationIssue(
-                                code="IDENTITY_SOURCE_PROPERTY_MISSING",
-                                message=(
-                                    f"Ontology requires identity field '{field}' for "
-                                    f"{node.class_name}, but the semantic fragment does "
-                                    "not contain that property."
-                                ),
-                                location=f"nodes.{node_index}.properties",
-                                retryable=True,
+                                code="UNKNOWN_ENTITY_TYPE",
+                                message=f"Unknown entity type: {node.class_name}",
+                                location=f"nodes.{node_index}.className",
                             )
                         )
-                continue
-            key = stable_entity_key(node.class_name, identity)
+                    else:
+                        for field in exc.missing_fields:
+                            issues.append(
+                                ValidationIssue(
+                                    code="IDENTITY_SOURCE_PROPERTY_MISSING",
+                                    message=(
+                                        f"Ontology requires identity field '{field}' for "
+                                        f"{node.class_name}, but the semantic fragment does "
+                                        "not contain that property."
+                                    ),
+                                    location=f"nodes.{node_index}.properties",
+                                    retryable=True,
+                                )
+                            )
+                    continue
+                key = stable_entity_key(node.class_name, identity)
             local_entity_keys[temp_id] = key
             local_entity_keys[f"node_{node_index}"] = key
             local_entity_keys[str(node_index)] = key
@@ -174,7 +203,10 @@ class GraphPatchCompiler:
                 ontology_version=projection.version_id,
                 nodes=canonical_nodes,
                 edges=canonical_edges,
-                coverage=semantic_fragment.coverage,
+                coverage=[
+                    item.model_dump(by_alias=True, mode="json")
+                    for item in semantic_fragment.coverage
+                ],
                 warnings=semantic_fragment.warnings,
             )
         )

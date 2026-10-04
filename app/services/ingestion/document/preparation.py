@@ -4,7 +4,6 @@ import logging
 from pathlib import Path
 
 from app.core.schemas.ingestion.document import DocumentChunk
-from app.core.schemas.ingestion.workspace import IngestionProvenance
 from app.services.ingestion.document.reader import DocumentReader
 
 logger = logging.getLogger(__name__)
