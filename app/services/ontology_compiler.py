@@ -1,4 +1,4 @@
-"""Deterministic compiler from normalized ontology tables to ingestion snapshots."""
+"""Deterministic compiler from normalized ontology tables to snapshots."""
 
 import hashlib
 import json
@@ -18,7 +18,8 @@ from app.models import (
     OntologyScope,
     OntologyVersion,
 )
-from app.services.ingestion.ontology import COMPILER_VERSION
+
+COMPILER_VERSION = "ontology-compiler-v2"
 
 
 class OntologyCompiler:
@@ -72,76 +73,69 @@ class OntologyCompiler:
                 OntologyRelationship.source_entity_type_id.in_(entity_ids),
                 OntologyRelationship.target_entity_type_id.in_(entity_ids),
             )
-            .order_by(OntologyRelationship.technical_name)
+            .order_by(
+                OntologyRelationship.source_entity_type_id,
+                OntologyRelationship.name,
+                OntologyRelationship.target_entity_type_id,
+            )
         )).all())
-        property_ids = {item.id for item in properties}
-        relationship_ids = {item.id for item in relationships}
-        aliases = list((await session.scalars(
+        alias_items = list((await session.scalars(
             select(OntologyAlias)
-            .where(OntologyAlias.ontology_version_id == ontology_version_id)
+            .where(
+                OntologyAlias.ontology_version_id == ontology_version_id,
+                (
+                    OntologyAlias.entity_type_id.in_(entity_ids)
+                    | OntologyAlias.property_id.in_([p.id for p in properties])
+                    | OntologyAlias.relationship_id.in_([r.id for r in relationships])
+                ),
+            )
             .order_by(OntologyAlias.alias)
         )).all())
-        aliases = [item for item in aliases if
-                   item.entity_type_id in set(entity_ids)
-                   or item.property_id in property_ids
-                   or item.relationship_id in relationship_ids]
-        entity_by_id = {item.id: item for item in entities}
 
-        payload: dict[str, Any] = {
-            "versionId": str(version.id),
-            "version": version.version,
+        entities_payload = [
+            {
+                "id": str(e.id), "technicalName": e.technical_name,
+                "domain": e.domain.value if hasattr(e.domain, "value") else str(e.domain),
+                "identityStrategy": e.identity_strategy,
+                "allowDynamicProperties": e.allow_dynamic_properties,
+                "description": e.description,
+            }
+            for e in entities
+        ]
+        props_by_entity: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        for p in properties:
+            props_by_entity.setdefault(p.entity_type_id, []).append({
+                "id": str(p.id), "technicalName": p.technical_name,
+                "dataType": p.data_type.value, "isRequired": p.is_required,
+                "isList": p.is_list, "validationRules": p.validation_rules,
+                "description": p.description,
+            })
+        rel_payload = [
+            {
+                "id": str(r.id), "name": r.name,
+                "sourceEntityTypeId": str(r.source_entity_type_id),
+                "targetEntityTypeId": str(r.target_entity_type_id),
+                "cardinality": r.cardinality.value, "description": r.description,
+            }
+            for r in relationships
+        ]
+        aliases_payload = [self._alias_payload(a) for a in alias_items]
+        payload = {
             "scopeKey": scope.scope_key,
-            "scopeKeys": [scope.scope_key],
-            "description": scope.description,
-            "compilerVersion": COMPILER_VERSION,
-            "entityTypes": [
-                {
-                    "id": str(item.id),
-                    "technicalName": item.technical_name,
-                    "displayName": item.display_name,
-                    "description": item.description,
-                    "identityStrategy": item.identity_strategy or {},
-                }
-                for item in entities
-            ],
-            "properties": [
-                {
-                    "id": str(item.id),
-                    "entityType": entity_by_id[item.entity_type_id].technical_name,
-                    "technicalName": item.technical_name,
-                    "displayName": item.display_name,
-                    "description": item.description,
-                    "dataType": item.data_type.value,
-                    "required": item.required,
-                    "multiValue": item.multi_value,
-                    "constraints": item.constraints or {},
-                }
-                for item in properties
-            ],
-            "relationships": [
-                {
-                    "id": str(item.id),
-                    "technicalName": item.technical_name,
-                    "displayName": item.display_name,
-                    "description": item.description,
-                    "sourceEntityType": entity_by_id[item.source_entity_type_id].technical_name,
-                    "targetEntityType": entity_by_id[item.target_entity_type_id].technical_name,
-                    "cardinality": item.cardinality.value,
-                    "constraints": item.constraints or {},
-                }
-                for item in relationships
-            ],
-            "aliases": [self._alias_payload(item) for item in aliases],
+            "versionId": str(version.id),
+            "versionNumber": version.version_number,
+            "entities": entities_payload,
+            "properties": props_by_entity,
+            "relationships": rel_payload,
+            "aliases": aliases_payload,
         }
-        hash_payload = {
-            key: value for key, value in payload.items()
-            if key not in {"versionId", "version"}
-        }
-        schema_hash = hashlib.sha256(_canonical(hash_payload).encode()).hexdigest()
-        snapshot = await session.scalar(select(OntologyCompiledSnapshot).where(
-            OntologyCompiledSnapshot.ontology_version_id == ontology_version_id,
-            OntologyCompiledSnapshot.scope_key == scope.scope_key,
-        ))
+        schema_hash = hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
+        snapshot = await session.scalar(
+            select(OntologyCompiledSnapshot).where(
+                OntologyCompiledSnapshot.ontology_version_id == ontology_version_id,
+                OntologyCompiledSnapshot.scope_key == scope.scope_key,
+            )
+        )
         if snapshot is None:
             snapshot = OntologyCompiledSnapshot(
                 ontology_version_id=ontology_version_id,
@@ -202,4 +196,4 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-__all__ = ["OntologyCompiler"]
+__all__ = ["COMPILER_VERSION", "OntologyCompiler"]

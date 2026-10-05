@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from app.services.graphrag.embeddings import GeminiEmbeddingProvider, cosine_similarity
-from app.services.ingestion.graph_store import Neo4jIngestionStore
+from app.services.graphrag.graph_store import Neo4jGraphStore
 
 logger = logging.getLogger(__name__)
 INSUFFICIENT_EVIDENCE = (
@@ -18,7 +18,7 @@ INSUFFICIENT_EVIDENCE = (
 class GraphRAGRetriever:
     def __init__(
         self,
-        graph_store: Neo4jIngestionStore,
+        graph_store: Neo4jGraphStore,
         embedding_provider: GeminiEmbeddingProvider,
         *,
         min_cosine_score: float,
