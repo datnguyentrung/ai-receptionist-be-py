@@ -10,7 +10,7 @@ import uvicorn
 from google.adk.cli.fast_api import get_fast_api_app
 
 from app.core.config import settings
-from app.core.ingestion_runtime import ingestion_lifespan
+from app.core.ingestion_runtime import runtime_lifespan
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AGENTS_DIR = PROJECT_ROOT / "app"
@@ -23,7 +23,7 @@ app = get_fast_api_app(
     a2a=False,
     host=settings.ADK_WEB_HOST,
     port=settings.ADK_WEB_PORT,
-    lifespan=ingestion_lifespan,
+    lifespan=runtime_lifespan,
     use_local_storage=True,
     auto_create_session=True,
 )
