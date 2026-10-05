@@ -426,7 +426,7 @@ def test_schema_gap_transitions_to_schema_review_required():
     assert result["success"] is True
     assert result["stage"] == "schema_review_required"
     assert result["retryRequired"] is False
-    assert result["nextAction"] == "review_schema_proposal"
+    assert result["nextAction"] == "wait_for_user_approval"
     assert len(result["schemaGaps"]) == 1
 
 
@@ -905,26 +905,510 @@ def test_iso_date_value_is_supported_by_verbatim_vietnamese_date():
     assert result.fragment is not None
 
 
+def test_grounding_case_1_verbatim_pass():
+    """Case 1: VERBATIM property with exact match in evidence passes with value_verified=True."""
+    compiler = BatchClaimCompiler()
+    projection = _sample_projection()
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="HỆ THỐNG TAEKWONDO VĂN QUÁN",
+            content_hash="h0",
+            token_count=6,
+            source_anchor="doc#0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [{"tempId": "org_1", "className": "organization"}],
+        "chunks": [
+            {
+                "chunkIndex": 0,
+                "claims": [
+                    {
+                        "claimId": "c1",
+                        "statement": "Tên tổ chức",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "name",
+                            "value": "HỆ THỐNG TAEKWONDO VĂN QUÁN",
+                        },
+                    }
+                ],
+            }
+        ],
+    })
+    result = compiler.compile(
+        extraction=extraction,
+        ontology_projection=projection,
+        source_chunks=source_chunks,
+    )
+    assert result.errors == []
+    assert result.fragment is not None
+    prop = result.fragment.nodes[0].properties[0]
+    assert prop.value == "HỆ THỐNG TAEKWONDO VĂN QUÁN"
+    assert prop.value_verified is True
+
+
+def test_grounding_case_2_verbatim_paraphrase_fail():
+    """Case 2: VERBATIM property where value is paraphrased and not in source fails."""
+    compiler = BatchClaimCompiler()
+    projection = _sample_projection()
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="Năm 2019, CLB Taekwondo Văn Quán chính thức sử dụng tên mới.",
+            content_hash="h0",
+            token_count=12,
+            source_anchor="doc#0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [{"tempId": "org_1", "className": "organization"}],
+        "chunks": [
+            {
+                "chunkIndex": 0,
+                "claims": [
+                    {
+                        "claimId": "c1",
+                        "statement": "Tên tổ chức",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "name",
+                            "value": "CLB Văn Quán Chính Thức",
+                        },
+                    }
+                ],
+            }
+        ],
+    })
+    result = compiler.compile(
+        extraction=extraction,
+        ontology_projection=projection,
+        source_chunks=source_chunks,
+    )
+    assert any(err["code"] == "PROPERTY_VALUE_NOT_SUPPORTED_BY_EVIDENCE" for err in result.errors)
+
+
+def test_grounding_case_3_normalized_pass():
+    """Case 3: NORMALIZED property (e.g. integer) extracted from text passes with value_verified=True."""
+    compiler = BatchClaimCompiler()
+    proj_dict = _sample_projection().model_dump(by_alias=True)
+    proj_dict["properties"].append({
+        "id": "p_org_facilities",
+        "entityType": "organization",
+        "technicalName": "facility_count",
+        "dataType": "INTEGER",
+    })
+    projection = OntologyProjection.model_validate(proj_dict)
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="Hệ thống Taekwondo Văn Quán hiện có 6 cơ sở tập luyện.",
+            content_hash="h0",
+            token_count=10,
+            source_anchor="doc#0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [{"tempId": "org_1", "className": "organization"}],
+        "chunks": [
+            {
+                "chunkIndex": 0,
+                "claims": [
+                    {
+                        "claimId": "c0",
+                        "statement": "Tên",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "name",
+                            "value": "Hệ thống Taekwondo Văn Quán",
+                        },
+                    },
+                    {
+                        "claimId": "c1",
+                        "statement": "Số cơ sở",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "facility_count",
+                            "value": 6,
+                        },
+                    },
+                ],
+            }
+        ],
+    })
+    result = compiler.compile(
+        extraction=extraction,
+        ontology_projection=projection,
+        source_chunks=source_chunks,
+    )
+    assert result.errors == []
+    assert result.fragment is not None
+    facility_prop = next(p for p in result.fragment.nodes[0].properties if p.property_name == "facility_count")
+    assert facility_prop.value == 6
+    assert facility_prop.value_verified is True
+
+
+def test_grounding_case_4_semantic_pass_without_verbatim_match():
+    """Case 4: SEMANTIC property (e.g. notes) backed by grounded evidence passes with value_verified=False."""
+    compiler = BatchClaimCompiler()
+    proj_dict = _sample_projection().model_dump(by_alias=True)
+    proj_dict["properties"].append({
+        "id": "p_org_notes",
+        "entityType": "organization",
+        "technicalName": "notes",
+        "dataType": "STRING",
+    })
+    projection = OntologyProjection.model_validate(proj_dict)
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="Sau 7 năm phát triển, năm 2019, CLB Taekwondo Văn Quán chính thức sử dụng tên: HỆ THỐNG TAEKWONDO VĂN QUÁN.",
+            content_hash="h0",
+            token_count=22,
+            source_anchor="doc#0",
+        )
+    ]
+    # LLM synthesized a descriptive note that is not a verbatim substring of source
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [{"tempId": "org_1", "className": "organization"}],
+        "chunks": [
+            {
+                "chunkIndex": 0,
+                "claims": [
+                    {
+                        "claimId": "c0",
+                        "statement": "Tên tổ chức",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "name",
+                            "value": "HỆ THỐNG TAEKWONDO VĂN QUÁN",
+                        },
+                    },
+                    {
+                        "claimId": "c1",
+                        "statement": "Ghi chú lịch sử",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:1"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "notes",
+                            "value": "Chính thức sử dụng tên HỆ THỐNG TAEKWONDO VĂN QUÁN vào năm 2019",
+                        },
+                    },
+                ],
+            }
+        ],
+    })
+    result = compiler.compile(
+        extraction=extraction,
+        ontology_projection=projection,
+        source_chunks=source_chunks,
+    )
+    assert result.errors == []
+    assert result.fragment is not None
+    notes_prop = next(p for p in result.fragment.nodes[0].properties if p.property_name == "notes")
+    assert notes_prop.value == "Chính thức sử dụng tên HỆ THỐNG TAEKWONDO VĂN QUÁN vào năm 2019"
+    assert notes_prop.value_verified is False
+
+
+def test_grounding_case_5_semantic_with_invalid_evidenceref_fails():
+    """Case 5: Even with SEMANTIC policy, an invalid or missing evidenceRef fails provenance check."""
+    compiler = BatchClaimCompiler()
+    proj_dict = _sample_projection().model_dump(by_alias=True)
+    proj_dict["properties"].append({
+        "id": "p_org_notes",
+        "entityType": "organization",
+        "technicalName": "notes",
+        "dataType": "STRING",
+    })
+    projection = OntologyProjection.model_validate(proj_dict)
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="Văn bản thực tế của chunk 0.",
+            content_hash="h0",
+            token_count=7,
+            source_anchor="doc#0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [{"tempId": "org_1", "className": "organization"}],
+        "chunks": [
+            {
+                "chunkIndex": 0,
+                "claims": [
+                    {
+                        "claimId": "c0",
+                        "statement": "Tên tổ chức",
+                        "evidence": {"chunkIndex": 0, "evidenceRef": "chunk:0:line:999"},
+                        "outcome": "MAPPED",
+                        "mapping": {
+                            "kind": "PROPERTY",
+                            "entityRef": "org_1",
+                            "propertyName": "notes",
+                            "value": "Một ghi chú bất kỳ",
+                        },
+                    }
+                ],
+            }
+        ],
+    })
+    result = compiler.compile(
+        extraction=extraction,
+        ontology_projection=projection,
+        source_chunks=source_chunks,
+    )
+    assert any(err["code"] == "EVIDENCE_REF_NOT_FOUND" for err in result.errors)
+
+
+def test_unknown_relationship_auto_downgraded_to_schema_gap():
+    """A MAPPED claim with an unknown edgeName becomes a relationship schema gap."""
+    compiler = BatchClaimCompiler()
+    projection = _sample_projection()
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="CLB Taekwondo was created by Coach Lich.",
+            content_hash="h0",
+            token_count=10,
+            source_anchor="anchor0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [
+            {"tempId": "org_1", "className": "organization"},
+            {"tempId": "person_1", "className": "person"},
+        ],
+        "chunks": [{
+            "chunkIndex": 0,
+            "claims": [
+                {
+                    "claimId": "c_org_name",
+                    "statement": "Organization name",
+                    "evidence": {"chunkIndex": 0, "text": "CLB Taekwondo"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "PROPERTY",
+                        "entityRef": "org_1",
+                        "propertyName": "name",
+                        "value": "CLB Taekwondo",
+                    },
+                },
+                {
+                    "claimId": "c_person_name",
+                    "statement": "Coach name",
+                    "evidence": {"chunkIndex": 0, "text": "Coach Lich"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "PROPERTY",
+                        "entityRef": "person_1",
+                        "propertyName": "name",
+                        "value": "Coach Lich",
+                    },
+                },
+                {
+                    "claimId": "c_rel",
+                    "statement": "created_by Coach Lich",
+                    "evidence": {"chunkIndex": 0, "text": "created by Coach Lich"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "EDGE",
+                        "edgeName": "created_by",
+                        "sourceRef": "org_1",
+                        "targetRef": "person_1",
+                    },
+                },
+            ],
+        }],
+    })
+
+    result = compiler.compile(extraction, projection, source_chunks=source_chunks)
+
+    assert result.errors == []
+    assert len(result.schema_gaps) == 1
+    gap = result.schema_gaps[0]
+    assert gap["kind"] == "RELATIONSHIP"
+    assert gap["technicalName"] == "created_by"
+    assert gap["sourceRef"] == "org_1"
+    assert gap["targetRef"] == "person_1"
+    assert any("created_by" in warning for warning in result.warnings)
+
+
+def test_unknown_property_auto_downgraded_to_schema_gap():
+    """A MAPPED claim with an unknown propertyName becomes a property schema gap."""
+    compiler = BatchClaimCompiler()
+    projection = _sample_projection()
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="CLB Taekwondo Van Quan has 6 facilities.",
+            content_hash="h0",
+            token_count=10,
+            source_anchor="anchor0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [{"tempId": "org_1", "className": "organization"}],
+        "chunks": [{
+            "chunkIndex": 0,
+            "claims": [
+                {
+                    "claimId": "c_name",
+                    "statement": "Organization name",
+                    "evidence": {"chunkIndex": 0, "text": "CLB Taekwondo Van Quan"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "PROPERTY",
+                        "entityRef": "org_1",
+                        "propertyName": "name",
+                        "value": "CLB Taekwondo Van Quan",
+                    },
+                },
+                {
+                    "claimId": "c_count",
+                    "statement": "Facility count: 6",
+                    "evidence": {"chunkIndex": 0, "text": "has 6 facilities"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "PROPERTY",
+                        "entityRef": "org_1",
+                        "propertyName": "facility_count",
+                        "value": 6,
+                    },
+                },
+            ],
+        }],
+    })
+
+    result = compiler.compile(extraction, projection, source_chunks=source_chunks)
+
+    assert result.errors == []
+    assert len(result.schema_gaps) == 1
+    gap = result.schema_gaps[0]
+    assert gap["kind"] == "PROPERTY"
+    assert gap["technicalName"] == "facility_count"
+    assert gap["entityRef"] == "org_1"
+    assert gap["value"] == 6
+    assert any("facility_count" in warning for warning in result.warnings)
+
+
+def test_mixed_mapped_and_unknown_relationship_partially_mapped():
+    """A valid mapped claim plus an unknown relationship produces partial coverage."""
+    compiler = BatchClaimCompiler()
+    projection = _sample_projection()
+    source_chunks = [
+        PreparedChunk(
+            chunk_id="c0",
+            chunk_index=0,
+            text="CLB Taekwondo was created by Coach Lich.",
+            content_hash="h0",
+            token_count=10,
+            source_anchor="anchor0",
+        )
+    ]
+    extraction = SemanticBatchExtraction.model_validate({
+        "entities": [
+            {"tempId": "org_1", "className": "organization"},
+            {"tempId": "person_1", "className": "person"},
+        ],
+        "chunks": [{
+            "chunkIndex": 0,
+            "claims": [
+                {
+                    "claimId": "c_org_name",
+                    "statement": "Organization name",
+                    "evidence": {"chunkIndex": 0, "text": "CLB Taekwondo"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "PROPERTY",
+                        "entityRef": "org_1",
+                        "propertyName": "name",
+                        "value": "CLB Taekwondo",
+                    },
+                },
+                {
+                    "claimId": "c_person_name",
+                    "statement": "Coach name",
+                    "evidence": {"chunkIndex": 0, "text": "Coach Lich"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "PROPERTY",
+                        "entityRef": "person_1",
+                        "propertyName": "name",
+                        "value": "Coach Lich",
+                    },
+                },
+                {
+                    "claimId": "c_rel",
+                    "statement": "created_by Coach Lich",
+                    "evidence": {"chunkIndex": 0, "text": "created by Coach Lich"},
+                    "outcome": "MAPPED",
+                    "mapping": {
+                        "kind": "EDGE",
+                        "edgeName": "created_by",
+                        "sourceRef": "org_1",
+                        "targetRef": "person_1",
+                    },
+                },
+            ],
+        }],
+    })
+
+    result = compiler.compile(extraction, projection, source_chunks=source_chunks)
+
+    assert result.errors == []
+    assert result.fragment is not None
+    assert len(result.fragment.nodes) == 2
+    assert result.schema_gaps
+    assert result.fragment.coverage[0].decision == "PARTIALLY_MAPPED"
+
+
 def test_proposal_lookup_fallback_by_ingestion_id():
     """Verify that review_proposal and apply_proposal can resolve a proposal by its source_ingestion_id."""
     async def scenario():
         container = await get_service_container()
-        ingestion_id = "test-proposal-fallback-" + uuid.uuid4().hex[:8]
+        unique_suffix = uuid.uuid4().hex[:6]
+        ingestion_id = "test-proposal-fallback-" + unique_suffix
         active_version = await container.ontology_lifecycle._cache.active_version()
 
+        test_prop_name = f"test_prop_{unique_suffix}"
         proposal = await container.ontology_lifecycle.create_proposal(
             ingestion_id=ingestion_id,
             batch_index=1,
             ontology_version_id=str(active_version.version_id),
             source_document_id=None,
             proposal_type="NEW_PROPERTY",
-            technical_name="anniversary_date",
+            technical_name=test_prop_name,
             reason="Test anniversary date",
             payload={
-                "displayName": "Ngày kỷ niệm",
+                "displayName": "Thuộc tính thử nghiệm",
                 "entityType": "organization",
                 "dataType": "STRING",
-                "technicalName": "anniversary_date",
+                "technicalName": test_prop_name,
                 "required": False,
             },
             evidence={"chunkIndex": 6, "quote": "Ngày kỷ niệm"},
@@ -938,9 +1422,9 @@ def test_proposal_lookup_fallback_by_ingestion_id():
         assert reviewed.id == proposal.id
         assert reviewed.status.value == "APPROVED"
 
-        # 2. Apply proposal using ingestion_id
+        # 2. Apply proposal using technical_name fallback
         applied_version = await container.ontology_lifecycle.apply_proposal(
-            ingestion_id, new_version_code=f"v_test_{uuid.uuid4().hex[:6]}", applied_by="tester"
+            test_prop_name, new_version_code=f"v_test_{uuid.uuid4().hex[:6]}", applied_by="tester"
         )
         assert applied_version is not None
         assert applied_version.status.value == "ACTIVE"

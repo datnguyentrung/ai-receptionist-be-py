@@ -20,6 +20,7 @@ from app.schemas.ingestion_schema import (
 from app.services.ingestion.evidence_guard import (
     EvidenceGroundingEngine,
     property_value_supported_by_evidence,
+    validate_property_grounding,
 )
 from app.services.ingestion.identity_resolver import (
     IdentityResolutionError,
@@ -196,6 +197,7 @@ class BatchClaimCompiler:
         mapped_properties_by_entity: dict[str, list[PropertyFact]] = {}
         mapped_edges: list[GraphEdge] = []
         duplicate_claims_by_chunk: dict[int, list[DuplicateFactClaim]] = {}
+        auto_downgraded_schema_gap_claim_ids: set[str] = set()
 
         for chunk_ledger in extraction.chunks:
             source_chunk = chunk_by_index.get(chunk_ledger.chunk_index)
@@ -264,15 +266,30 @@ class BatchClaimCompiler:
                         )
                         contract = registry.properties.get((entity_class, canonical_prop))
                         if contract is None:
-                            errors.append({
-                                "code": "UNKNOWN_PROPERTY",
-                                "message": (
-                                    f"Property '{claim.mapping.property_name}' is not defined for "
-                                    f"entity '{entity_class}'"
+                            warnings.append(
+                                f"Claim '{claim.claim_id}': property "
+                                f"'{claim.mapping.property_name}' unknown for entity "
+                                f"'{entity_class}' - auto-downgraded to SCHEMA_GAP"
+                            )
+                            gap_data = {
+                                "kind": "PROPERTY",
+                                "entityRef": claim.mapping.entity_ref,
+                                "entityType": entity_class,
+                                "technicalName": canonical_prop,
+                                "displayName": claim.mapping.property_name,
+                                "dataType": "STRING",
+                                "value": claim.mapping.value,
+                                "reason": (
+                                    f"Property '{claim.mapping.property_name}' is not defined "
+                                    f"for entity '{entity_class}' in the current ontology. "
+                                    f"Auto-downgraded from MAPPED."
                                 ),
-                                "location": f"claims.{claim.claim_id}.mapping.propertyName",
-                                "retryable": False,
-                            })
+                                "claimId": claim.claim_id,
+                                "statement": claim.statement,
+                                "evidence": claim.evidence.model_dump(by_alias=True, mode="json"),
+                            }
+                            schema_gaps.append(gap_data)
+                            auto_downgraded_schema_gap_claim_ids.add(claim.claim_id)
                             continue
 
                         if not _matches_contract(claim.mapping.value, contract):
@@ -287,12 +304,14 @@ class BatchClaimCompiler:
                             })
                             continue
 
-                        if not property_value_supported_by_evidence(
-                            claim.mapping.value, claim.evidence.text
-                        ):
+                        grounding_res = validate_property_grounding(
+                            claim.mapping.value, claim.evidence.text, contract
+                        )
+                        if not grounding_res.valid:
                             errors.append({
-                                "code": "PROPERTY_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
+                                "code": grounding_res.error_code or "PROPERTY_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
                                 "message": (
+                                    grounding_res.error_message or
                                     f"Property '{canonical_prop}' value {claim.mapping.value!r} "
                                     f"cannot be recovered deterministically from claim "
                                     f"'{claim.claim_id}' evidence"
@@ -306,6 +325,7 @@ class BatchClaimCompiler:
                             property_name=canonical_prop,
                             value=claim.mapping.value,
                             evidence=[claim.evidence],
+                            value_verified=grounding_res.value_verified,
                         )
                         mapped_properties_by_entity.setdefault(entity_ref, []).append(prop_fact)
 
@@ -332,12 +352,30 @@ class BatchClaimCompiler:
                         )
                         rel_contracts = registry.relationships.get(canonical_edge)
                         if not rel_contracts:
-                            errors.append({
-                                "code": "UNKNOWN_RELATIONSHIP",
-                                "message": f"Relationship '{claim.mapping.edge_name}' is unknown in ontology",
-                                "location": f"claims.{claim.claim_id}.mapping.edgeName",
-                                "retryable": False,
-                            })
+                            warnings.append(
+                                f"Claim '{claim.claim_id}': relationship "
+                                f"'{claim.mapping.edge_name}' unknown in ontology - "
+                                f"auto-downgraded to SCHEMA_GAP"
+                            )
+                            gap_data = {
+                                "kind": "RELATIONSHIP",
+                                "technicalName": canonical_edge,
+                                "displayName": claim.mapping.edge_name,
+                                "sourceRef": claim.mapping.source_ref,
+                                "targetRef": claim.mapping.target_ref,
+                                "sourceEntityType": source_class,
+                                "targetEntityType": target_class,
+                                "cardinality": "MANY_TO_MANY",
+                                "reason": (
+                                    f"Relationship '{claim.mapping.edge_name}' does not exist "
+                                    f"in the current ontology. Auto-downgraded from MAPPED."
+                                ),
+                                "claimId": claim.claim_id,
+                                "statement": claim.statement,
+                                "evidence": claim.evidence.model_dump(by_alias=True, mode="json"),
+                            }
+                            schema_gaps.append(gap_data)
+                            auto_downgraded_schema_gap_claim_ids.add(claim.claim_id)
                             continue
 
                         matching = registry.relationships_by_signature.get(
@@ -395,25 +433,43 @@ class BatchClaimCompiler:
                         if (
                             claim.schema_gap.kind == "PROPERTY"
                             and claim.schema_gap.value is not None
-                            and not property_value_supported_by_evidence(
-                                claim.schema_gap.value, claim.evidence.text
-                            )
                         ):
-                            errors.append({
-                                "code": "SCHEMA_GAP_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
-                                "message": (
-                                    f"Schema-gap value {claim.schema_gap.value!r} cannot be "
-                                    f"recovered deterministically from claim "
-                                    f"'{claim.claim_id}' evidence"
-                                ),
-                                "location": f"claims.{claim.claim_id}.schemaGap.value",
-                                "retryable": False,
-                            })
-                            continue
+                            gap_contract = {
+                                "dataType": claim.schema_gap.data_type,
+                                "technicalName": claim.schema_gap.technical_name,
+                                "constraints": {},
+                            }
+                            gap_grounding = validate_property_grounding(
+                                claim.schema_gap.value, claim.evidence.text, gap_contract
+                            )
+                            if not gap_grounding.valid:
+                                errors.append({
+                                    "code": "SCHEMA_GAP_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
+                                    "message": (
+                                        gap_grounding.error_message or
+                                        f"Schema-gap value {claim.schema_gap.value!r} cannot be "
+                                        f"recovered deterministically from claim "
+                                        f"'{claim.claim_id}' evidence"
+                                    ),
+                                    "location": f"claims.{claim.claim_id}.schemaGap.value",
+                                    "retryable": False,
+                                })
+                                continue
                         gap_data = claim.schema_gap.model_dump(by_alias=True, mode="json")
                         gap_data["claimId"] = claim.claim_id
                         gap_data["statement"] = claim.statement
                         gap_data["evidence"] = claim.evidence.model_dump(by_alias=True, mode="json")
+                        if claim.schema_gap.kind == "PROPERTY":
+                            entity_class = resolve_entity_class(claim.schema_gap.entity_ref)
+                            if entity_class:
+                                gap_data["entityType"] = entity_class
+                        elif claim.schema_gap.kind == "RELATIONSHIP":
+                            source_class = resolve_entity_class(claim.schema_gap.source_ref)
+                            target_class = resolve_entity_class(claim.schema_gap.target_ref)
+                            if source_class:
+                                gap_data["sourceEntityType"] = source_class
+                            if target_class:
+                                gap_data["targetEntityType"] = target_class
                         schema_gaps.append(gap_data)
 
                 elif claim.outcome == "AMBIGUOUS":
@@ -468,7 +524,10 @@ class BatchClaimCompiler:
                 decision = "NO_RELEVANT_FACT"
                 reason = chunk_ledger.no_relevant_fact_reason or "No relevant facts identified in chunk"
             else:
-                outcomes = {c.outcome for c in claims}
+                outcomes = {
+                    "SCHEMA_GAP" if c.claim_id in auto_downgraded_schema_gap_claim_ids else c.outcome
+                    for c in claims
+                }
                 if outcomes == {"MAPPED"}:
                     decision = "MAPPED"
                     reason = "All claims mapped to ontology"

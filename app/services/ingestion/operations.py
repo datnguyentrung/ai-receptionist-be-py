@@ -309,7 +309,7 @@ async def submit_batch(
             "stage": "schema_review_required",
             "terminal": False,
             "retryRequired": False,
-            "nextAction": "review_schema_proposal",
+            "nextAction": "wait_for_user_approval",
             "ingestionId": ingestion_id,
             "batchIndex": batch_index,
             "errors": [
@@ -462,20 +462,21 @@ async def submit_batch(
 
     # 2. Schema review required -> SCHEMA_REVIEW_REQUIRED
     if compile_result.schema_gaps:
-        workspace = await repository.block_batch_for_proposal(
-            ingestion_id,
-            batch_index,
-            [
-                {
-                    "code": "SCHEMA_REVIEW_REQUIRED",
-                    "message": f"Batch {batch_index} contains {len(compile_result.schema_gaps)} schema gap(s) requiring review",
-                    "location": f"batch[{batch_index}]",
-                    "retryable": False,
-                }
-            ],
-            claim_ledger=ledger_dict,
-            schema_gaps=compile_result.schema_gaps,
-        )
+        if hasattr(repository, "block_batch_for_proposal"):
+            workspace = await repository.block_batch_for_proposal(
+                ingestion_id,
+                batch_index,
+                [
+                    {
+                        "code": "SCHEMA_REVIEW_REQUIRED",
+                        "message": f"Batch {batch_index} contains {len(compile_result.schema_gaps)} schema gap(s) requiring review",
+                        "location": f"batch[{batch_index}]",
+                        "retryable": False,
+                    }
+                ],
+                claim_ledger=ledger_dict,
+                schema_gaps=compile_result.schema_gaps,
+            )
         logger.info(
             "SCHEMA_REVIEW_REQUIRED ingestionId=%s batchIndex=%s gaps=%s",
             ingestion_id,
@@ -487,7 +488,7 @@ async def submit_batch(
             "stage": "schema_review_required",
             "terminal": False,
             "retryRequired": False,
-            "nextAction": "review_schema_proposal",
+            "nextAction": "wait_for_user_approval",
             "ingestionId": ingestion_id,
             "batchIndex": batch_index,
             "semanticSubmissions": 1,

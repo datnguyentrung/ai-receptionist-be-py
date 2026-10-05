@@ -77,6 +77,7 @@ class PropertyFact(IngestionModel):
     property_name: str = Field(min_length=1)
     value: Any
     evidence: list[Evidence] = Field(min_length=1)
+    value_verified: bool | None = None
 
 
 class SemanticGraphNode(IngestionModel):
@@ -186,6 +187,7 @@ ClaimMapping = Annotated[
 class PropertySchemaGap(IngestionModel):
     kind: Literal["PROPERTY"] = "PROPERTY"
     entity_ref: str = Field(min_length=1)
+    entity_type: str | None = Field(default=None)
     technical_name: str = Field(min_length=1)
     display_name: str = Field(default="")
     data_type: str = Field(default="STRING")
@@ -199,6 +201,8 @@ class RelationshipSchemaGap(IngestionModel):
     display_name: str = Field(default="")
     source_ref: str = Field(min_length=1)
     target_ref: str = Field(min_length=1)
+    source_entity_type: str | None = Field(default=None)
+    target_entity_type: str | None = Field(default=None)
     cardinality: str = Field(default="MANY_TO_MANY")
     reason: str = Field(default="")
 
