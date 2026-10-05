@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -153,6 +153,19 @@ class OntologyLifecycle:
             if prop is not None:
                 return prop
 
+        # 4. Technical Name match (fallback if technical_name was passed, e.g. "facility_count")
+        query = select(OntologySchemaProposal).where(
+            func.lower(OntologySchemaProposal.technical_name) == raw_id.casefold()
+        )
+        if preferred_status is not None:
+            query = query.where(OntologySchemaProposal.status == preferred_status)
+        query = query.order_by(OntologySchemaProposal.created_at.desc())
+        if for_update:
+            query = query.with_for_update()
+        prop = await session.scalar(query)
+        if prop is not None:
+            return prop
+
         return None
 
     async def review_proposal(
@@ -193,7 +206,11 @@ class OntologyLifecycle:
             if proposal.status != SchemaProposalStatus.APPROVED:
                 raise ValueError("Only an APPROVED proposal can be applied")
             if await session.scalar(select(OntologyVersion).where(OntologyVersion.version == new_version_code)):
-                raise ValueError(f"Ontology version already exists: {new_version_code}")
+                base_code = new_version_code
+                counter = 1
+                while await session.scalar(select(OntologyVersion).where(OntologyVersion.version == f"{base_code}.{counter}")):
+                    counter += 1
+                new_version_code = f"{base_code}.{counter}"
             active = await session.scalar(
                 select(OntologyVersion)
                 .where(OntologyVersion.status == OntologyVersionStatus.ACTIVE)
@@ -375,20 +392,39 @@ class OntologyLifecycle:
                 ))
             return
         if kind == SchemaProposalType.NEW_PROPERTY:
-            entity = (await self._entities_by_names(session, version_id, [payload["entityType"]]))[0]
+            entity_type_name = (
+                payload.get("entityType")
+                or payload.get("entity_type")
+                or payload.get("sourceEntityType")
+                or payload.get("source_entity_type")
+                or payload.get("entityRef")
+            )
+            if not entity_type_name:
+                raise KeyError(f"entityType is required in proposal payload: {payload}")
+            entity = (await self._entities_by_names(session, version_id, [entity_type_name]))[0]
             session.add(OntologyProperty(
                 ontology_version_id=version_id, entity_type_id=entity.id,
                 technical_name=payload["technicalName"],
                 display_name=payload.get("displayName", payload["technicalName"]),
                 description=payload.get("description"),
-                data_type=OntologyPropertyDataType(payload["dataType"]),
+                data_type=OntologyPropertyDataType(payload.get("dataType", "STRING")),
                 required=payload.get("required", False), multi_value=payload.get("multiValue", False),
                 constraints=payload.get("constraints", {}),
             ))
             return
         if kind == SchemaProposalType.NEW_RELATIONSHIP:
+            source_type_name = (
+                payload.get("sourceEntityType")
+                or payload.get("source_entity_type")
+                or payload.get("sourceRef")
+            )
+            target_type_name = (
+                payload.get("targetEntityType")
+                or payload.get("target_entity_type")
+                or payload.get("targetRef")
+            )
             source, target = await self._entities_by_names(
-                session, version_id, [payload["sourceEntityType"], payload["targetEntityType"]]
+                session, version_id, [source_type_name, target_type_name]
             )
             session.add(OntologyRelationship(
                 ontology_version_id=version_id, technical_name=payload["technicalName"],

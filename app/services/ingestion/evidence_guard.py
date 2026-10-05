@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from typing import Any
 
 from app.schemas.ingestion_schema import (
@@ -358,28 +359,163 @@ class EvidenceGroundingEngine:
         )
 
 
-def property_value_supported_by_evidence(value: Any, evidence_text: str) -> bool:
-    """Strict deterministic check that a PROPERTY value is recoverable from its evidence.
+class GroundingPolicy(str, Enum):
+    """Grounding verification policy for an ontology property."""
 
-    No semantic inference is attempted. This intentionally favors precision over recall.
+    VERBATIM = "VERBATIM"
+    NORMALIZED = "NORMALIZED"
+    SEMANTIC = "SEMANTIC"
+
+
+@dataclass(frozen=True)
+class PropertyGroundingResult:
+    """Explicit result of verifying a property value against its evidence."""
+
+    valid: bool
+    policy: str
+    error_code: str | None = None
+    error_message: str | None = None
+    provenance_verified: bool = True
+    value_verified: bool = True
+
+
+def resolve_grounding_policy(contract: dict[str, Any] | None) -> str:
+    """Resolve the grounding policy for a property contract.
+
+    Precedence:
+    1. Explicit 'groundingPolicy' in property contract constraints.
+    2. Data types INTEGER, FLOAT, DATE, DATETIME, BOOLEAN -> NORMALIZED.
+    3. Descriptive property names (notes, description, summary, comment, reason, bio, content) -> SEMANTIC.
+    4. Default -> VERBATIM (names, codes, emails, phones, identifiers, literals).
     """
+    if not contract:
+        return GroundingPolicy.VERBATIM.value
+
+    constraints = contract.get("constraints") or {}
+    if "groundingPolicy" in constraints:
+        policy_str = str(constraints["groundingPolicy"]).strip().upper()
+        if policy_str in GroundingPolicy.__members__:
+            return policy_str
+
+    data_type = contract.get("dataType", "STRING")
+    technical_name = (contract.get("technicalName") or "").strip().lower()
+    if (
+        data_type in ("INTEGER", "FLOAT", "DATE", "DATETIME", "BOOLEAN")
+        or technical_name.endswith(("_date", "_time", "_at"))
+    ):
+        return GroundingPolicy.NORMALIZED.value
+
+    if technical_name in (
+        "notes",
+        "description",
+        "summary",
+        "comment",
+        "reason",
+        "bio",
+        "content",
+    ):
+        return GroundingPolicy.SEMANTIC.value
+
+    return GroundingPolicy.VERBATIM.value
+
+
+def validate_property_grounding(
+    value: Any,
+    evidence_text: str,
+    contract: dict[str, Any] | None = None,
+) -> PropertyGroundingResult:
+    """Deterministic validation of a property value against its evidence under its policy.
+
+    Architecture invariant:
+    - Provenance (evidence existence and grounding) is always mandatory.
+    - VERBATIM checks literal string presence (exact or normalized whitespace/casefold).
+    - NORMALIZED checks deterministic type extraction (integers, floats, dates, booleans).
+    - SEMANTIC enforces strict provenance, but delegates semantic natural language extraction
+      to the language model without heuristic lexical substring matching.
+    """
+    policy = resolve_grounding_policy(contract)
+
+    # 1. Provenance check: Evidence text must exist and value must not be None
     if not evidence_text or not evidence_text.strip() or value is None:
-        return False
-    if isinstance(value, list):
-        return bool(value) and all(
-            property_value_supported_by_evidence(item, evidence_text) for item in value
+        return PropertyGroundingResult(
+            valid=False,
+            policy=policy,
+            error_code="PROPERTY_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
+            error_message="Evidence text is empty or property value is None",
+            provenance_verified=False,
+            value_verified=False,
         )
+
+    # 2. SEMANTIC policy: Code strictly checks provenance; semantic validity is LLM-governed
+    if policy == GroundingPolicy.SEMANTIC.value:
+        return PropertyGroundingResult(
+            valid=True,
+            policy=policy,
+            error_code=None,
+            error_message=None,
+            provenance_verified=True,
+            value_verified=False,
+        )
+
+    # 3. NORMALIZED policy: Deterministic extraction / representation
+    if policy == GroundingPolicy.NORMALIZED.value:
+        matched = _normalized_value_in_text(value, evidence_text)
+        if matched:
+            return PropertyGroundingResult(
+                valid=True,
+                policy=policy,
+                error_code=None,
+                error_message=None,
+                provenance_verified=True,
+                value_verified=True,
+            )
+        prop_name = contract.get("technicalName", "property") if contract else "property"
+        return PropertyGroundingResult(
+            valid=False,
+            policy=policy,
+            error_code="PROPERTY_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
+            error_message=(
+                f"Property '{prop_name}' normalized value {value!r} cannot be "
+                f"recovered deterministically from evidence"
+            ),
+            provenance_verified=True,
+            value_verified=False,
+        )
+
+    # 4. VERBATIM policy: Literal presence (with whitespace/casing normalization)
+    matched = _verbatim_value_in_text(value, evidence_text)
+    if matched:
+        return PropertyGroundingResult(
+            valid=True,
+            policy=policy,
+            error_code=None,
+            error_message=None,
+            provenance_verified=True,
+            value_verified=True,
+        )
+
+    prop_name = contract.get("technicalName", "property") if contract else "property"
+    return PropertyGroundingResult(
+        valid=False,
+        policy=policy,
+        error_code="PROPERTY_VALUE_NOT_SUPPORTED_BY_EVIDENCE",
+        error_message=(
+            f"Property '{prop_name}' value {value!r} cannot be recovered "
+            f"deterministically from evidence"
+        ),
+        provenance_verified=True,
+        value_verified=False,
+    )
+
+
+def _verbatim_value_in_text(value: Any, evidence_text: str) -> bool:
+    if isinstance(value, list):
+        return bool(value) and all(_verbatim_value_in_text(item, evidence_text) for item in value)
     if isinstance(value, dict):
         scalar_values = list(_iter_scalar_values(value))
         return bool(scalar_values) and all(
-            property_value_supported_by_evidence(item, evidence_text)
-            for item in scalar_values
+            _verbatim_value_in_text(item, evidence_text) for item in scalar_values
         )
-    if isinstance(value, bool):
-        expected = "true" if value else "false"
-        return re.search(rf"(?<!\w){expected}(?!\w)", evidence_text, re.IGNORECASE) is not None
-    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
-        return _numeric_value_in_text(value, evidence_text)
 
     rendered = str(value).strip()
     if not rendered:
@@ -411,6 +547,58 @@ def property_value_supported_by_evidence(value: Any, evidence_text: str) -> bool
             return True
 
     return False
+
+
+def _normalized_value_in_text(value: Any, evidence_text: str) -> bool:
+    if isinstance(value, list):
+        return bool(value) and all(_normalized_value_in_text(item, evidence_text) for item in value)
+    if isinstance(value, dict):
+        scalar_values = list(_iter_scalar_values(value))
+        return bool(scalar_values) and all(
+            _normalized_value_in_text(item, evidence_text) for item in scalar_values
+        )
+
+    if isinstance(value, bool):
+        expected = "true" if value else "false"
+        return re.search(rf"(?<!\w){expected}(?!\w)", evidence_text, re.IGNORECASE) is not None
+
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return _numeric_value_in_text(value, evidence_text)
+
+    rendered = str(value).strip()
+    if not rendered:
+        return False
+
+    iso_date = _parse_iso_date(rendered)
+    if iso_date is not None:
+        plain_evidence = _normalize_semantic_surface(evidence_text)
+        date_forms = {
+            iso_date.isoformat(),
+            f"{iso_date.day:02d}/{iso_date.month:02d}/{iso_date.year:04d}",
+            f"{iso_date.day}/{iso_date.month}/{iso_date.year:04d}",
+            f"{iso_date.day:02d}-{iso_date.month:02d}-{iso_date.year:04d}",
+            f"{iso_date.day}-{iso_date.month}-{iso_date.year:04d}",
+            f"{iso_date.day:02d}.{iso_date.month:02d}.{iso_date.year:04d}",
+            f"ngày {iso_date.day} tháng {iso_date.month} năm {iso_date.year}",
+        }
+        normalized_forms = {_normalize_semantic_surface(item) for item in date_forms}
+        if any(item and item in plain_evidence for item in normalized_forms):
+            return True
+
+    return _verbatim_value_in_text(value, evidence_text)
+
+
+def property_value_supported_by_evidence(value: Any, evidence_text: str) -> bool:
+    """Backward-compatible helper: checks verbatim or normalized support without contract."""
+    if not evidence_text or not evidence_text.strip() or value is None:
+        return False
+    if (
+        isinstance(value, bool)
+        or (isinstance(value, (int, float, Decimal)) and not isinstance(value, bool))
+        or _parse_iso_date(str(value).strip()) is not None
+    ):
+        return _normalized_value_in_text(value, evidence_text)
+    return _verbatim_value_in_text(value, evidence_text)
 
 
 def _normalize_semantic_surface(value: str) -> str:
@@ -602,10 +790,14 @@ __all__ = [
     "EvidenceGroundingEngine",
     "EvidenceGroundingResult",
     "GraphFragmentEvidenceGuard",
+    "GroundingPolicy",
+    "PropertyGroundingResult",
     "canonical_bullet_excerpt",
     "canonical_markdown_excerpt",
     "canonical_prefix_completion_excerpt",
     "canonical_table_excerpt",
     "canonical_whitespace_excerpt",
     "property_value_supported_by_evidence",
+    "resolve_grounding_policy",
+    "validate_property_grounding",
 ]

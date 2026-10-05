@@ -203,6 +203,51 @@ async def submit_ingestion_batch(
             actual_payload,
         )
 
+        if result.get("stage") == "schema_review_required" and result.get("schemaGaps"):
+            try:
+                workspace = await operations.required_workspace(container.repository, ingestion_id)
+                enriched_gaps = []
+                for gap in result.get("schemaGaps", []):
+                    tech_name = gap.get("technicalName")
+                    gap_kind = gap.get("kind")
+                    prop_type = (
+                        "NEW_PROPERTY" if gap_kind == "PROPERTY"
+                        else "NEW_RELATIONSHIP" if gap_kind == "RELATIONSHIP"
+                        else "NEW_ENTITY_TYPE" if gap_kind == "ENTITY"
+                        else "NEW_PROPERTY"
+                    )
+                    payload_gap = dict(gap)
+                    if gap_kind == "PROPERTY" and not payload_gap.get("entityType"):
+                        ref = payload_gap.get("entityRef") or payload_gap.get("entity_ref")
+                        for ent in (actual_payload.entities if hasattr(actual_payload, "entities") else payload_dict.get("entities", [])):
+                            t_id = ent.temp_id if hasattr(ent, "temp_id") else ent.get("tempId") or ent.get("temp_id")
+                            c_name = ent.class_name if hasattr(ent, "class_name") else ent.get("className") or ent.get("class_name")
+                            if t_id == ref and c_name:
+                                payload_gap["entityType"] = c_name
+                                break
+                    try:
+                        proposal = await container.ontology_lifecycle.create_proposal(
+                            ingestion_id=ingestion_id,
+                            batch_index=batch_index,
+                            ontology_version_id=str(workspace.job.ontology_version_id),
+                            source_document_id=str(workspace.version.id) if getattr(workspace, "version", None) else None,
+                            proposal_type=prop_type,
+                            technical_name=tech_name,
+                            reason=gap.get("reason") or "Phát hiện schema gap trong quá trình trích xuất tài liệu",
+                            payload=payload_gap,
+                            evidence=gap.get("evidence") or {},
+                            affected_scope_keys=scope_keys,
+                        )
+                        gap_copy = dict(gap)
+                        gap_copy["proposalId"] = str(proposal.id)
+                        enriched_gaps.append(gap_copy)
+                        tool_context.state["pending_schema_proposal_id"] = str(proposal.id)
+                    except Exception:
+                        enriched_gaps.append(gap)
+                result["schemaGaps"] = enriched_gaps
+            except Exception:
+                pass
+
         tool_context.state["active_ingestion_id"] = ingestion_id
         _store_checkpoint(tool_context, result)
 

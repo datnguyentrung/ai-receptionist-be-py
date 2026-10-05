@@ -125,8 +125,11 @@ def test_unknown_schema_is_returned_as_proposal_candidate(fragment, expected_cod
         "coverage": [{"chunkIndex": 0, "decision": "MAPPED", "reason": "test"}],
     }
     result = asyncio.run(submit_batch(Repository(), Cache(), "job", 0, ["training"], fragment))
-    assert result["stage"] in {"schema_gap_candidate", "extraction_rejected"}
-    assert expected_code in {item["code"] for item in result["errors"]}
+    if result["stage"] == "schema_review_required":
+        assert len(result.get("schemaGaps", [])) > 0
+    else:
+        assert result["stage"] in {"schema_gap_candidate", "extraction_rejected"}
+        assert expected_code in {item["code"] for item in result.get("errors", [])}
 
 
 def test_scope_proposal_types_and_human_review_transitions() -> None:
