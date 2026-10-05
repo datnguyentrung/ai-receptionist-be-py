@@ -24,7 +24,7 @@ from app.models import (
     OntologyVersionStatus,
     RelationshipCardinality,
 )
-from app.services.ontology_compiler import OntologyCompiler
+from app.services.ontology.ontology_compiler import OntologyCompiler
 
 VERSION_CODE = "taekwondo-core-v1"
 
@@ -246,20 +246,30 @@ SCOPE_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 async def _ensure_scopes(session, version: OntologyVersion) -> int:
-    entities = list((await session.scalars(select(OntologyEntityType).where(
-        OntologyEntityType.ontology_version_id == version.id
-    ))).all())
+    entities = list(
+        (
+            await session.scalars(
+                select(OntologyEntityType).where(
+                    OntologyEntityType.ontology_version_id == version.id
+                )
+            )
+        ).all()
+    )
     entity_by_name = {item.technical_name: item for item in entities}
     count = 0
     for key, (description, names) in SCOPE_SPECS.items():
-        scope = await session.scalar(select(OntologyScope).where(
-            OntologyScope.ontology_version_id == version.id,
-            OntologyScope.scope_key == key,
-        ))
+        scope = await session.scalar(
+            select(OntologyScope).where(
+                OntologyScope.ontology_version_id == version.id,
+                OntologyScope.scope_key == key,
+            )
+        )
         if scope is None:
             scope = OntologyScope(
-                ontology_version_id=version.id, scope_key=key,
-                description=description, summary={"entityTypeCount": len(names)},
+                ontology_version_id=version.id,
+                scope_key=key,
+                description=description,
+                summary={"entityTypeCount": len(names)},
             )
             session.add(scope)
             await session.flush()
@@ -267,13 +277,17 @@ async def _ensure_scopes(session, version: OntologyVersion) -> int:
             entity = entity_by_name.get(name)
             if entity is None:
                 continue
-            membership = await session.get(OntologyEntityTypeScope, (scope.id, entity.id))
+            membership = await session.get(
+                OntologyEntityTypeScope, (scope.id, entity.id)
+            )
             if membership is None:
-                session.add(OntologyEntityTypeScope(
-                    ontology_version_id=version.id,
-                    scope_id=scope.id,
-                    entity_type_id=entity.id,
-                ))
+                session.add(
+                    OntologyEntityTypeScope(
+                        ontology_version_id=version.id,
+                        scope_id=scope.id,
+                        entity_type_id=entity.id,
+                    )
+                )
                 count += 1
     await session.flush()
     return count
@@ -292,7 +306,9 @@ async def seed() -> dict[str, Any]:
         )
         if len(active_versions) == 1:
             membership_count = await _ensure_scopes(session, active_versions[0])
-            snapshots = await OntologyCompiler().compile_all(session, active_versions[0].id)
+            snapshots = await OntologyCompiler().compile_all(
+                session, active_versions[0].id
+            )
             await session.commit()
             return {
                 "status": "ensured",
