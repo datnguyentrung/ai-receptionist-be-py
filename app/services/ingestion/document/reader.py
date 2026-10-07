@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from app.core.schemas.ingestion.document import DocumentChunk
+from app.schemas.ingestion import DocumentChunk
 from app.scripts.preprocessing.markdown_preprocessor import (
     MarkdownPreprocessor,
 )
