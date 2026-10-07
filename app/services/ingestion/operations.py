@@ -1,10 +1,49 @@
-"""Deterministic primitives exposed by the ingestion ADK tools.
+"""Các hàm nguyên thủy tất định (deterministic primitives) phục vụ công cụ nạp tài liệu (Ingestion ADK tools).
 
-The semantic control flow intentionally lives in the ingestion SKILL.md.
+Luồng điều khiển ngữ nghĩa (semantic control flow) được định nghĩa trong SKILL.md.
 Phân định vai trò lưu trữ:
 - PostgreSQL: Lưu trữ bền vững ontology/schema, compiled snapshots và schema proposals.
 - RAM (IngestionRepository): Quản lý trạng thái workspace, job, batches và chunks trong tiến trình hiện tại.
 - Neo4j: Lưu trữ bền vững đồ thị tri thức (Knowledge Graph) sau khi nạp chính thức.
+
+================================================================================
+DANH SÁCH CÁC HÀM TRONG MODULE (GOM THEO NHÓM CHỨC NĂNG):
+
+1. Nhóm Core Ingestion Lifecycle (Vòng đời nạp tài liệu & Knowledge Graph):
+   - begin: Khởi tạo/tái sử dụng workspace ingestion, đọc và chia nhỏ tài liệu thành chunks & batches.
+   - get_batch: Lấy thông tin các chunks và ngữ cảnh đồ thị chuẩn hóa (canonical context) của một batch.
+   - submit_batch: Nhận kết quả trích xuất semantic, biên dịch, validate evidence/ontology và lưu staged fragment.
+   - finalize: Kiểm tra tính toàn vẹn độ phủ (coverage integrity) trên toàn bộ batches và đánh dấu workspace sẵn sàng ghi.
+   - fill: Thực hiện ghi chính thức dữ liệu đồ thị từ workspace vào Neo4j và cập nhật trạng thái COMMITTED.
+
+2. Nhóm Ontology & Scope Operations (Quản lý & Tra cứu Ontology / Schema):
+   - list_scopes: Liệt kê danh mục các ontology scopes có sẵn trong phiên bản ontology.
+   - load_scope: Nạp thông tin chi tiết schema projection tương ứng với danh sách scope_keys.
+   - validate_patch: Kiểm tra tính hợp lệ của graph patch độc lập dựa trên ontology projection.
+
+3. Nhóm Quản lý tài liệu & Phiên bản (Document & Version Management):
+   - delete_document: Đánh dấu xóa tài liệu và vô hiệu hóa version tương ứng trong Neo4j.
+   - rollback_version: Đánh dấu rollback phiên bản tài liệu và vô hiệu hóa version trong Neo4j.
+
+4. Nhóm Phân loại lỗi & Xử lý Ontology nội bộ (Ontology Error Classification):
+   - _classify_missing_scopes: Phân loại lỗi ontology khi submit batch (phát hiện thiếu scope hay schema gap).
+   - _missing_scope_issue: Định dạng lỗi khi thuộc tính/thực thể/quan hệ nằm ở scope khác chưa nạp.
+   - _compatible_relationships: Lọc các quan hệ hợp lệ nối giữa hai loại thực thể nguồn và đích.
+
+5. Nhóm Quản lý Workspace & Workflow Guard (Workspace & Workflow Validation):
+   - required_workspace: Lấy workspace từ repository theo ingestion_id (ném lỗi nếu không tồn tại).
+   - workflow_guard_payload: Kiểm tra hành động có hợp lệ với trạng thái hiện tại của job hay không.
+
+6. Nhóm Định dạng phản hồi Payload (Payload Builders & Formatters):
+   - batch_failure_payload: Tạo payload phản hồi khi một batch gặp lỗi hoặc vượt quá số lần thử lại.
+   - status_payload: Tạo payload phản hồi trạng thái hiện tại của workspace ingestion.
+   - error_payload: Tạo payload phản hồi lỗi tiêu chuẩn.
+
+7. Nhóm Tiện ích nội bộ (Internal Helpers):
+   - _document_key: Tạo key định danh tài liệu chuẩn hóa từ tên file.
+   - _canonical_context: Lấy ngữ cảnh các thực thể đã được staged ở các batch trước đó.
+   - _chunks_from_evidence: Tái tạo danh sách PreparedChunk từ evidence của GraphPatchFragment.
+================================================================================
 """
 
 import hashlib
@@ -50,6 +89,34 @@ MAX_BATCH_VALIDATION_ATTEMPTS = max(
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# 1. NHÓM CORE INGESTION LIFECYCLE (VÒNG ĐỜI NẠP TÀI LIỆU & KNOWLEDGE GRAPH)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: begin
+# Chức năng:
+#   - Kiểm tra kích thước tệp và đọc dữ liệu qua DocumentReader để tạo danh sách PreparedChunk.
+#   - Tính mã băm nội dung (content_hash) và lấy phiên bản ontology đang hoạt động.
+#   - Khởi tạo mới hoặc khôi phục workspace trong bộ nhớ RAM (IngestionRepository).
+#   - Phân đoạn các chunk thành các batch theo giới hạn batch_size và max_batch_chars.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - ontology_cache (OntologyCache): Bộ nhớ đệm quản lý các schema ontology.
+#   - artifact_name (str): Tên tệp hoặc artifact cần nạp.
+#   - data (bytes): Dữ liệu nhị phân của tài liệu đầu vào.
+#   - max_file_size (int): Kích thước tối đa cho phép của tệp (bytes).
+#   - chunk_size_chars (int): Số ký tự ước tính cho mỗi chunk.
+#   - batch_size (int): Số lượng chunk tối đa trong mỗi batch.
+#   - skill_digest (str): Mã băm xác thực của skill/prompt nạp dữ liệu.
+#   - model_id (str): Mã định danh mô hình AI thực hiện trích xuất.
+#   - document_key (str | None): Khóa định danh tài liệu tùy chọn.
+#   - scope_hint (str | None): Gợi ý phạm vi ontology ban đầu.
+#   - mime_type (str | None): Định dạng MIME của tài liệu.
+# Output:
+#   - dict[str, Any]: Payload trạng thái workspace (status_payload), bao gồm ingestionId, stage,
+#     thống kê chunks/batches và thông tin batch tiếp theo cần xử lý.
+# ----------------------------------------------------------------------------
 async def begin(
     repository: IngestionRepository,
     ontology_cache: OntologyCache,
@@ -65,7 +132,6 @@ async def begin(
     scope_hint: str | None = None,
     mime_type: str | None = None,
 ) -> dict[str, Any]:
-    """Chuẩn bị tài liệu qua DocumentReader và khởi tạo mới hoặc tái sử dụng workspace ingestion trong RAM."""
     if len(data) > max_file_size:
         raise ValueError(f"Artifact exceeds the {max_file_size}-byte ingestion limit")
     reader = DocumentReader()
@@ -100,6 +166,21 @@ async def begin(
     return status_payload(workspace, resumed=resumed or committed, idempotent=committed)
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: get_batch
+# Chức năng:
+#   - Kiểm tra điều kiện luồng công việc (workflow guard) cho hành động 'get_batch'.
+#   - Truy xuất thông tin batch trong workspace theo batch_index.
+#   - Lấy danh sách PreparedChunk tương ứng và ngữ cảnh thực thể chuẩn hóa (canonical context) từ các batch trước.
+#   - Điều hướng hành động tiếp theo: 'load_scopes' (nếu đã có scopeKeys) hoặc 'list_scopes'.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - ingestion_id (str): Mã định danh phiên nạp tài liệu (job ID).
+#   - batch_index (int): Chỉ số index của batch cần lấy dữ liệu (0-indexed).
+# Output:
+#   - dict[str, Any]: Payload chứa danh sách chunks, scopeHint, selectedScopeKeys, canonicalGraphContext,
+#     stage ('batch_retrieved') và nextAction.
+# ----------------------------------------------------------------------------
 async def get_batch(
     repository: IngestionRepository,
     ingestion_id: str,
@@ -143,6 +224,25 @@ async def get_batch(
     }
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: submit_batch
+# Chức năng:
+#   - Xác thực và biên dịch mảnh đồ thị ngữ nghĩa (SemanticGraphPatchFragment) do AI trích xuất.
+#   - Kiểm tra workflow guard và tính nhất quán của scope_keys khi chạy chế độ sửa chữa (repair).
+#   - Biên dịch ngữ nghĩa thành canonical GraphPatchFragment và xác thực bằng chứng (evidence).
+#   - Kiểm tra tính hợp lệ với ontology và so khớp với baseline đã xác thực trước đó (RepairGuard).
+#   - Nếu có lỗi: phân loại lỗi ontology (_classify_missing_scopes), cập nhật baseline và lưu trạng thái REPAIR_REQUIRED/FAILED.
+#   - Nếu hợp lệ: lưu kết quả với trạng thái STAGED vào workspace.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - ontology_cache (OntologyCache): Bộ nhớ đệm quản lý schema ontology.
+#   - ingestion_id (str): Mã định danh phiên nạp tài liệu.
+#   - batch_index (int): Chỉ số index của batch đang được nộp.
+#   - scope_keys (list[str]): Danh sách khóa ontology scope áp dụng cho batch này.
+#   - semantic_fragment (SemanticGraphPatchFragment): Dữ liệu trích xuất đồ thị ngữ nghĩa ban đầu.
+# Output:
+#   - dict[str, Any]: Payload kết quả xử lý (status_payload nếu thành công hoặc batch_failure_payload nếu có lỗi).
+# ----------------------------------------------------------------------------
 async def submit_batch(
     repository: IngestionRepository,
     ontology_cache: OntologyCache,
@@ -376,6 +476,20 @@ async def submit_batch(
     return result
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: finalize
+# Chức năng:
+#   - Kiểm tra tính hoàn tất và độ phủ bằng chứng (coverage integrity) trên toàn bộ các batch.
+#   - Đảm bảo tất cả batch đều ở trạng thái STAGED (không còn batch lỗi hoặc chờ duyệt schema).
+#   - Nếu phát hiện thiếu sót bằng chứng, đánh dấu batch cần sửa chữa (REPAIR_REQUIRED).
+#   - Nếu toàn bộ hợp lệ, cập nhật trạng thái workspace sang READY kèm readiness_fingerprint.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - ingestion_id (str): Mã định danh phiên nạp tài liệu.
+# Output:
+#   - dict[str, Any]: Payload trạng thái workspace (READY với nextAction='fill' nếu thành công,
+#     hoặc payload yêu cầu sửa đổi/chờ duyệt nếu thất bại).
+# ----------------------------------------------------------------------------
 async def finalize(
     repository: IngestionRepository,
     ingestion_id: str,
@@ -468,12 +582,25 @@ async def finalize(
     )
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: fill
+# Chức năng:
+#   - Ghi chính thức toàn bộ tri thức đồ thị từ workspace vào cơ sở dữ liệu đồ thị Neo4j.
+#   - Kiểm tra điều kiện tiên quyết: workspace phải ở trạng thái READY và khớp readiness_fingerprint.
+#   - Chuyển trạng thái sang WRITING, thực hiện ghi dữ liệu vào Neo4j, vô hiệu hóa phiên bản cũ (nếu có).
+#   - Cập nhật trạng thái COMMITTED trong repository hoặc xử lý đối soát (reconcile) nếu xảy ra sự cố.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - graph_store (Neo4jIngestionStore): Đối tượng kết nối và thao tác với Neo4j.
+#   - ingestion_id (str): Mã định danh phiên nạp tài liệu.
+# Output:
+#   - dict[str, Any]: Payload trạng thái COMMITTED kèm số lượng entities/relationships đã lưu thành công vào Neo4j.
+# ----------------------------------------------------------------------------
 async def fill(
     repository: IngestionRepository,
     graph_store: Neo4jIngestionStore,
     ingestion_id: str,
 ) -> dict[str, Any]:
-    """Ghi chính thức tri thức vào Neo4j và cập nhật trạng thái COMMITTED cho workspace trong bộ nhớ RAM."""
     workspace = await required_workspace(repository, ingestion_id)
     guarded = workflow_guard_payload(workspace, "fill")
     if guarded is not None:
@@ -512,6 +639,20 @@ async def fill(
         )
 
 
+# ============================================================================
+# 2. NHÓM ONTOLOGY & SCOPE OPERATIONS (QUẢN LÝ & TRA CỨU ONTOLOGY / SCHEMA)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: list_scopes
+# Chức năng:
+#   - Truy vấn danh mục các ontology scope có sẵn trong một phiên bản ontology cụ thể.
+# Input:
+#   - ontology_cache (OntologyCache): Bộ nhớ đệm quản lý schema ontology.
+#   - ontology_version_id (str | None): Mã định danh phiên bản ontology (nếu không truyền sẽ dùng active version).
+# Output:
+#   - dict[str, Any]: Payload chứa danh sách các scope (mô tả, entity types, relationship types) và mã phiên bản.
+# ----------------------------------------------------------------------------
 async def list_scopes(
     ontology_cache: OntologyCache, ontology_version_id: str | None = None
 ) -> dict[str, Any]:
@@ -529,6 +670,17 @@ async def list_scopes(
     }
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: load_scope
+# Chức năng:
+#   - Nạp chi tiết projection schema (thực thể, thuộc tính, quan hệ) cho tập hợp các scope_keys được chọn.
+# Input:
+#   - ontology_cache (OntologyCache): Bộ nhớ đệm quản lý schema ontology.
+#   - scope_keys (list[str]): Danh sách các khóa scope cần nạp.
+#   - ontology_version_id (str): Mã định danh phiên bản ontology.
+# Output:
+#   - dict[str, Any]: Payload chứa chi tiết schema projection và gợi ý nextAction ('submit_batch').
+# ----------------------------------------------------------------------------
 async def load_scope(
     ontology_cache: OntologyCache,
     scope_keys: list[str],
@@ -545,6 +697,18 @@ async def load_scope(
     }
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: validate_patch
+# Chức năng:
+#   - Xác thực tính hợp lệ độc lập của một graph patch fragment dạng dictionary với ontology projection.
+# Input:
+#   - ontology_cache (OntologyCache): Bộ nhớ đệm quản lý schema ontology.
+#   - graph_patch (dict[str, Any]): Dữ liệu đồ thị cần kiểm tra cấu trúc và tính hợp lệ.
+#   - scope_keys (list[str]): Danh sách các khóa scope áp dụng kiểm tra.
+#   - ontology_version_id (str): Mã định danh phiên bản ontology.
+# Output:
+#   - dict[str, Any]: Kết quả xác thực bao gồm cờ valid (True/False) và danh sách lỗi (nếu có).
+# ----------------------------------------------------------------------------
 async def validate_patch(
     ontology_cache: OntologyCache,
     graph_patch: dict[str, Any],
@@ -578,6 +742,23 @@ async def validate_patch(
     }
 
 
+# ============================================================================
+# 3. NHÓM QUẢN LÝ TÀI LIỆU & PHIÊN BẢN (DOCUMENT & VERSION MANAGEMENT)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: delete_document
+# Chức năng:
+#   - Đánh dấu trạng thái phiên bản tài liệu thành DELETED trong repository.
+#   - Vô hiệu hóa (deactivate) các nút và cạnh tương ứng của phiên bản tài liệu trong Neo4j.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - graph_store (Neo4jIngestionStore): Đối tượng kết nối và thao tác với Neo4j.
+#   - document_id (str): Mã định danh tài liệu cần xóa.
+#   - if_missing (str): Cách xử lý khi không tìm thấy tài liệu ('ignore' hoặc ném lỗi).
+# Output:
+#   - dict[str, Any]: Payload xác nhận xóa tài liệu thành công.
+# ----------------------------------------------------------------------------
 async def delete_document(
     repository: IngestionRepository,
     graph_store: Neo4jIngestionStore,
@@ -612,6 +793,19 @@ async def delete_document(
     }
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: rollback_version
+# Chức năng:
+#   - Đánh dấu trạng thái một phiên bản tài liệu cụ thể thành ROLLED_BACK trong repository.
+#   - Vô hiệu hóa phiên bản đó trong cơ sở dữ liệu đồ thị Neo4j.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - graph_store (Neo4jIngestionStore): Đối tượng kết nối và thao tác với Neo4j.
+#   - document_id (str): Mã định danh tài liệu.
+#   - version_id (str): Mã định danh phiên bản cần rollback.
+# Output:
+#   - dict[str, Any]: Payload xác nhận rollback phiên bản thành công.
+# ----------------------------------------------------------------------------
 async def rollback_version(
     repository: IngestionRepository,
     graph_store: Neo4jIngestionStore,
@@ -636,6 +830,26 @@ async def rollback_version(
     }
 
 
+# ============================================================================
+# 4. NHÓM PHÂN LOẠI LỖI & XỬ LÝ ONTOLOGY NỘI BỘ (ONTOLOGY ERROR CLASSIFICATION)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: _classify_missing_scopes
+# Chức năng:
+#   - Phân loại nguyên nhân lỗi ontology khi submit batch.
+#   - Phân biệt giữa: thiếu scope chưa nạp (MISSING_SCOPE), sai ánh xạ quan hệ trong scope (RELATIONSHIP_MAPPING_MISMATCH)
+#     và khoảng trống ontology thực sự (SCHEMA_GAP_CANDIDATE).
+# Input:
+#   - ontology_cache (OntologyCache): Bộ nhớ đệm schema ontology.
+#   - ontology_version_id (str): Mã định danh phiên bản ontology được ghim.
+#   - selected_projection: Schema projection hiện tại của batch.
+#   - semantic (SemanticGraphPatchFragment): Mảnh đồ thị ngữ nghĩa gốc do AI sinh ra.
+#   - issues (list[dict[str, Any]]): Danh sách lỗi kiểm tra hợp lệ ban đầu.
+#   - external_node_types (dict[str, str] | None): Bản đồ ánh xạ ID thực thể ngoài (đã staged) sang tên lớp.
+# Output:
+#   - list[dict[str, Any]]: Danh sách các lỗi đã được phân loại chi tiết và bổ sung thông tin định hướng sửa đổi.
+# ----------------------------------------------------------------------------
 async def _classify_missing_scopes(
     ontology_cache: OntologyCache,
     ontology_version_id: str,
@@ -645,11 +859,6 @@ async def _classify_missing_scopes(
     *,
     external_node_types: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Classify ontology errors by introspecting the pinned ontology version.
-
-    The classifier is data-driven: it never knows domain-specific relationship names.
-    It distinguishes model mapping errors, omitted scopes, and genuine schema gaps.
-    """
     relevant_codes = {
         "UNKNOWN_ENTITY_TYPE",
         "UNKNOWN_PROPERTY",
@@ -765,6 +974,15 @@ async def _classify_missing_scopes(
     return classified
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: _missing_scope_issue
+# Chức năng:
+#   - Chuyển đổi mã lỗi thành 'MISSING_SCOPE' và thêm chú thích rằng khái niệm tồn tại ở scope khác.
+# Input:
+#   - issue (dict[str, Any]): Dictionary chứa thông tin lỗi ban đầu.
+# Output:
+#   - dict[str, Any]: Dictionary lỗi đã được cập nhật mã MISSING_SCOPE và cờ retryable=True.
+# ----------------------------------------------------------------------------
 def _missing_scope_issue(issue: dict[str, Any]) -> dict[str, Any]:
     return {
         **issue,
@@ -777,6 +995,17 @@ def _missing_scope_issue(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: _compatible_relationships
+# Chức năng:
+#   - Tìm danh sách các tên quan hệ hợp lệ nối giữa hai loại thực thể nguồn và đích trong danh sách schema quan hệ.
+# Input:
+#   - relationships (list[dict[str, Any]]): Danh sách định nghĩa quan hệ trong schema.
+#   - source_type (str): Tên kỹ thuật của loại thực thể nguồn.
+#   - target_type (str): Tên kỹ thuật của loại thực thể đích.
+# Output:
+#   - list[str]: Danh sách tên kỹ thuật (technicalName) của các quan hệ tương thích (đã sắp xếp).
+# ----------------------------------------------------------------------------
 def _compatible_relationships(
     relationships: list[dict[str, Any]],
     source_type: str,
@@ -791,6 +1020,20 @@ def _compatible_relationships(
     })
 
 
+# ============================================================================
+# 5. NHÓM QUẢN LÝ WORKSPACE & WORKFLOW GUARD (WORKSPACE & WORKFLOW VALIDATION)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: required_workspace
+# Chức năng:
+#   - Lấy đối tượng Workspace từ IngestionRepository theo ingestion_id. Ném ngoại lệ KeyError nếu không tìm thấy.
+# Input:
+#   - repository (IngestionRepository): Đối tượng quản lý trạng thái workspace trong RAM.
+#   - ingestion_id (str): Mã định danh phiên nạp tài liệu.
+# Output:
+#   - Workspace: Đối tượng Workspace chứa toàn bộ trạng thái phiên làm việc.
+# ----------------------------------------------------------------------------
 async def required_workspace(
     repository: IngestionRepository, ingestion_id: str
 ) -> Workspace:
@@ -800,11 +1043,21 @@ async def required_workspace(
     return workspace
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: workflow_guard_payload
+# Chức năng:
+#   - Kiểm tra xem hành động yêu cầu có hợp lệ với trạng thái hiện tại của job hay không (evaluate_workflow).
+#   - Trả về None nếu hợp lệ, hoặc trả về payload chứa thông báo bị chặn (blockedAction) nếu vi phạm.
+# Input:
+#   - workspace (Workspace): Đối tượng Workspace hiện tại.
+#   - action (str): Tên hành động cần kiểm tra (ví dụ: 'get_batch', 'submit_batch', 'finalize', 'fill').
+# Output:
+#   - dict[str, Any] | None: None nếu được phép thực hiện, hoặc dictionary payload mô tả hành động bị chặn.
+# ----------------------------------------------------------------------------
 def workflow_guard_payload(
     workspace: Workspace,
     action: str,
 ) -> dict[str, Any] | None:
-    """Return a structured state payload when an action is illegal in the current job state."""
     decision = evaluate_workflow(workspace.job.status, action)
     if decision.allowed:
         return None
@@ -815,6 +1068,23 @@ def workflow_guard_payload(
     return result
 
 
+# ============================================================================
+# 6. NHÓM ĐỊNH DẠNG PHẢN HỒI PAYLOAD (PAYLOAD BUILDERS & FORMATTERS)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: batch_failure_payload
+# Chức năng:
+#   - Tạo cấu trúc dữ liệu phản hồi khi một batch gặp lỗi xác thực hoặc vượt quá số lần thử lại cho phép.
+#   - Trả về trạng thái FAILED (explicit_extraction_failure) nếu quá số lần thử, ngược lại trả về REPAIR_REQUIRED.
+# Input:
+#   - workspace (Workspace): Đối tượng Workspace hiện tại.
+#   - batch_index (int): Chỉ số index của batch bị lỗi.
+#   - issues (list[dict]): Danh sách các lỗi xác thực gặp phải.
+#   - max_attempts (int): Số lần thử lại tối đa cho phép.
+# Output:
+#   - dict[str, Any]: Payload mô tả chi tiết lỗi và định hướng hành động tiếp theo.
+# ----------------------------------------------------------------------------
 def batch_failure_payload(
     workspace: Workspace,
     batch_index: int,
@@ -858,6 +1128,18 @@ def batch_failure_payload(
     }
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: status_payload
+# Chức năng:
+#   - Tổng hợp và tạo payload phản hồi trạng thái toàn diện của workspace nạp tài liệu.
+#   - Xác định giai đoạn (stage) hiện tại, các số liệu thống kê (chunks, batches, staged) và batch tiếp theo cần xử lý.
+# Input:
+#   - workspace (Workspace): Đối tượng Workspace hiện tại.
+#   - resumed (bool): Cờ đánh dấu tiến trình được khôi phục.
+#   - idempotent (bool): Cờ đánh dấu thao tác idempotent (đã commit từ trước).
+# Output:
+#   - dict[str, Any]: Payload trạng thái hoàn chỉnh của workspace.
+# ----------------------------------------------------------------------------
 def status_payload(
     workspace: Workspace,
     *,
@@ -924,6 +1206,18 @@ def status_payload(
     return result
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: error_payload
+# Chức năng:
+#   - Tạo cấu trúc dữ liệu phản hồi lỗi tiêu chuẩn (terminal: True).
+# Input:
+#   - stage (str): Giai đoạn xảy ra lỗi.
+#   - ingestion_id (str | None): Mã định danh phiên nạp tài liệu (nếu có).
+#   - code (str): Mã lỗi định danh.
+#   - message (str): Nội dung mô tả chi tiết lỗi.
+# Output:
+#   - dict[str, Any]: Dictionary lỗi chuẩn hóa.
+# ----------------------------------------------------------------------------
 def error_payload(
     stage: str,
     ingestion_id: str | None,
@@ -940,11 +1234,34 @@ def error_payload(
     }
 
 
+# ============================================================================
+# 7. NHÓM TIỆN ÍCH NỘI BỘ (INTERNAL HELPERS)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Tên hàm: _document_key
+# Chức năng:
+#   - Tạo khóa định danh tài liệu chuẩn hóa dạng kebab-case từ tên tệp tin.
+# Input:
+#   - filename (str): Tên tệp tin gốc.
+# Output:
+#   - str: Khóa định danh tài liệu chuẩn hóa.
+# ----------------------------------------------------------------------------
 def _document_key(filename: str) -> str:
     stem = re.sub(r"[^a-z0-9]+", "-", Path(filename).stem.casefold()).strip("-")
     return stem or hashlib.sha256(filename.encode("utf-8")).hexdigest()[:24]
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: _canonical_context
+# Chức năng:
+#   - Lấy danh sách các thực thể chuẩn hóa đã được staged ở các batch trước đó để làm ngữ cảnh tham chiếu chéo.
+# Input:
+#   - workspace (Workspace): Đối tượng Workspace hiện tại.
+#   - before_batch (int): Chỉ số batch hiện tại (chỉ lấy thực thể staged trước batch này).
+# Output:
+#   - list[dict[str, Any]]: Danh sách tối đa 50 thực thể chuẩn hóa.
+# ----------------------------------------------------------------------------
 def _canonical_context(workspace: Workspace, before_batch: int) -> list[dict[str, Any]]:
     context = list(staged_entity_index(workspace, before_batch=before_batch).values())[:50]
     logger.info(
@@ -956,6 +1273,15 @@ def _canonical_context(workspace: Workspace, before_batch: int) -> list[dict[str
     return context
 
 
+# ----------------------------------------------------------------------------
+# Tên hàm: _chunks_from_evidence
+# Chức năng:
+#   - Tái tạo danh sách PreparedChunk tạm thời từ các trích dẫn bằng chứng (evidence) trong GraphPatchFragment.
+# Input:
+#   - fragment (GraphPatchFragment): Mảnh đồ thị cần trích xuất bằng chứng.
+# Output:
+#   - list[PreparedChunk]: Danh sách các PreparedChunk được tái tạo từ evidence.
+# ----------------------------------------------------------------------------
 def _chunks_from_evidence(fragment: GraphPatchFragment) -> list[PreparedChunk]:
     texts: dict[int, list[str]] = {}
     evidence_items = [e for node in fragment.nodes for e in node.evidence]
