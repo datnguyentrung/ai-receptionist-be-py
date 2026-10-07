@@ -2,7 +2,7 @@ import hashlib
 import re
 from typing import Protocol
 
-from fastapi import Path
+from pathlib import Path
 
 from app.schemas.ingestion import DocumentChunk, LoadedDocument
 
