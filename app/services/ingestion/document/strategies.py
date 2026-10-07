@@ -4,7 +4,7 @@ from typing import Protocol
 
 from fastapi import Path
 
-from app.core.schemas.ingestion import DocumentChunk, LoadedDocument
+from app.schemas.ingestion import DocumentChunk, LoadedDocument
 
 
 def _sha256(value: str) -> str:
@@ -165,7 +165,6 @@ def preclean_document_text(content: str) -> str:
 
     # 6. Xóa dòng trống/whitespace ở đầu và cuối toàn tài liệu.
     return content.strip()
-
 
 class ChunkingStrategy(Protocol):
     """Giao diện (Protocol) định nghĩa chiến lược phân tách tài liệu thành danh sách DocumentChunk."""

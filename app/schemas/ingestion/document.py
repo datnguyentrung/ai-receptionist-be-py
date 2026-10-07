@@ -1,26 +1,14 @@
 """Schemas for document chunks, loaded sources, and ingestion provenance."""
 
+import uuid
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
+
+from app.schemas.ingestion.base import IngestionModel
 
 
-class IngestionBaseModel(BaseModel):
-    """Model cơ sở cho các schema ingestion với cấu hình tự động camelCase và chuẩn hóa dữ liệu."""
-
-    model_config = ConfigDict(
-        # Tự động chuyển đổi tên thuộc tính snake_case sang camelCase (vd: chunk_id -> chunkId) khi serialize JSON
-        alias_generator=lambda name: "".join(
-            word if index == 0 else word.capitalize()
-            for index, word in enumerate(name.split("_"))
-        ),
-        populate_by_name=True,  # Cho phép gán giá trị bằng cả tên gốc (snake_case) lẫn alias (camelCase)
-        extra="ignore",  # Bỏ qua các trường thừa không được định nghĩa trong schema
-        str_strip_whitespace=True,  # Tự động loại bỏ khoảng trắng thừa ở 2 đầu chuỗi
-    )
-
-
-class DocumentChunk(IngestionBaseModel):
+class DocumentChunk(IngestionModel):
     """Schema đại diện cho một đoạn văn bản (chunk) được phân tách từ tài liệu nguồn."""
 
     # Vị trí thứ tự của chunk trong tài liệu (bắt đầu từ 0)
@@ -55,3 +43,51 @@ class LoadedDocument:
     text: str
     # Kiểu MIME của tài liệu (ví dụ: "text/markdown", "text/plain"), mặc định là None
     mime_type: str | None = None
+
+
+@dataclass(frozen=True)
+class IngestionDocumentData:
+    """Dữ liệu tài liệu ingestion lưu trữ trong in-memory repository."""
+
+    id: uuid.UUID
+    document_key: str
+    name: str
+    current_version_id: uuid.UUID | None
+
+
+@dataclass(frozen=True)
+class IngestionDocumentVersionData:
+    """Dữ liệu phiên bản tài liệu ingestion lưu trữ trong in-memory repository."""
+
+    id: uuid.UUID
+    document_id: uuid.UUID
+    content_hash: str
+    ontology_version_id: uuid.UUID
+    ontology_digest: str
+    status: str
+
+
+@dataclass(frozen=True)
+class IngestionChunkData:
+    """Dữ liệu chunk tài liệu lưu trữ trong in-memory repository."""
+
+    id: uuid.UUID
+    document_version_id: uuid.UUID
+    chunk_id: str
+    chunk_index: int
+    text: str
+    content_hash: str
+    token_count: int
+    section: str | None
+    page_start: int | None
+    page_end: int | None
+    source_anchor: str
+
+
+__all__ = [
+    "DocumentChunk",
+    "IngestionChunkData",
+    "IngestionDocumentData",
+    "IngestionDocumentVersionData",
+    "LoadedDocument",
+]

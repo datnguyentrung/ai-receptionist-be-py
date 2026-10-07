@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
 
+    # Ingestion
+    INGESTION_MAX_BATCH_CHUNKS: int = 5
+    INGESTION_MAX_BATCH_CHARS: int = 15000
+    INGESTION_TRUE_CHUNK_CACHE: bool = True
+    INGESTION_ESTIMATED_CHARS_PER_TOKEN: float = 2.0
+    INGESTION_MAX_BATCH_ESTIMATED_TOKENS: int = 15000
+
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
     @property
