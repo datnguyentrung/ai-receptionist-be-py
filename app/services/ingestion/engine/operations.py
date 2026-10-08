@@ -46,12 +46,6 @@ DANH SÁCH CÁC HÀM TRONG MODULE (GOM THEO NHÓM CHỨC NĂNG):
 ================================================================================
 """
 
-from app.services.ingestion.graph_patch_compiled import GraphPatchCompiler
-from app.schemas import GraphPatchFragment
-from app.schemas import PreparedChunk
-from app.enums import SourceVersionStatus
-from app.enums import IngestionJobStatus
-from app.schemas import SemanticGraphPatchFragment
 import hashlib
 import json
 import logging
@@ -62,16 +56,32 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.services.ingestion.document.reader import DocumentReader
-from app.services.ingestion.ontology import (
+from app.enums import IngestionJobStatus, SourceVersionStatus
+from app.schemas import (
+    GraphNode,
+    GraphPatchFragment,
+    IngestionBatchData,
+    PreparedChunk,
+    SemanticGraphPatchFragment,
+    SemanticGraphRepairDelta,
+    ValidationIssue,
+    Workspace,
+)
+from app.services.ingestion.engine.graph_store import Neo4jIngestionStore
+from app.services.ingestion.engine.repository import IngestionRepository
+from app.services.ingestion.engine.workflow_policy import evaluate_workflow
+from app.services.ingestion.pipeline.reader import DocumentReader
+from app.services.ingestion.schema.evidence_guard import GraphFragmentEvidenceGuard
+from app.services.ingestion.schema.graph_patch_compiled import GraphPatchCompiler
+from app.services.ingestion.schema.ontology import (
     COMPILER_VERSION,
     OntologyCache,
     OntologyRegistry,
     validate_coverage_integrity,
 )
-from app.services.ingestion.repository import (
-    IngestionRepository,
-    Workspace,
+from app.services.ingestion.schema.repair_guard import RepairGuard
+from app.utils import (
+    stable_entity_key,
     staged_entity_index,
     workspace_chunks,
     workspace_fingerprint,
@@ -126,7 +136,7 @@ async def begin(
     document_key: str | None = None,
     scope_hint: str | None = None,
     mime_type: str | None = None,
-) -> dict[str, Any]:
+) -> Workspace:
     if len(data) > max_file_size:
         raise ValueError(f"Artifact exceeds the {max_file_size}-byte ingestion limit")
     reader = DocumentReader()
@@ -137,7 +147,7 @@ async def begin(
     )
     content_hash = hashlib.sha256(data).hexdigest()
     ontology = await ontology_cache.active_version()
-    workspace, resumed, committed = await repository.create_or_resume(
+    workspace, _resumed, _committed = await repository.create_or_resume(
         artifact_name=artifact_name,
         content_hash=content_hash,
         chunks=chunks,
@@ -158,7 +168,253 @@ async def begin(
         len(workspace.chunks),
         [batch.chunk_indexes for batch in workspace.batches],
     )
-    return status_payload(workspace, resumed=resumed or committed, idempotent=committed)
+    return workspace
+
+
+async def repair_batch(
+    repository: IngestionRepository,
+    ontology_cache: OntologyCache,
+    ingestion_id: str,
+    batch_index: int,
+    scope_keys: list[str],
+    repair_delta: SemanticGraphRepairDelta,
+) -> Workspace:
+    """Apply a delta to the protected baseline for one repair-required batch."""
+
+    workspace = await required_workspace(repository, ingestion_id)
+    batch = _batch(workspace, batch_index)
+    if batch.status != "REPAIR_REQUIRED":
+        raise ValueError(f"Batch {batch_index} is not awaiting repair")
+    if set(scope_keys) != set(batch.scope_keys):
+        raise ValueError("Repair must reuse the selected scope set")
+    if not batch.validated_baseline:
+        raise ValueError("Batch has no protected baseline to repair")
+
+    baseline = GraphPatchFragment.model_validate(batch.validated_baseline)
+    if repair_delta.baseline_fingerprint != _baseline_fingerprint(baseline):
+        return await repository.mark_batch_for_repair(
+            ingestion_id,
+            batch_index,
+            [
+                {
+                    "code": "STALE_REPAIR_BASELINE",
+                    "message": "Repair delta was generated from a stale protected baseline.",
+                    "location": "baselineFingerprint",
+                    "retryable": True,
+                }
+            ],
+        )
+
+    projection = await ontology_cache.get_many(
+        scope_keys, str(workspace.job.ontology_version_id)
+    )
+    bindings = [
+        {
+            "scopeKey": key,
+            "schemaHash": (
+                await ontology_cache.get(key, str(workspace.job.ontology_version_id))
+            ).digest,
+        }
+        for key in projection.scope_keys
+    ]
+    staged = staged_entity_index(workspace, before_batch=batch_index)
+    baseline_refs = {
+        node.temp_id: f"entity:{stable_entity_key(node.class_name, node.identity)}"
+        for node in baseline.nodes
+    }
+    staged.update(
+        {
+            ref: {
+                "ref": ref,
+                "stableKey": ref.removeprefix("entity:"),
+                "className": node.class_name,
+                "identity": node.identity,
+            }
+            for node in baseline.nodes
+            for ref in [baseline_refs[node.temp_id]]
+        }
+    )
+    semantic = SemanticGraphPatchFragment.model_construct(
+        nodes=repair_delta.nodes,
+        edges=[
+            edge.model_copy(
+                update={
+                    "source_temp_id": baseline_refs.get(
+                        edge.source_temp_id, edge.source_temp_id
+                    ),
+                    "target_temp_id": baseline_refs.get(
+                        edge.target_temp_id, edge.target_temp_id
+                    ),
+                }
+            )
+            for edge in repair_delta.edges
+        ],
+        coverage=repair_delta.coverage,
+        warnings=[],
+    )
+    registry = OntologyRegistry(projection)
+    compiled = GraphPatchCompiler().compile(
+        registry.canonicalize_semantic_fragment(semantic), projection, staged_entities=staged
+    )
+    issues = list(compiled.issues)
+    merged = _merge_repair_fragment(baseline, compiled.fragment, batch.graph_fragment, repair_delta.coverage)
+    chunks = workspace_chunks(workspace, batch.chunk_indexes)
+    if merged is not None:
+        merged = GraphFragmentEvidenceGuard().canonicalize(merged, chunks)
+        issues.extend(_repair_property_conflicts(merged, projection))
+        issues.extend(_repair_edge_property_conflicts(baseline, merged))
+        issues.extend(
+            registry.validate_fragment(
+                merged,
+                chunks,
+                external_node_types={item["stableKey"]: item["className"] for item in staged.values()},
+            )
+        )
+        issues.extend(
+            RepairGuard.compare(
+                previous_canonical_fragment=baseline,
+                new_canonical_fragment=merged,
+                previous_validation_issues=batch.validation_issues,
+            )
+        )
+    issue_dicts = [issue.model_dump(by_alias=True, mode="json") for issue in issues]
+    if issue_dicts:
+        issue_dicts = await _classify_missing_scopes(
+            ontology_cache,
+            str(workspace.job.ontology_version_id),
+            projection,
+            semantic,
+            issue_dicts,
+            external_node_types={ref: item["className"] for ref, item in staged.items()},
+        )
+    return await repository.store_batch_result(
+        ingestion_id,
+        batch_index,
+        bindings,
+        projection.digest,
+        semantic,
+        merged,
+        issue_dicts,
+        max_attempts=MAX_BATCH_VALIDATION_ATTEMPTS,
+        validated_baseline=baseline if issue_dicts else None,
+    )
+
+
+def baseline_fingerprint(baseline: GraphPatchFragment) -> str:
+    """Return a stable fingerprint for the repair contract's protected baseline."""
+
+    payload = baseline.model_dump(by_alias=True, mode="json")
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+_baseline_fingerprint = baseline_fingerprint
+
+
+def _repair_property_conflicts(
+    fragment: GraphPatchFragment, projection: Any
+) -> list[ValidationIssue]:
+    """Reject distinct scalar values for one canonical node property."""
+
+    issues: list[ValidationIssue] = []
+    for node_index, node in enumerate(fragment.nodes):
+        values: dict[str, set[str]] = {}
+        for fact in node.properties:
+            if isinstance(fact.value, list):
+                continue
+            values.setdefault(fact.property_name, set()).add(
+                json.dumps(fact.value, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        for property_name, distinct in values.items():
+            if len(distinct) > 1:
+                issues.append(
+                    ValidationIssue(
+                        code="REPAIR_SCALAR_PROPERTY_CONFLICT",
+                        message=f"Repair produced multiple values for {node.class_name}.{property_name}",
+                        location=f"nodes.{node_index}.properties",
+                        retryable=True,
+                    )
+                )
+    return issues
+
+
+def _repair_edge_property_conflicts(
+    baseline: GraphPatchFragment, candidate: GraphPatchFragment
+) -> list[ValidationIssue]:
+    """Reject a repair that overwrites a protected edge property."""
+
+    protected = {
+        (edge.edge_name, edge.source_temp_id, edge.target_temp_id): edge.properties
+        for edge in baseline.edges
+    }
+    issues: list[ValidationIssue] = []
+    for edge_index, edge in enumerate(candidate.edges):
+        previous = protected.get((edge.edge_name, edge.source_temp_id, edge.target_temp_id))
+        if previous is None:
+            continue
+        for key, value in previous.items():
+            if key in edge.properties and edge.properties[key] != value:
+                issues.append(
+                    ValidationIssue(
+                        code="REPAIR_EDGE_PROPERTY_CONFLICT",
+                        message=f"Repair changed protected edge property {key}",
+                        location=f"edges.{edge_index}.properties.{key}",
+                        retryable=True,
+                    )
+                )
+    return issues
+
+
+def _merge_repair_fragment(
+    baseline: GraphPatchFragment,
+    delta: GraphPatchFragment | None,
+    previous_fragment: dict | None,
+    coverage_updates: list[Any],
+) -> GraphPatchFragment | None:
+    if delta is None:
+        return None
+    nodes = {stable_entity_key(node.class_name, node.identity): node for node in baseline.nodes}
+    for node in delta.nodes:
+        key = stable_entity_key(node.class_name, node.identity)
+        previous = nodes.get(key)
+        if previous is None:
+            nodes[key] = node
+            continue
+        facts = {
+            (fact.property_name, json.dumps(fact.value, ensure_ascii=False, sort_keys=True, default=str)): fact
+            for fact in [*previous.properties, *node.properties]
+        }
+        nodes[key] = previous.model_copy(
+            update={"properties": list(facts.values()), "evidence": [*previous.evidence, *node.evidence]}
+        )
+    edges = {
+        (edge.edge_name, edge.source_temp_id, edge.target_temp_id): edge
+        for edge in baseline.edges
+    }
+    for edge in delta.edges:
+        key = (edge.edge_name, edge.source_temp_id, edge.target_temp_id)
+        previous = edges.get(key)
+        edges[key] = edge if previous is None else previous.model_copy(
+            update={"properties": {**previous.properties, **edge.properties}, "evidence": [*previous.evidence, *edge.evidence]}
+        )
+    old_coverage = GraphPatchFragment.model_validate(previous_fragment).coverage if previous_fragment else []
+    coverage = {item.chunk_index: item for item in old_coverage}
+    coverage.update({item.chunk_index: item for item in coverage_updates})
+    return GraphPatchFragment(
+        ontology_version=delta.ontology_version,
+        nodes=list(nodes.values()),
+        edges=list(edges.values()),
+        coverage=list(coverage.values()),
+        warnings=[*baseline.warnings, *delta.warnings],
+    )
+
+
+def _batch(workspace: Workspace, batch_index: int) -> IngestionBatchData:
+    batch = next((item for item in workspace.batches if item.batch_index == batch_index), None)
+    if batch is None:
+        raise ValueError(f"Invalid batch index: {batch_index}")
+    return batch
 
 
 # ----------------------------------------------------------------------------
@@ -180,18 +436,13 @@ async def get_batch(
     repository: IngestionRepository,
     ingestion_id: str,
     batch_index: int,
-) -> dict[str, Any]:
+) -> tuple[IngestionBatchData, tuple[PreparedChunk, ...], tuple[GraphNode, ...]]:
     workspace = await required_workspace(repository, ingestion_id)
-    guarded = workflow_guard_payload(workspace, "get_batch")
-    if guarded is not None:
-        return guarded
     batch = next(
         (item for item in workspace.batches if item.batch_index == batch_index), None
     )
     if batch is None:
-        return error_payload(
-            "batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index)
-        )
+        raise ValueError(f"Invalid batch index: {batch_index}")
     chunks = workspace_chunks(workspace, batch.chunk_indexes)
     logger.info(
         "BATCH_START ingestionId=%s batchIndex=%s chunkIndexes=%s",
@@ -200,23 +451,15 @@ async def get_batch(
         batch.chunk_indexes,
     )
 
-    # Không chọn lại scope nếu đã chọn rồi.
-    next_action = "load_scopes" if batch.scope_keys else "list_scopes"
-
-    return {
-        "success": True,
-        "stage": "batch_retrieved",
-        "terminal": False,
-        "nextAction": next_action,
-        "ingestionId": ingestion_id,
-        "batch": {
-            "batchIndex": batch.batch_index,
-            "scopeHint": workspace.job.scope_hint,
-            "selectedScopeKeys": batch.scope_keys,
-            "chunks": [item.model_dump(by_alias=True, mode="json") for item in chunks],
-            "canonicalGraphContext": _canonical_context(workspace, batch_index),
-        },
-    }
+    nodes = tuple(
+        GraphNode.model_validate(node)
+        for previous in workspace.batches
+        if previous.batch_index < batch_index
+        and previous.status == "STAGED"
+        and previous.graph_fragment
+        for node in previous.graph_fragment.get("nodes", [])
+    )
+    return batch, tuple(chunks), nodes
 
 
 # ----------------------------------------------------------------------------
@@ -244,32 +487,21 @@ async def submit_batch(
     ingestion_id: str,
     batch_index: int,
     scope_keys: list[str],
-    semantic_fragment: SemanticGraphPatchFragment,
-) -> dict[str, Any]:
+    semantic_fragment: dict[str, Any] | SemanticGraphPatchFragment,
+) -> Workspace:
     workspace = await required_workspace(repository, ingestion_id)
-    guarded = workflow_guard_payload(workspace, "submit_batch")
-    if guarded is not None:
-        return guarded
     batch = next(
         (item for item in workspace.batches if item.batch_index == batch_index), None
     )
     if batch is None:
-        return error_payload(
-            "batch_validation", ingestion_id, "INVALID_BATCH_INDEX", str(batch_index)
-        )
+        raise ValueError(f"Invalid batch index: {batch_index}")
 
     if (
         batch.status == "REPAIR_REQUIRED"
         and batch.scope_keys
         and set(scope_keys) != set(batch.scope_keys)
     ):
-        return error_payload(
-            "batch_validation",
-            ingestion_id,
-            "REPAIR_SCOPE_MISMATCH",
-            "Repair must reuse the previously selected scope set unless "
-            "the workflow explicitly reselects scopes.",
-        )
+        raise ValueError("Repair must reuse the previously selected scope set")
 
     projection = await ontology_cache.get_many(
         scope_keys, str(workspace.job.ontology_version_id)
@@ -309,9 +541,7 @@ async def submit_batch(
             issues,
             max_attempts=MAX_BATCH_VALIDATION_ATTEMPTS,
         )
-        return batch_failure_payload(
-            workspace, batch_index, issues, MAX_BATCH_VALIDATION_ATTEMPTS
-        )
+        return workspace
 
     registry = OntologyRegistry(projection)
     canonical_semantic = registry.canonicalize_semantic_fragment(semantic)
@@ -418,32 +648,7 @@ async def submit_batch(
             max_attempts=MAX_BATCH_VALIDATION_ATTEMPTS,
             validated_baseline=new_baseline,
         )
-        result = batch_failure_payload(
-            workspace, batch_index, issues, MAX_BATCH_VALIDATION_ATTEMPTS
-        )
-        if result["terminal"]:
-            logger.error(
-                "TERMINAL_FAILURE ingestionId=%s batchIndex=%s attempt=%s reason=retry_limit",
-                ingestion_id,
-                batch_index,
-                result.get("attempt"),
-            )
-        if not result["terminal"]:
-            codes = {item.get("code") for item in issues}
-            if codes & {
-                "SCHEMA_GAP_CANDIDATE",
-                "UNKNOWN_ENTITY_TYPE",
-                "UNKNOWN_PROPERTY",
-                "UNKNOWN_RELATIONSHIP",
-            }:
-                result["stage"] = "schema_gap_candidate"
-                result["nextAction"] = "assess_schema_gap"
-                result["retryRequired"] = False
-            elif "MISSING_SCOPE" in codes:
-                result["stage"] = "scope_reselection_required"
-                result["nextAction"] = "reselect_scopes"
-                result["retryRequired"] = True
-        return result
+        return workspace
 
     workspace = await repository.store_batch_result(
         ingestion_id,
@@ -455,19 +660,16 @@ async def submit_batch(
         [],
         max_attempts=MAX_BATCH_VALIDATION_ATTEMPTS,
     )
-    result = status_payload(workspace)
-    result["submittedBatchIndex"] = batch_index
-    result["scopeKeys"] = projection.scope_keys
-    result["mergedSchemaHash"] = projection.digest
-    logger.info(
-        "BATCH_STAGED ingestionId=%s batchIndex=%s canonicalNodes=%s edges=%s facts=%s",
-        ingestion_id,
-        batch_index,
-        len(fragment.nodes),
-        len(fragment.edges),
-        sum(len(node.properties) for node in fragment.nodes) + len(fragment.edges),
-    )
-    return result
+    if fragment is not None:
+        logger.info(
+            "BATCH_STAGED ingestionId=%s batchIndex=%s canonicalNodes=%s edges=%s facts=%s",
+            ingestion_id,
+            batch_index,
+            len(fragment.nodes),
+            len(fragment.edges),
+            sum(len(node.properties) for node in fragment.nodes) + len(fragment.edges),
+        )
+    return workspace
 
 
 # ----------------------------------------------------------------------------
@@ -487,38 +689,13 @@ async def submit_batch(
 async def finalize(
     repository: IngestionRepository,
     ingestion_id: str,
-) -> dict[str, Any]:
+) -> Workspace:
     workspace = await required_workspace(repository, ingestion_id)
-    guarded = workflow_guard_payload(workspace, "finalize")
-    if guarded is not None:
-        return guarded
     incomplete = [
         item.batch_index for item in workspace.batches if item.status != "STAGED"
     ]
     if incomplete:
-        blocked = [
-            item.batch_index
-            for item in workspace.batches
-            if item.status == "BLOCKED_SCHEMA"
-        ]
-        return {
-            "success": False,
-            "stage": "awaiting_schema_approval" if blocked else "repair_required",
-            "terminal": False,
-            "nextAction": "wait_for_schema_review" if blocked else "repair_batches",
-            "ingestionId": ingestion_id,
-            "repairBatchIndexes": incomplete,
-            "errors": [
-                {
-                    "code": "INCOMPLETE_BATCHES",
-                    "message": f"Batches require schema review: {blocked}"
-                    if blocked
-                    else f"Batches require repair: {incomplete}",
-                    "location": "batches",
-                    "retryable": True,
-                }
-            ],
-        }
+        return workspace
 
     coverage_errors: dict[int, list[dict[str, Any]]] = {}
     for batch in workspace.batches:
@@ -552,28 +729,9 @@ async def finalize(
             workspace = await repository.mark_batch_for_repair(
                 ingestion_id, batch_index, issues
             )
-        flattened = [
-            {**issue, "batchIndex": batch_index}
-            for batch_index, issues in coverage_errors.items()
-            for issue in issues
-        ]
-        has_schema_gap = any(
-            item.get("code") == "SCHEMA_GAP_CANDIDATE" for item in flattened
-        )
-        return {
-            "success": False,
-            "stage": "schema_gap_candidate" if has_schema_gap else "repair_required",
-            "terminal": False,
-            "retryRequired": not has_schema_gap,
-            "nextAction": "assess_schema_gap" if has_schema_gap else "repair_batches",
-            "ingestionId": ingestion_id,
-            "repairBatchIndexes": sorted(coverage_errors),
-            "errors": flattened,
-        }
+        return workspace
 
-    return status_payload(
-        await repository.mark_ready(ingestion_id, workspace_fingerprint(workspace))
-    )
+    return await repository.mark_ready(ingestion_id, workspace_fingerprint(workspace))
 
 
 # ----------------------------------------------------------------------------
@@ -850,7 +1008,7 @@ async def rollback_version(
 async def _classify_missing_scopes(
     ontology_cache: OntologyCache,
     ontology_version_id: str,
-    selected_projection,
+    selected_projection: Any,
     semantic: SemanticGraphPatchFragment,
     issues: list[dict[str, Any]],
     *,
@@ -1273,6 +1431,9 @@ def _canonical_context(workspace: Workspace, before_batch: int) -> list[dict[str
         [item["stableKey"] for item in context],
     )
     return context
+
+
+canonical_context = _canonical_context
 
 
 # ----------------------------------------------------------------------------

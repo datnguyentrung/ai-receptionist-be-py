@@ -1,8 +1,6 @@
 """Neo4j graph store and query helpers for GraphRAG."""
 
-from collections.abc import Iterable
-from itertools import pairwise
-from typing import Any
+from typing import Any, cast
 
 from neo4j import AsyncDriver
 
@@ -58,7 +56,7 @@ class Neo4jGraphStore:
         )
         async with self._driver.session(database=self._database) as session:
             for statement in statements:
-                await session.run(statement)
+                await session.run(cast(Any, statement))
 
     async def search_chunk_vector(
         self, query_vector: list[float], limit: int

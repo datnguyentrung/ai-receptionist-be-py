@@ -48,6 +48,7 @@ from app.schemas.ingestion.semantic_patch import (
     SemanticGraphEdge,
     SemanticGraphNode,
     SemanticGraphPatchFragment,
+    SemanticGraphRepairDelta,
 )
 from app.schemas.ingestion.workspace import (
     IngestionBatch,
@@ -89,6 +90,7 @@ __all__ = [
     "SemanticGraphEdge",
     "SemanticGraphNode",
     "SemanticGraphPatchFragment",
+    "SemanticGraphRepairDelta",
     "ValidationIssue",
     "Workspace",
 ]

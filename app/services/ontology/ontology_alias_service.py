@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.ontology_alias import OntologyAlias, OntologyAliasSource
+from app.models.ontology_alias import OntologyAlias
 
 
 class OntologyAliasService:

@@ -1,5 +1,6 @@
 import logging
 import time
+from typing import Any
 
 import cv2
 import numpy as np
@@ -199,7 +200,7 @@ class FaceEmbeddingService:
         step_start = time.perf_counter()
         try:
             parser = np.frombuffer(contents, np.uint8)
-            image_np = cv2.imdecode(parser, cv2.IMREAD_COLOR)
+            image_np: Any = cv2.imdecode(parser, cv2.IMREAD_COLOR)
         except Exception as exc:
             duration_ms = (
                 (time.perf_counter() - started_at) * 1000

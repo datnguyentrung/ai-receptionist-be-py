@@ -7,6 +7,7 @@ Mô-đun này cung cấp:
 - `runtime_lifespan`: Context manager dùng cho FastAPI Lifespan.
 """
 
+from typing import Any
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -26,6 +27,9 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import settings
 from app.services.graphrag.embeddings import GeminiEmbeddingProvider
 from app.services.graphrag.graph_store import Neo4jGraphStore
+from app.services.ingestion.engine.graph_store import Neo4jIngestionStore
+from app.services.ingestion.engine.repository import IngestionRepository
+from app.services.ingestion.schema.ontology import OntologyCache
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +41,17 @@ class ServiceContainer:
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
     neo4j_driver: AsyncDriver
-    graph_store: Neo4jGraphStore
+    graph_store: Neo4jIngestionStore
+    rag_graph_store: Neo4jGraphStore
     embedding_provider: GeminiEmbeddingProvider
+    repository: IngestionRepository
+    ontology_cache: OntologyCache
     model_id: str
+    ontology_lifecycle: Any = None
+    max_file_size: int = settings.INGESTION_MAX_FILE_SIZE_BYTES
+    chunk_size_chars: int = settings.INGESTION_CHUNK_SIZE_CHARS
+    batch_size: int = settings.INGESTION_BATCH_SIZE
+    skill_digest: str = "v1"
     ready: bool = False
     closed: bool = False
 
@@ -138,7 +150,12 @@ async def build_service_container() -> ServiceContainer:
         await engine.dispose()
         raise RuntimeInitializationError("embedding", exc) from exc
 
-    graph_store = Neo4jGraphStore(
+    graph_store = Neo4jIngestionStore(
+        driver,
+        settings.NEO4J_DATABASE,
+        embedding_provider=embedding_provider,
+    )
+    rag_graph_store = Neo4jGraphStore(
         driver,
         settings.NEO4J_DATABASE,
         embedding_provider=embedding_provider,
@@ -151,13 +168,23 @@ async def build_service_container() -> ServiceContainer:
         await engine.dispose()
         raise RuntimeInitializationError("neo4j-index", exc) from exc
 
+    repository = IngestionRepository()
+    ontology_cache = OntologyCache(session_factory)
+
     return ServiceContainer(
         engine=engine,
         session_factory=session_factory,
         neo4j_driver=driver,
         graph_store=graph_store,
+        rag_graph_store=rag_graph_store,
         embedding_provider=embedding_provider,
+        repository=repository,
+        ontology_cache=ontology_cache,
         model_id=settings.GOOGLE_ADK_MODEL,
+        max_file_size=settings.INGESTION_MAX_FILE_SIZE_BYTES,
+        chunk_size_chars=settings.INGESTION_CHUNK_SIZE_CHARS,
+        batch_size=settings.INGESTION_BATCH_SIZE,
+        skill_digest="v1",
         ready=True,
     )
 

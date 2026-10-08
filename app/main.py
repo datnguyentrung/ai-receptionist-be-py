@@ -1,8 +1,10 @@
 import faulthandler
+import io
 import logging
 import sys
 import time
 from contextlib import asynccontextmanager
+from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -11,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy import text
 
-import app.models  # noqa: F401 - ensure all models are registered in metadata
+import app.models  # noqa: F401 - ensure all models are registered in metadata # pyright: ignore[reportUnusedImport]
 from app.api import api_router
 from app.core.config import settings
 from app.db.base import Base
@@ -24,9 +26,9 @@ from app.exceptions.exception_handler import (
 from app.exceptions.face_embedding_exception import FaceEmbeddingException
 from app.utils.insightface_utils import initialize_face_app, is_face_app_initialized
 
-if hasattr(sys.stdout, "reconfigure"):
+if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
+if isinstance(sys.stderr, io.TextIOWrapper):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 if not faulthandler.is_enabled():
     faulthandler.enable(file=sys.stdout, all_threads=True)
@@ -83,7 +85,7 @@ app = FastAPI(
 
 
 @app.middleware("http")
-async def request_logging_middleware(request: Request, call_next):
+async def request_logging_middleware(request: Request, call_next: Any):
     request_id = request.headers.get("X-Request-ID") or str(uuid4())
     request.state.request_id = request_id
 
@@ -139,10 +141,10 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-app.add_exception_handler(FaceEmbeddingException, face_embedding_exception_handler)
+app.add_exception_handler(FaceEmbeddingException, cast(Any, face_embedding_exception_handler))
 app.add_exception_handler(
     RequestValidationError,
-    face_embedding_validation_exception_handler,
+    cast(Any, face_embedding_validation_exception_handler),
 )
 app.add_exception_handler(Exception, internal_exception_handler)
 

@@ -17,7 +17,7 @@ async def show_all_models():
     # Sau đó dùng vòng lặp for bình thường để duyệt qua danh sách
     for m in models_response:
         # Lọc ra các model có khả năng tạo nội dung (generateContent)
-        if "generateContent" in m.supported_actions:
+        if m.supported_actions and "generateContent" in m.supported_actions:
             print(f"{m.name:<40} | {m.supported_actions}")
 
 

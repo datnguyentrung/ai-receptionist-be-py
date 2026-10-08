@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, File, Request, UploadFile
 
 from app.enums.face_embedding_error_code import FaceEmbeddingErrorCode
@@ -12,7 +14,7 @@ IMAGE_FILE = File(
 )
 
 
-ERROR_RESPONSES = {
+ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     code.status_code: {
         "model": FaceEmbeddingResponse,
         "description": code.message,

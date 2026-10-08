@@ -75,7 +75,7 @@ class OntologyCompiler:
             )
             .order_by(
                 OntologyRelationship.source_entity_type_id,
-                OntologyRelationship.name,
+                OntologyRelationship.technical_name,
                 OntologyRelationship.target_entity_type_id,
             )
         )).all())
@@ -95,9 +95,9 @@ class OntologyCompiler:
         entities_payload = [
             {
                 "id": str(e.id), "technicalName": e.technical_name,
-                "domain": e.domain.value if hasattr(e.domain, "value") else str(e.domain),
+                "domain": str((e.metadata_ or {}).get("domain", "")),
                 "identityStrategy": e.identity_strategy,
-                "allowDynamicProperties": e.allow_dynamic_properties,
+                "allowDynamicProperties": bool((e.metadata_ or {}).get("allow_dynamic_properties", False)),
                 "description": e.description,
             }
             for e in entities
@@ -106,13 +106,13 @@ class OntologyCompiler:
         for p in properties:
             props_by_entity.setdefault(p.entity_type_id, []).append({
                 "id": str(p.id), "technicalName": p.technical_name,
-                "dataType": p.data_type.value, "isRequired": p.is_required,
-                "isList": p.is_list, "validationRules": p.validation_rules,
+                "dataType": p.data_type.value, "isRequired": p.required,
+                "isList": p.multi_value, "validationRules": p.constraints,
                 "description": p.description,
             })
         rel_payload = [
             {
-                "id": str(r.id), "name": r.name,
+                "id": str(r.id), "name": r.technical_name,
                 "sourceEntityTypeId": str(r.source_entity_type_id),
                 "targetEntityTypeId": str(r.target_entity_type_id),
                 "cardinality": r.cardinality.value, "description": r.description,
@@ -123,7 +123,7 @@ class OntologyCompiler:
         payload = {
             "scopeKey": scope.scope_key,
             "versionId": str(version.id),
-            "versionNumber": version.version_number,
+            "versionNumber": version.version,
             "entities": entities_payload,
             "properties": props_by_entity,
             "relationships": rel_payload,

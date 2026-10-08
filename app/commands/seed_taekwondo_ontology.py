@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal, engine
 from app.models import (
@@ -245,7 +246,7 @@ SCOPE_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
-async def _ensure_scopes(session, version: OntologyVersion) -> int:
+async def _ensure_scopes(session: AsyncSession, version: OntologyVersion) -> int:
     entities = list(
         (
             await session.scalars(

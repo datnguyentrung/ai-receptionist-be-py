@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import ClassVar
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy import (
@@ -44,7 +43,7 @@ class OntologySchemaProposal(Base):
     """
 
     __tablename__ = "ontology_schema_proposal"
-    __table_args__: ClassVar[dict[str, str]] = {"schema": "ontology"}
+    __table_args__ = {"schema": "ontology"}
 
     # Khóa chính định danh đề xuất (UUID v4)
     id: Mapped[uuid.UUID] = mapped_column(

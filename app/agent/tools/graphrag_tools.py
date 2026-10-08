@@ -24,7 +24,7 @@ async def retrieve_taekwondo_knowledge(
 
     container = await get_service_container()
     retriever = GraphRAGRetriever(
-        container.graph_store,
+        container.rag_graph_store,
         container.embedding_provider,
         min_cosine_score=settings.RAG_MIN_COSINE_SCORE,
         candidate_limit=settings.RAG_CANDIDATE_LIMIT,

@@ -9,6 +9,7 @@ Mô-đun này cung cấp:
 
 import math
 from collections.abc import Sequence
+from typing import Any, cast
 
 from google import genai
 from google.genai import types
@@ -107,7 +108,7 @@ class GeminiEmbeddingProvider:
             try:
                 response = await self._client.aio.models.embed_content(
                     model=self.model,
-                    contents=batch,
+                    contents=cast(Any, batch),
                     config=types.EmbedContentConfig(
                         task_type=task_type,
                         output_dimensionality=self.dimension,

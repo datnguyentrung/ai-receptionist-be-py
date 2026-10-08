@@ -55,7 +55,7 @@ from app.schemas import (
     SemanticGraphPatchFragment,
     Workspace,
 )
-from app.services.ingestion.workspace.staged_ingestion import IngestionWorkspaceService
+from app.services.ingestion.pipeline.staged_ingestion import IngestionWorkspaceService
 from app.utils.ingestion_helpers import (
     dict_digest,
     to_uuid,
@@ -323,13 +323,13 @@ class IngestionRepository:
 
         if not issues and fragment is not None:
             baseline_dict = (
-                fragment.model_dump(by_alias=True, mode="json")
+                getattr(fragment, "model_dump")(by_alias=True, mode="json")
                 if hasattr(fragment, "model_dump")
                 else fragment
             )
         elif validated_baseline is not None:
             baseline_dict = (
-                validated_baseline.model_dump(by_alias=True, mode="json")
+                getattr(validated_baseline, "model_dump")(by_alias=True, mode="json")
                 if hasattr(validated_baseline, "model_dump")
                 else validated_baseline
             )
@@ -341,10 +341,10 @@ class IngestionRepository:
             validation_attempts=attempts,
             validation_issues=issues,
             merged_schema_hash=merged_schema_hash,
-            semantic_fragment=semantic_fragment.model_dump(by_alias=True, mode="json")
+            semantic_fragment=getattr(semantic_fragment, "model_dump")(by_alias=True, mode="json")
             if hasattr(semantic_fragment, "model_dump")
             else semantic_fragment,
-            graph_fragment=fragment.model_dump(by_alias=True, mode="json")
+            graph_fragment=getattr(fragment, "model_dump")(by_alias=True, mode="json")
             if hasattr(fragment, "model_dump")
             else fragment,
             validated_baseline=baseline_dict,
