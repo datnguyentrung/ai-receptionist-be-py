@@ -1,4 +1,7 @@
-"""Product Sales Knowledge Graph ingestion skill package."""
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.agent.skills.ingestion.ingestion import ingestion_skill
 
 __all__ = ["ingestion_skill"]
 

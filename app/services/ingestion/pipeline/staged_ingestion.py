@@ -8,7 +8,6 @@ Danh sách các hàm / phương thức trong module:
 - `begin(...)`: Khởi tạo workspace mới cho tài liệu (chia batch, tính ingestion_id, lưu provenance & chunks).
 - `submit(...)`: Tiếp nhận và ghi nhận GraphPatchFragment trả về từ LLM cho một batch cụ thể.
 - `merged_patch(...)`: Hợp nhất toàn bộ fragment đã submit thành một GraphPatchDraft hoàn chỉnh.
-- `merge_fragments(...)`: Hợp nhất danh sách các GraphPatchFragment (khử trùng node/edge, gộp coverage, alias ID).
 - `next_batch(...)`: Lấy batch kế tiếp chưa hoàn thành (chưa STAGED) trong workspace.
 - `is_current(...)`: Kiểm tra workspace có còn khớp với cấu hình provenance hiện tại hay không.
 - `_partition(...)`: Hàm nội bộ gọi `partition` với các tham số cấu hình mặc định.
@@ -232,3 +231,18 @@ class IngestionWorkspaceService:
                 )
             )
         return batches
+
+
+def partition(
+    chunks: list[DocumentChunk],
+    *,
+    max_batch_chunks: int = MAX_BATCH_CHUNKS,
+    max_batch_chars: int = MAX_BATCH_CHARS,
+) -> list[IngestionBatch]:
+    """Partition chunks through the pipeline's established batching policy."""
+
+    return IngestionWorkspaceService.partition(
+        chunks,
+        max_batch_chunks=max_batch_chunks,
+        max_batch_chars=max_batch_chars,
+    )

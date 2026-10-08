@@ -284,7 +284,10 @@ class OntologyRegistry:
                 item["technicalName"], item["entityType"]
             )
         for alias in self.projection.aliases:
-            target = targets.get((alias.get("targetType"), str(alias.get("targetId"))))
+            target_type = alias.get("targetType")
+            if not isinstance(target_type, str):
+                continue
+            target = targets.get((target_type, str(alias.get("targetId"))))
             alias_value = alias.get("alias")
             if not target or not isinstance(alias_value, str):
                 continue
@@ -590,7 +593,7 @@ class OntologyRegistry:
     # ------------------------------------------------------------------------------------------------
     @staticmethod
     def _validate_evidence(
-        evidence_items, chunk_by_index: dict[int, PreparedChunk], location: str
+        evidence_items: Any, chunk_by_index: dict[int, PreparedChunk], location: str
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         for index, evidence in enumerate(evidence_items):

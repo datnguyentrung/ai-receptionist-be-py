@@ -93,3 +93,28 @@ class SemanticGraphPatchFragment(IngestionModel):
         default_factory=list,
         description="Danh sách các cảnh báo hoặc lưu ý đặc biệt do LLM ghi nhận khi trích xuất.",
     )
+
+
+class SemanticGraphRepairDelta(IngestionModel):
+    """Mảnh dữ liệu delta bổ sung/sửa đổi khi sửa chữa batch (Repair Batch).
+
+    Được sử dụng khi LLM thực hiện sửa đổi cục bộ mà không cần gửi lại toàn bộ baseline.
+    """
+
+    baseline_fingerprint: str = Field(
+        min_length=1,
+        description="SHA-256 fingerprint của protected baseline mà delta này sửa chữa.",
+    )
+
+    nodes: list[SemanticGraphNode] = Field(
+        default_factory=list,
+        description="Danh sách các node mới cần bổ sung hoặc cập nhật thuộc tính.",
+    )
+    edges: list[SemanticGraphEdge] = Field(
+        default_factory=list,
+        description="Danh sách các quan hệ mới cần bổ sung.",
+    )
+    coverage: list[ChunkCoverage] = Field(
+        default_factory=list,
+        description="Danh sách cập nhật lại độ bao phủ (coverage) cho các chunk bị lỗi.",
+    )

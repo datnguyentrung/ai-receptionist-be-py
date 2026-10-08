@@ -29,11 +29,11 @@ from app.schemas import (
     SemanticGraphPatchFragment,
     ValidationIssue,
 )
-from app.services.ingestion.identity_resolver import (
+from app.utils.ingestion_helpers import stable_entity_key
+from app.services.ingestion.schema.identity_resolver import (
     IdentityResolutionError,
     OntologyIdentityResolver,
 )
-from app.services.ingestion.repository import stable_entity_key
 
 # ============================================================================
 # 1. NHÓM MÔ HÌNH DỮ LIỆU KẾT QUẢ (COMPILE RESULT MODELS)
@@ -306,10 +306,10 @@ class GraphPatchCompiler:
         if value in local_entity_keys:
             return local_entity_keys[value]
         # Tra cứu sau khi cắt khoảng trắng thừa
-        if isinstance(value, str) and value.strip() in local_entity_keys:
+        if value.strip() in local_entity_keys:
             return local_entity_keys[value.strip()]
         # Tra cứu thực thể đã staged từ các batch trước đó (tiền tố 'entity:')
-        if isinstance(value, str) and value.startswith("entity:"):
+        if value.startswith("entity:"):
             staged = staged_entities.get(value)
             return staged["stableKey"] if staged else None
         return None
