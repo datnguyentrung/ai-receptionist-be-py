@@ -21,3 +21,4 @@ insightface_data/
 
 # ADK local sessions and artifacts
 .adk/
+docs/log.txt
