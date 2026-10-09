@@ -16,6 +16,7 @@ from pydantic import Field
 from app.agent.tools.ingestion_tools import (
     batch_result_payload,
     log_ingestion_event,
+    repair_context,
     store_checkpoint,
     tool_exception,
     update_batch_accumulator,
@@ -341,6 +342,53 @@ class BatchExecutionModule:
                 )
                 return result
 
+            if prepared.batch.status == "REPAIR_REQUIRED":
+                scope_keys = self._normalize_scope_keys(
+                    prepared.batch.scope_keys, prepared.catalog_keys
+                )
+                rep_ctx = repair_context(prepared.batch)
+                if rep_ctx is not None and bool(prepared.batch.validation_attempts < operations.MAX_BATCH_VALIDATION_ATTEMPTS):
+                    strategy = "direct_repair"
+                    repair_payload = {
+                        "phase": "repair",
+                        "ingestionId": ingestion_id,
+                        "batchIndex": batch_index,
+                        "scopeKeys": scope_keys,
+                        "scope": (
+                            await operations.load_scope(
+                                prepared.container.ontology_cache,
+                                scope_keys,
+                                prepared.version_id,
+                            )
+                        )["scope"],
+                        "batch": prepared.payload["batch"],
+                        **rep_ctx,
+                    }
+                    calls += 1
+                    delta = await self._model.repair(repair_payload, tool_context)
+                    workspace = await operations.repair_batch(
+                        prepared.container.repository,
+                        prepared.container.ontology_cache,
+                        ingestion_id,
+                        batch_index,
+                        scope_keys,
+                        delta,
+                    )
+                    result = self._result_and_state(
+                        workspace, ingestion_id, batch_index, tool_context
+                    )
+                    self._log_metrics(
+                        ingestion_id,
+                        batch_index,
+                        strategy,
+                        calls,
+                        prompt_bytes,
+                        scope_keys,
+                        result.get("scopeKeys", scope_keys),
+                        result,
+                    )
+                    return result
+
             selected = self._normalize_scope_keys(
                 prepared.batch.scope_keys, prepared.catalog_keys
             )
@@ -477,7 +525,7 @@ class BatchExecutionModule:
                 calls += semantic_calls
 
             if self._should_repair(result):
-                repair_context = result["repairContext"]
+                rep_context = result["repairContext"]
                 repair_payload = {
                     "phase": "repair",
                     "ingestionId": ingestion_id,
@@ -491,7 +539,7 @@ class BatchExecutionModule:
                         )
                     )["scope"],
                     "batch": prepared.payload["batch"],
-                    **repair_context,
+                    **rep_context,
                 }
                 calls += 1
                 delta = await self._model.repair(repair_payload, tool_context)

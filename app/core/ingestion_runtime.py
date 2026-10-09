@@ -7,7 +7,6 @@ Mô-đun này cung cấp:
 - `runtime_lifespan`: Context manager dùng cho FastAPI Lifespan.
 """
 
-from typing import Any
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -30,6 +29,8 @@ from app.services.graphrag.graph_store import Neo4jGraphStore
 from app.services.ingestion.engine.graph_store import Neo4jIngestionStore
 from app.services.ingestion.engine.repository import IngestionRepository
 from app.services.ingestion.schema.ontology import OntologyCache
+from app.services.ontology.ontology_compiler import OntologyCompiler
+from app.services.ontology.ontology_lifecycle import OntologyLifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class ServiceContainer:
     repository: IngestionRepository
     ontology_cache: OntologyCache
     model_id: str
-    ontology_lifecycle: Any = None
+    ontology_lifecycle: OntologyLifecycle
     max_file_size: int = settings.INGESTION_MAX_FILE_SIZE_BYTES
     chunk_size_chars: int = settings.INGESTION_CHUNK_SIZE_CHARS
     batch_size: int = settings.INGESTION_BATCH_SIZE
@@ -170,6 +171,12 @@ async def build_service_container() -> ServiceContainer:
 
     repository = IngestionRepository()
     ontology_cache = OntologyCache(session_factory)
+    ontology_compiler = OntologyCompiler()
+    ontology_lifecycle = OntologyLifecycle(
+        session_factory=session_factory,
+        compiler=ontology_compiler,
+        cache=ontology_cache,
+    )
 
     return ServiceContainer(
         engine=engine,
@@ -181,6 +188,7 @@ async def build_service_container() -> ServiceContainer:
         repository=repository,
         ontology_cache=ontology_cache,
         model_id=settings.GOOGLE_ADK_MODEL,
+        ontology_lifecycle=ontology_lifecycle,
         max_file_size=settings.INGESTION_MAX_FILE_SIZE_BYTES,
         chunk_size_chars=settings.INGESTION_CHUNK_SIZE_CHARS,
         batch_size=settings.INGESTION_BATCH_SIZE,

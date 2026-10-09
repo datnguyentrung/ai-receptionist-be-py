@@ -27,8 +27,9 @@ Danh sách các hàm / phương thức trong module:
 - `_tool_error(...)`: Hàm nội bộ định dạng phản hồi lỗi nghiệp vụ chuẩn hóa cho tools.
 """
 
-from google.adk.tools import ToolContext
 from typing import Any, Literal
+
+from google.adk.tools import ToolContext
 
 from app.core.ingestion_runtime import get_service_container
 from app.enums import IngestionJobStatus
@@ -349,20 +350,40 @@ async def submit_ingestion_batch(
         # 3. Lưu trạng thái checkpoint, active_ingestion_id và canonical summary.
         tool_context.state["active_ingestion_id"] = ingestion_id
         if result.get("submittedBatchIndex") == batch_index and result.get("success"):
+            workspace = await operations.required_workspace(container.repository, ingestion_id)
             _update_batch_accumulator(
                 tool_context,
                 ingestion_id,
                 batch_index,
                 result,
-                await operations.required_workspace(container.repository, ingestion_id),
+                workspace,
             )
+        else:
+            workspace = None
         _store_checkpoint(tool_context, result)
 
-        # 4. Ghi log sự kiện submit kèm payload chi tiết
+        # 4. Thu thập toàn bộ đồ thị tích lũy cho tới thời điểm hiện tại từ các batch đã STAGED
+        staged_nodes = []
+        staged_edges = []
+        staged_batches = []
+        if result.get("success") and workspace is not None:
+            for b in workspace.batches:
+                if b.status == "STAGED" and b.graph_fragment:
+                    staged_batches.append(b.batch_index)
+                    staged_nodes.extend(b.graph_fragment.get("nodes", []))
+                    staged_edges.extend(b.graph_fragment.get("edges", []))
+
         merged_payload = {
             **result,
             "extraction": payload_dict,
         }
+        if staged_batches:
+            merged_payload["cumulativeGraph"] = {
+                "stagedBatches": sorted(staged_batches),
+                "nodes": staged_nodes,
+                "edges": staged_edges,
+            }
+
         log_ingestion_event(
             f"SUBMIT_BATCH [idx={batch_index}, scopes={scope_keys}]",
             payload=merged_payload,
@@ -422,20 +443,38 @@ async def repair_ingestion_batch(
             repair_delta,
         )
         result = _batch_result_payload(result, batch_index)
-        # 3. Lưu checkpoint và ghi log
-        tool_context.state["active_ingestion_id"] = ingestion_id
+        workspace = None
         if result.get("submittedBatchIndex") == batch_index and result.get("success"):
+            workspace = await operations.required_workspace(container.repository, ingestion_id)
             _update_batch_accumulator(
                 tool_context,
                 ingestion_id,
                 batch_index,
                 result,
-                await operations.required_workspace(container.repository, ingestion_id),
+                workspace,
             )
         _store_checkpoint(tool_context, result)
+
+        merged_payload = {**result, "repairDelta": delta_dict}
+        if result.get("success") and workspace is not None:
+            staged_nodes = []
+            staged_edges = []
+            staged_batches = []
+            for b in workspace.batches:
+                if b.status == "STAGED" and b.graph_fragment:
+                    staged_batches.append(b.batch_index)
+                    staged_nodes.extend(b.graph_fragment.get("nodes", []))
+                    staged_edges.extend(b.graph_fragment.get("edges", []))
+            if staged_batches:
+                merged_payload["cumulativeGraph"] = {
+                    "stagedBatches": sorted(staged_batches),
+                    "nodes": staged_nodes,
+                    "edges": staged_edges,
+                }
+
         log_ingestion_event(
             f"REPAIR_BATCH_DELTA [idx={batch_index}, scopes={scope_keys}]",
-            payload={**result, "repairDelta": delta_dict},
+            payload=merged_payload,
             request=req,
         )
         return result
@@ -535,6 +574,16 @@ async def fill_ingestion(
                 for n in f.get("nodes", [])
             ),
             "relations_count": sum(len(f.get("edges", [])) for f in fragments),
+            "relations": [
+                {
+                    "edgeName": e.get("edgeName"),
+                    "sourceTempId": e.get("sourceTempId"),
+                    "targetTempId": e.get("targetTempId"),
+                    "properties": e.get("properties", {}),
+                }
+                for f in fragments
+                for e in f.get("edges", [])
+            ],
             "chunks_count": len(workspace.chunks),
         }
 
@@ -1375,6 +1424,7 @@ def _tool_error(stage: str, code: str, message: str) -> dict[str, Any]:
 
 
 batch_result_payload = _batch_result_payload
+repair_context = _repair_context
 store_checkpoint = _store_checkpoint
 tool_exception = _tool_exception
 update_batch_accumulator = _update_batch_accumulator
@@ -1383,6 +1433,7 @@ __all__ = [
     "INGESTION_TOOLS",
     "batch_result_payload",
     "get_ingestion_tools",
+    "repair_context",
     "store_checkpoint",
     "tool_exception",
     "update_batch_accumulator",

@@ -344,3 +344,86 @@ def test_semantic_evidence_validator_handles_unsupported_terminal(monkeypatch) -
     assert result["terminal"] is True
     assert result["errors"][0]["code"] == "EVIDENCE_NOT_GROUNDED_UNSUPPORTED"
     assert model.calls == ["extract", "validate_evidence"]
+
+
+def test_repair_required_reuses_saved_scope_and_bypasses_selector_extractor(
+    monkeypatch,
+):
+    class RepairModel(FakeBatchModel):
+        async def repair(self, _payload, _context):
+            self.calls.append("repair")
+            return batch_execution.SemanticGraphRepairDelta(
+                baseline_fingerprint="fp1",
+                nodes=[],
+                edges=[],
+                coverage=[],
+            )
+
+    model = RepairModel()
+    module = BatchExecutionModule(model, prompt_max_bytes=1)
+    prep = _prepared(["facility", "training"])
+    prep.catalog_keys = ["facility", "training"]
+    prep.batch.status = "REPAIR_REQUIRED"
+    prep.batch.scope_keys = ["facility", "training"]
+    prep.batch.validation_attempts = 1
+    prep.batch.validated_baseline = {
+        "ontology_version": "version-1",
+        "nodes": [],
+        "edges": [],
+        "coverage": [],
+        "warnings": [],
+    }
+    prep.batch.validation_issues = [
+        {
+            "code": "UNKNOWN_ENTITY_REFERENCE",
+            "message": "Unknown edge source reference",
+            "location": "edges.0.sourceTempId",
+            "retryable": True,
+        }
+    ]
+
+    async def fake_prepare(*_args):
+        return prep
+
+    async def fake_load_scope(*_args):
+        return {
+            "scope": {
+                "scopeKeys": ["facility", "training"],
+                "entityTypes": [],
+                "properties": [],
+                "relationships": [],
+            }
+        }
+
+    repaired_scopes = None
+
+    async def fake_repair_batch(repo, cache, ing_id, b_idx, scopes, delta):
+        nonlocal repaired_scopes
+        repaired_scopes = scopes
+        assert scopes == ["facility", "training"]
+        return prep.workspace
+
+    monkeypatch.setattr(module, "_prepare", fake_prepare)
+    monkeypatch.setattr(batch_execution.operations, "load_scope", fake_load_scope)
+    monkeypatch.setattr(batch_execution.operations, "repair_batch", fake_repair_batch)
+    monkeypatch.setattr(
+        module,
+        "_result_and_state",
+        lambda ws, ing_id, b_idx, ctx: {
+            "success": True,
+            "stage": "batching",
+            "submittedBatchIndex": b_idx,
+            "scopeKeys": repaired_scopes,
+        },
+    )
+    monkeypatch.setattr(
+        batch_execution, "log_ingestion_event", lambda *_args, **_kwargs: None
+    )
+
+    result = asyncio.run(module.execute("ing-1", 0, SimpleNamespace(state={})))
+
+    assert result["success"] is True
+    assert repaired_scopes == ["facility", "training"]
+    # Verify selector and extract were NOT called, only repair was called
+    assert model.calls == ["repair"]
+
