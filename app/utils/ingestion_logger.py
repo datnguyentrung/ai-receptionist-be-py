@@ -394,25 +394,83 @@ def _format_merge_result(merge_data: dict[str, Any]) -> list[str]:
             f"         * Tổng bằng chứng trích dẫn: {n.get('evidence_count', 0)}"
         )
 
+    # Chi tiết các quan hệ sau gộp (Edges)
+    edges_map = merge_data.get("edges", {})
+    if edges_map:
+        lines.append(f"     • Chi tiết quan hệ sau gộp ({len(edges_map)} quan hệ duy nhất):")
+        for (ename, src, tgt), elist in edges_map.items():
+            b_list = sorted({e.get("batchIndex") for e in elist if e.get("batchIndex") is not None})
+            b_info = f" (từ Batch #{b_list[0]})" if len(b_list) == 1 else f" (gộp từ Batches {b_list})"
+            lines.append(f"       - [{ename}]: {src} -> {tgt}{b_info}")
+            for e in elist:
+                if e.get("properties"):
+                    lines.append(f"         Properties: {_json_str(e.get('properties'))}")
+                    break
+
+    return lines
+
+
+def _format_cumulative_graph(cum_graph: dict[str, Any]) -> list[str]:
+    """Định dạng toàn bộ đồ thị tích lũy (Cumulative Graph) cho tới thời điểm hiện tại."""
+    lines = ["  🌐 ĐỒ THỊ TÍCH LŨY HIỆN TẠI (CUMULATIVE GRAPH):"]
+    batches = cum_graph.get("stagedBatches", [])
+    nodes = cum_graph.get("nodes", [])
+    edges = cum_graph.get("edges", [])
+
+    lines.append(f"     • Tiến độ đã gom: {len(batches)} batches thành công (Batches: {batches})")
+    lines.append(f"     • Tổng thực thể tích lũy: {len(nodes)} nodes | Tổng quan hệ tích lũy: {len(edges)} edges")
+
+    if nodes:
+        lines.append(f"     • Danh sách Nodes đã trích xuất & tích lũy ({len(nodes)}):")
+        for n in nodes:
+            c_name = n.get("className", "Unknown")
+            ident = _json_str(n.get("identity") or {"tempId": n.get("tempId")})
+            t_id = n.get("tempId", "?")
+            lines.append(f"       - [{c_name}] tempId={t_id}, identity={ident}")
+            props = n.get("properties", [])
+            if props:
+                prop_strs = [f"{p.get('propertyName')}={_json_str(p.get('value'))}" for p in props]
+                lines.append(f"         Thuộc tính: {'; '.join(prop_strs)}")
+
+    if edges:
+        lines.append(f"     • Danh sách Edges đã trích xuất & tích lũy ({len(edges)}):")
+        for e in edges:
+            ename = e.get("edgeName", "Unknown")
+            src = e.get("sourceTempId", "?")
+            tgt = e.get("targetTempId", "?")
+            lines.append(f"       - [{ename}]: {src} -> {tgt}")
+            if e.get("properties"):
+                lines.append(f"         Properties: {_json_str(e.get('properties'))}")
+
     return lines
 
 
 def _format_fill_result(fill_prep: dict[str, Any], result: dict[str, Any]) -> list[str]:
-    """5. Định dạng FILL: payload cuối trước khi ghi Neo4j và kết quả đọc lại."""
+    """5. Định dạng FILL: payload cuối trước khi ghi Neo4j và kết quả đọc lại thành công."""
     lines = ["  💾 FILL & READBACK NEO4J:"]
     lines.append("     • Payload chuẩn bị ghi vào đồ thị:")
     lines.append(f"       - entities = {fill_prep.get('entities_count', 0)}")
-    for e in fill_prep.get("entities", [])[:10]:
+    entities = fill_prep.get("entities", [])
+    for e in entities[:15]:
         lines.append(
-            f"         * [{e.get('className')}] identity={_json_str(e.get('identity'))}"
+            f"         * [{e.get('className')}] identity={_json_str(e.get('identity'))} (tempId={e.get('tempId')})"
         )
-    if len(fill_prep.get("entities", [])) > 10:
+    if len(entities) > 15:
         lines.append(
-            f"         ... và {len(fill_prep.get('entities', [])) - 10} entities khác"
+            f"         ... và {len(entities) - 15} entities khác"
         )
 
     lines.append(f"       - facts = {fill_prep.get('facts_count', 0)}")
     lines.append(f"       - relations = {fill_prep.get('relations_count', 0)}")
+    relations = fill_prep.get("relations", [])
+    if relations:
+        for r in relations[:15]:
+            lines.append(
+                f"         * [{r.get('edgeName', 'RELATION')}]: {r.get('sourceTempId')} -> {r.get('targetTempId')}"
+            )
+        if len(relations) > 15:
+            lines.append(f"         ... và {len(relations) - 15} relations khác")
+
     lines.append(f"       - chunks = {fill_prep.get('chunks_count', 0)}")
 
     lines.append("     • Kết quả kiểm tra đọc lại (Readback Verification):")
@@ -424,6 +482,11 @@ def _format_fill_result(fill_prep: dict[str, Any], result: dict[str, Any]) -> li
         f"       - chunks = {result.get('chunks')} (actual) | facts = {result.get('facts')} (actual)"
     )
     lines.append(f"       - commitStatus = {result.get('commitStatus')}")
+
+    if result.get("readbackVerified") and (entities or relations):
+        lines.append("     ✅ ĐÃ FILL VÀO NEO4J THÀNH CÔNG:")
+        lines.append(f"       - Đã lưu {result.get('nodes', len(entities))} nodes thực thể")
+        lines.append(f"       - Đã lưu {result.get('edges', len(relations))} edges quan hệ")
 
     return lines
 
@@ -524,8 +587,15 @@ def log_ingestion_event(
                 lines.extend(_format_merged_ontology(payload["scope"]))
 
             # 2 & 3. Trích xuất fragment chi tiết (EXTRACT_RESULT) & REPAIR_DIFF
+            ext_res = None
             if "extractResult" in payload:
                 ext_res = payload["extractResult"]
+            elif "extraction" in payload and isinstance(payload["extraction"], dict):
+                ext_res = payload["extraction"]
+            elif "repairDelta" in payload and isinstance(payload["repairDelta"], dict):
+                ext_res = payload["repairDelta"]
+
+            if ext_res is not None:
                 # Nếu có lần sửa trước đó
                 if (
                     payload.get("previousFragment")
@@ -554,6 +624,12 @@ def log_ingestion_event(
                 lines.extend(_format_merge_result(merge_data))
             elif "mergeResult" in payload and isinstance(payload["mergeResult"], dict):
                 lines.extend(_format_merge_result(payload["mergeResult"]))
+
+            # Đồ thị tích lũy cho tới thời điểm hiện tại (CUMULATIVE_GRAPH)
+            if "cumulativeGraph" in payload and isinstance(
+                payload["cumulativeGraph"], dict
+            ):
+                lines.extend(_format_cumulative_graph(payload["cumulativeGraph"]))
 
             # 5. Payload trước khi ghi Neo4j & Readback (FILL)
             if "fillPreparation" in payload and isinstance(

@@ -84,13 +84,13 @@ Mọi chunk trong batch bắt buộc phải có đúng 1 mục `coverage`:
 
 | `decision` | Ý nghĩa | Điều kiện hợp lệ |
 | :--- | :--- | :--- |
-| `MAPPED` | Chunk thực sự đóng góp ít nhất 1 fact (thuộc tính hoặc quan hệ) | Bắt buộc có `chunkIndex` trong ít nhất 1 `property.evidence` hoặc `edge.evidence` |
 | `DUPLICATE_EVIDENCE` | Chunk lặp lại thông tin đã được trích xuất ở chunk/mẻ khác | Có fact tương ứng đã tồn tại trong mẻ hoặc các mẻ trước |
 | `NO_RELEVANT_FACT` | Chunk có nội dung thuộc miền nhưng không tạo ra fact mới cho graph | Cung cấp `reason` nêu rõ lý do |
 | `NOT_RELEVANT` | Chunk nằm ngoài phạm vi tri thức cần nạp | Cung cấp `reason` nêu rõ lý do |
 | `UNSUPPORTED_BY_ONTOLOGY` | Chunk chứa tri thức nhưng ontology hiện hành chưa hỗ trợ | Cung cấp `reason` chi tiết (kích hoạt đề xuất ontology) |
 | `AMBIGUOUS` | Nội dung mập mờ, không đủ cơ sở để trích xuất | Yêu cầu xem xét / làm rõ |
 | `FAILED` | Lỗi trong quá trình phân tích chunk | Yêu cầu xử lý lại |
+| `MAPPED` | Chunk thực sự đóng góp ít nhất 1 fact (thuộc tính hoặc quan hệ) | Bắt buộc có `chunkIndex` trong ít nhất 1 `property.evidence` hoặc `edge.evidence` |
 
 ---
 

@@ -302,16 +302,34 @@ class GraphPatchCompiler:
         local_entity_keys: dict[str, str],
         staged_entities: dict[str, dict],
     ) -> str | None:
-        # Tra cứu trực tiếp trong danh sách thực thể cục bộ
-        if value in local_entity_keys:
-            return local_entity_keys[value]
-        # Tra cứu sau khi cắt khoảng trắng thừa
-        if value.strip() in local_entity_keys:
-            return local_entity_keys[value.strip()]
-        # Tra cứu thực thể đã staged từ các batch trước đó (tiền tố 'entity:')
-        if value.startswith("entity:"):
-            staged = staged_entities.get(value)
+        val = value.strip()
+        if not val:
+            return None
+
+        # 1. Tra cứu thực thể cục bộ trong batch hiện tại (theo temp_id, index, identity fields)
+        if val in local_entity_keys:
+            return local_entity_keys[val]
+
+        # 2. Tra cứu thực thể đã staged nếu có tiền tố 'entity:'
+        if val.startswith("entity:"):
+            staged = staged_entities.get(val)
             return staged["stableKey"] if staged else None
+
+        # 3. Tra cứu thực thể đã staged nếu LLM dùng raw hash (bỏ quên 'entity:')
+        prefixed = f"entity:{val}"
+        if prefixed in staged_entities:
+            return staged_entities[prefixed]["stableKey"]
+
+        # 4. Tra cứu thực thể đã staged theo stableKey hoặc identity value
+        for ref, staged in staged_entities.items():
+            if staged.get("stableKey") == val:
+                return staged["stableKey"]
+            identity = staged.get("identity")
+            if isinstance(identity, dict):
+                for ident_val in identity.values():
+                    if isinstance(ident_val, str) and ident_val.strip() == val:
+                        return staged.get("stableKey", ref.removeprefix("entity:"))
+
         return None
 
 

@@ -18,33 +18,33 @@ metadata:
     - ingestion_batch_agent
 ---
 
-# Ingestion workflow
+# Quy trình nạp dữ liệu (Ingestion workflow)
 
-Load this skill before starting ingestion and retain its instructions until the
-workflow ends. The root agent coordinates the document workflow; it does not
-retrieve chunks, choose scopes, extract a graph, submit a batch, or repair a
-batch itself.
+Tải skill này trước khi bắt đầu nạp dữ liệu và duy trì các hướng dẫn này cho đến khi
+quy trình kết thúc. Root agent điều phối toàn bộ quy trình xử lý tài liệu; nó không
+trực tiếp truy xuất chunk, chọn scope, trích xuất graph, gửi batch hay tự sửa batch.
 
-1. Call `begin_ingestion` for the supplied artifact. Read `ingestionId` and
-   `nextBatch` from its result.
-2. For each pending batch, call `ingestion_batch_agent` once with exactly this
-   argument shape: `{ "request": "{\\"ingestionId\\":\\"...\\",\\"batchIndex\\":0}" }`.
-   The batch agent owns exactly that batch:
-   it retrieves the batch once, loads ontology scopes, creates a
-   `SemanticGraphPatchFragment`, and submits or repairs it until it is staged,
-   terminal, or blocked by schema review.
-3. If the batch result reports a schema blocker, coordinate the existing
-   proposal/review/apply/rebase tools at the root. After rebase, call the same
-   batch agent again for that batch. Ontology scopes must be loaded again;
-   cached document chunks remain valid.
-4. When a batch is staged, use its returned `nextBatch` and call the batch
-   agent for the next pending batch. Do not fetch completed batches again.
-5. Once all batches are staged, call `finalize_ingestion`. Only call
-   `fill_ingestion` after finalization reports `ready_to_fill` and the user
-   has requested persistence.
+1. Gọi `begin_ingestion` cho artifact được cung cấp. Đọc `ingestionId` và
+   `nextBatch` từ kết quả trả về.
+2. Với mỗi batch đang chờ xử lý, gọi `ingestion_batch_agent` một lần với định dạng
+   tham số chính xác như sau: `{ "request": "{\\"ingestionId\\":\\"...\\",\\"batchIndex\\":0}" }`.
+   Batch agent chịu trách nhiệm xử lý duy nhất batch đó:
+   nó truy xuất batch một lần, tải các ontology scope, tạo
+   `SemanticGraphPatchFragment`, và gửi hoặc sửa lại fragment cho đến khi được staged,
+   terminal, hoặc bị chặn do cần duyệt schema (schema review).
+3. Nếu kết quả batch báo cáo có schema blocker, hãy điều phối các công cụ
+   proposal/review/apply/rebase hiện có tại root agent. Sau khi rebase, gọi lại chính
+   batch agent đó cho batch hiện tại. Các ontology scope phải được tải lại;
+   các document chunk đã lưu cache vẫn giữ nguyên hiệu lực.
+4. Khi một batch đã được staged, sử dụng giá trị `nextBatch` được trả về và gọi batch
+   agent cho batch đang chờ tiếp theo. Không truy xuất lại các batch đã hoàn thành.
+5. Khi tất cả các batch đã được staged, gọi `finalize_ingestion`. Chỉ gọi
+   `fill_ingestion` sau khi quá trình finalization báo cáo trạng thái `ready_to_fill`
+   và người dùng đã yêu cầu lưu trữ (persistence).
 
-The batch agent receives only batch primitives. Service tools enforce identity,
-validation, canonicalization, and persistence invariants; do not restate or
-override them in prompts. Returned tool payloads keep the established JSON
-field names. The root's cross-batch context contains canonical entities only,
-never old chunks or raw model output.
+Batch agent chỉ nhận các primitive của batch. Các service tool thực thi tính toàn vẹn
+về định danh (identity), kiểm thực (validation), chuẩn hóa (canonicalization) và
+lưu trữ (persistence); không diễn giải lại hoặc ghi đè chúng trong prompt. Payload
+trả về từ các tool giữ nguyên các tên trường JSON đã quy định. Ngữ cảnh xuyên suốt
+các batch (cross-batch context) của root agent chỉ chứa các canonical entity, tuyệt
+đối không chứa chunk cũ hay output thô của model.
