@@ -5,8 +5,10 @@ import os
 from typing import Any
 
 from google.adk.agents import Agent
+from google.adk.models.google_llm import Gemini
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
+from google.genai.types import HttpRetryOptions
 
 from app.agent.skills.ingestion.batch_execution import (
     BatchExecutionModule,
@@ -14,9 +16,9 @@ from app.agent.skills.ingestion.batch_execution import (
 )
 
 _BATCH_INSTRUCTION = """
-This agent is the public shell for one ingestion batch. Python prefetches data,
-selects schemas, submits validation results, and returns the final workflow JSON.
-The nested agent itself has no function tools.
+Agent này là lớp vỏ tiếp nhận cho một batch nạp tài liệu (ingestion batch). Python sẽ nạp trước dữ liệu,
+chọn schema, gửi kết quả xác thực (validation) và trả về JSON quy trình cuối cùng.
+Bản thân agent này không có công cụ hàm (function tools).
 """.strip()
 
 
@@ -82,11 +84,19 @@ def create_ingestion_batch_agent() -> Agent:
 
     return Agent(
         name="ingestion_batch_agent",
-        model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
-        description="Processes one ingestion batch and returns its workflow result.",
+        model=Gemini(
+            model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            retry_options=HttpRetryOptions(
+                attempts=5,
+                initial_delay=3.0,
+                max_delay=30.0,
+                http_status_codes=[429, 503],
+            ),
+        ),
+        description="Xử lý một batch nạp tài liệu và trả về kết quả quy trình tương ứng.",
         instruction=_BATCH_INSTRUCTION,
         output_schema=BatchExtractionOutput,
-        mode="single_turn",
+        mode="chat",
         include_contents="none",
         generate_content_config=types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(

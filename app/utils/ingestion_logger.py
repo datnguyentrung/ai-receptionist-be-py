@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.core.rate_limiter import global_rate_limiter
+
 LOG_FILE = Path(__file__).resolve().parents[2] / "docs" / "log.txt"
 
 
@@ -722,9 +724,13 @@ class ADKDetailedLoggerPlugin(BasePlugin):
             await asyncio.sleep(1.2)
 
     async def before_model_callback(self, *, callback_context: Any, llm_request: Any):
-        agent_name = getattr(
-            getattr(callback_context, "agent", None), "name", "unknown"
-        )
+        waited = await global_rate_limiter.acquire()
+        agent = getattr(callback_context, "agent", None)
+        if agent is None:
+            inv_ctx = getattr(callback_context, "_invocation_context", None)
+            agent = getattr(inv_ctx, "agent", None)
+        agent_name = getattr(agent, "name", "unknown")
+
         req_data = {
             "agent": agent_name,
             "model": getattr(llm_request, "model", None),
@@ -734,6 +740,8 @@ class ADKDetailedLoggerPlugin(BasePlugin):
                 for t in (getattr(llm_request, "tools", []) or [])
             ],
         }
+        if waited > 0:
+            req_data["rateLimitWaitSeconds"] = round(waited, 2)
         write_raw_trace(f"📤 [MODEL CALL REQUEST] ({agent_name})", req_data)
 
     async def after_model_callback(self, *, callback_context: Any, llm_response: Any):
@@ -773,7 +781,8 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         if not _is_rate_limit(error_text):
             return None
 
-        agent = getattr(callback_context, "agent", None)
+        inv_ctx = getattr(callback_context, "_invocation_context", None)
+        agent = getattr(callback_context, "agent", None) or getattr(inv_ctx, "agent", None)
         agent_name = getattr(agent, "name", "root_agent")
         delay = _retry_delay_seconds(error_text)
         write_raw_trace(
@@ -783,6 +792,8 @@ class ADKDetailedLoggerPlugin(BasePlugin):
 
         llm = getattr(agent, "canonical_model", None)
         if llm is None:
+            # When model object is not directly available, wait out the delay to allow quota replenishment
+            await asyncio.sleep(delay)
             return None
 
         for attempt in range(1, 4):

@@ -52,7 +52,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -1050,7 +1050,9 @@ async def _classify_missing_scopes(
 
     classified: list[dict[str, Any]] = []
 
-    async def candidate_scopes(matches: Any) -> list[str]:
+    async def candidate_scopes(
+        matches: Callable[[OntologyRegistry], bool]
+    ) -> list[str]:
         if not hasattr(ontology_cache, "get"):
             return []
         candidates: list[str] = []

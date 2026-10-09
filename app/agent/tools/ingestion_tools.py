@@ -1374,4 +1374,16 @@ def _tool_error(stage: str, code: str, message: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["INGESTION_TOOLS", "get_ingestion_tools"]
+batch_result_payload = _batch_result_payload
+store_checkpoint = _store_checkpoint
+tool_exception = _tool_exception
+update_batch_accumulator = _update_batch_accumulator
+
+__all__ = [
+    "INGESTION_TOOLS",
+    "batch_result_payload",
+    "get_ingestion_tools",
+    "store_checkpoint",
+    "tool_exception",
+    "update_batch_accumulator",
+]
