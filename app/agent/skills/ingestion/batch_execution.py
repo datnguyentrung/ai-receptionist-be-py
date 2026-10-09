@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
 
 from google.adk.agents import Agent
@@ -88,76 +89,17 @@ class BatchModel(Protocol):
     ) -> SemanticEvidenceValidationResult: ...
 
 
-_SELECTOR_INSTRUCTION = """
-Chọn tất cả các scope ontology cần thiết để trích xuất batch nạp tài liệu được cung cấp.
-Chỉ sử dụng các scopeKeys có trong scopeCatalog. Trả về JSON khớp với output schema.
-Không tự trích xuất dữ liệu đồ thị và không gọi bất kỳ công cụ nào.
-""".strip()
+_PROMPTS_DIRECTORY = Path(__file__).with_name("prompts")
 
-_EXTRACTION_INSTRUCTION = """
-Trích xuất chính xác một batch nạp tài liệu vào structured output schema.
 
-NGUYÊN TẮC:
-1. Chỉ sử dụng node, edge và property được định nghĩa trong ontology schema.
-2. Trích xuất đầy đủ các atomic claims; không bỏ sót thông tin quan trọng.
-3. Mọi dữ kiện phải có căn cứ từ đúng chunk nguồn.
-4. Không suy diễn, bổ sung hoặc làm thay đổi ý nghĩa thông tin nguồn.
+def _load_instruction(name: str) -> str:
+    return (_PROMPTS_DIRECTORY / name).read_text(encoding="utf-8").strip()
 
-QUY TẮC EVIDENCE:
-1. evidence.text phải được sao chép trực tiếp từ chunk gốc.
-2. Ưu tiên trích dẫn đoạn ngắn nhất nhưng đủ chứng minh dữ kiện.
-3. Không tự nối dòng, diễn đạt lại, thêm dấu câu hoặc chuẩn hóa văn bản.
-4. Nếu bằng chứng trải dài nhiều dòng, giữ nguyên ký tự xuống dòng.
-5. Khi có thể, sử dụng nhiều trích dẫn ngắn thay vì ghép các đoạn
-   thành một câu mới.
-6. Trước khi trả kết quả, tự kiểm tra mỗi evidence.text có xuất hiện
-   nguyên văn trong chunk nguồn hay không.
 
-Trả về đầy đủ scopeKeys áp dụng và SemanticGraphPatchFragment.
-Không gọi công cụ hoặc mô tả công việc.
-""".strip()
-
-_REPAIR_INSTRUCTION = """
-Sửa chính xác một batch dựa trên protectedBaseline và validationIssues.
-
-NGUYÊN TẮC:
-1. Chỉ trả về SemanticGraphRepairDelta với baselineFingerprint đã cung cấp.
-2. Giữ nguyên toàn bộ dữ kiện baseline hợp lệ.
-3. Chỉ sửa những dữ kiện liên quan trực tiếp đến validationIssues.
-4. Không thêm, xóa hoặc thay đổi thông tin không liên quan đến lỗi.
-5. Mọi dữ kiện sau sửa phải được hỗ trợ bởi chunk nguồn.
-
-NẾU GẶP EVIDENCE_NOT_GROUNDED:
-- Ưu tiên tìm và sao chép lại đoạn trích nguyên văn từ chunk.
-- Giữ nguyên dấu câu, khoảng trắng và ký tự xuống dòng.
-- Không tự viết lại nội dung evidence theo cách diễn đạt của mình.
-- Nếu bằng chứng quá dài, chọn đoạn ngắn hơn nhưng vẫn đủ chứng minh.
-- Không thay đổi dữ kiện đúng chỉ vì evidence bị sai định dạng.
-
-Không gọi công cụ nào.
-""".strip()
-
-_SEMANTIC_VALIDATION_INSTRUCTION = """
-Bạn là Semantic Evidence Validator trong hệ thống Knowledge Graph Ingestion.
-NHIỆM VỤ:
-Đánh giá các evidence không khớp nguyên văn với tài liệu nguồn.
-Đánh giá đồng thời:
-1. evidence do LLM tạo ra có giữ nguyên ngữ nghĩa của đoạn nguồn tương ứng không?
-2. Đoạn nguồn có thực sự hỗ trợ node, edge hoặc property được trích xuất không?
-QUY TẮC:
-- Cho phép thay đổi xuống dòng, khoảng trắng, dấu câu và cách trình bày nếu không đổi ý nghĩa.
-- Không chấp nhận thay đổi số liệu, tên riêng, địa điểm, ngày tháng, phủ định, điều kiện, quan hệ giữa các thực thể hoặc mức độ khẳng định.
-- Không tự suy diễn những thông tin nguồn không nêu.
-- Không tự trích xuất thêm dữ liệu đồ thị.
-- Không gọi công cụ.
-KẾT QUẢ:
-- EQUIVALENT: Evidence khác hình thức nhưng giữ nguyên thông tin và đoạn nguồn hỗ trợ đúng claim.
-- REPAIRABLE: Có sai lệch ngữ nghĩa nhưng nguồn có đủ thông tin để sửa dữ kiện.
-- UNSUPPORTED: Claim không được tài liệu hỗ trợ.
-- UNCERTAIN: Chưa thể xác định chắc chắn.
-Nếu không đủ căn cứ, không được trả EQUIVALENT.
-Trả về kết quả theo structured output schema.
-""".strip()
+_SELECTOR_INSTRUCTION = _load_instruction("scope-selector.md")
+_EXTRACTION_INSTRUCTION = _load_instruction("extraction.md")
+_REPAIR_INSTRUCTION = _load_instruction("repair.md")
+_SEMANTIC_VALIDATION_INSTRUCTION = _load_instruction("semantic-evidence-validation.md")
 
 
 def _single_turn_agent(
