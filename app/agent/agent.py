@@ -8,7 +8,9 @@ from google.adk.apps.app import App
 from google.adk.plugins.context_filter_plugin import ContextFilterPlugin
 from google.adk.plugins.save_files_as_artifacts_plugin import SaveFilesAsArtifactsPlugin
 from google.adk.tools.skill_toolset import SkillToolset
+from google.adk.models.google_llm import Gemini
 from google.genai import types
+from google.genai.types import HttpRetryOptions
 
 from app.agent.skills.local_skill_registry import LocalSkillRegistry
 from app.agent.skills.root_prompt_renderer import render_root_agent_prompt
@@ -45,7 +47,15 @@ def create_root_agent() -> Agent:
 
     return Agent(
         name="root_agent",
-        model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+        model=Gemini(
+            model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            retry_options=HttpRetryOptions(
+                attempts=5,
+                initial_delay=3.0,
+                max_delay=30.0,
+                http_status_codes=[429, 503],
+            ),
+        ),
         description=(
             "A root agent that dynamically routes requests to available skills."
         ),

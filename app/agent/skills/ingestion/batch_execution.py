@@ -1,24 +1,26 @@
 """Deterministic orchestration for one structured ingestion batch."""
 
-from __future__ import annotations
-
 import json
 import os
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 from google.adk.agents import Agent
+from google.adk.models.google_llm import Gemini
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
+from google.genai.types import HttpRetryOptions
 from pydantic import Field
 
 from app.agent.tools.ingestion_tools import (
-    _batch_result_payload,
-    _store_checkpoint,
-    _tool_exception,
-    _update_batch_accumulator,
+    batch_result_payload,
     log_ingestion_event,
+    store_checkpoint,
+    tool_exception,
+    update_batch_accumulator,
 )
+from app.core.config import settings
 from app.core.ingestion_runtime import get_service_container
 from app.schemas.ingestion.base import IngestionModel
 from app.schemas.ingestion.semantic_patch import (
@@ -27,6 +29,29 @@ from app.schemas.ingestion.semantic_patch import (
 )
 from app.services.ingestion.engine import operations
 from app.utils.ingestion_helpers import stable_entity_key
+
+
+class EvidenceVerdict(str, Enum):
+    EQUIVALENT = "EQUIVALENT"
+    REPAIRABLE = "REPAIRABLE"
+    UNSUPPORTED = "UNSUPPORTED"
+    UNCERTAIN = "UNCERTAIN"
+
+
+class SemanticEvidenceDecision(IngestionModel):
+    issue_id: str = Field(description="ID issue được cấp trong input")
+    verdict: EvidenceVerdict
+    source_quote: str | None = Field(
+        default=None,
+        description="Đoạn trích NGUYÊN VĂN từ chunk nguồn; không paraphrase",
+    )
+    explanation: str = Field(
+        description="Giải thích ngắn gọn kết quả, tập trung claim và source"
+    )
+
+
+class SemanticEvidenceValidationResult(IngestionModel):
+    decisions: list[SemanticEvidenceDecision] = Field(default_factory=list)
 
 
 class ScopeSelectionOutput(IngestionModel):
@@ -43,7 +68,7 @@ class BatchExtractionOutput(IngestionModel):
 
 
 class BatchModel(Protocol):
-    """External seam for the three bounded model phases."""
+    """External seam for the bounded model phases."""
 
     async def select_scopes(
         self, payload: dict[str, Any], tool_context: Any
@@ -57,25 +82,80 @@ class BatchModel(Protocol):
         self, payload: dict[str, Any], tool_context: Any
     ) -> SemanticGraphRepairDelta: ...
 
+    async def validate_evidence(
+        self, payload: dict[str, Any], tool_context: Any
+    ) -> SemanticEvidenceValidationResult: ...
+
 
 _SELECTOR_INSTRUCTION = """
-Select every ontology scope required to extract the supplied ingestion batch.
-Use only scopeKeys listed in scopeCatalog. Return JSON matching the output schema.
-Do not extract graph data and do not call tools.
+Chọn tất cả các scope ontology cần thiết để trích xuất batch nạp tài liệu được cung cấp.
+Chỉ sử dụng các scopeKeys có trong scopeCatalog. Trả về JSON khớp với output schema.
+Không tự trích xuất dữ liệu đồ thị và không gọi bất kỳ công cụ nào.
 """.strip()
 
 _EXTRACTION_INSTRUCTION = """
-Extract exactly one ingestion batch into the structured output schema.
-Use only names defined by the supplied ontology schema. Ground every node, edge,
-property, and coverage record in the supplied chunks. Return all applicable
-scopeKeys and the SemanticGraphPatchFragment. Do not call tools or describe work.
+Trích xuất chính xác một batch nạp tài liệu vào structured output schema.
+
+NGUYÊN TẮC:
+1. Chỉ sử dụng node, edge và property được định nghĩa trong ontology schema.
+2. Trích xuất đầy đủ các atomic claims; không bỏ sót thông tin quan trọng.
+3. Mọi dữ kiện phải có căn cứ từ đúng chunk nguồn.
+4. Không suy diễn, bổ sung hoặc làm thay đổi ý nghĩa thông tin nguồn.
+
+QUY TẮC EVIDENCE:
+1. evidence.text phải được sao chép trực tiếp từ chunk gốc.
+2. Ưu tiên trích dẫn đoạn ngắn nhất nhưng đủ chứng minh dữ kiện.
+3. Không tự nối dòng, diễn đạt lại, thêm dấu câu hoặc chuẩn hóa văn bản.
+4. Nếu bằng chứng trải dài nhiều dòng, giữ nguyên ký tự xuống dòng.
+5. Khi có thể, sử dụng nhiều trích dẫn ngắn thay vì ghép các đoạn
+   thành một câu mới.
+6. Trước khi trả kết quả, tự kiểm tra mỗi evidence.text có xuất hiện
+   nguyên văn trong chunk nguồn hay không.
+
+Trả về đầy đủ scopeKeys áp dụng và SemanticGraphPatchFragment.
+Không gọi công cụ hoặc mô tả công việc.
 """.strip()
 
 _REPAIR_INSTRUCTION = """
-Repair exactly one ingestion batch from protectedBaseline and validationIssues.
-Return only a SemanticGraphRepairDelta with the supplied baselineFingerprint.
-Preserve valid baseline facts; add or correct only facts necessary to address the
-issues. Ground every change in the supplied chunks. Do not call tools.
+Sửa chính xác một batch dựa trên protectedBaseline và validationIssues.
+
+NGUYÊN TẮC:
+1. Chỉ trả về SemanticGraphRepairDelta với baselineFingerprint đã cung cấp.
+2. Giữ nguyên toàn bộ dữ kiện baseline hợp lệ.
+3. Chỉ sửa những dữ kiện liên quan trực tiếp đến validationIssues.
+4. Không thêm, xóa hoặc thay đổi thông tin không liên quan đến lỗi.
+5. Mọi dữ kiện sau sửa phải được hỗ trợ bởi chunk nguồn.
+
+NẾU GẶP EVIDENCE_NOT_GROUNDED:
+- Ưu tiên tìm và sao chép lại đoạn trích nguyên văn từ chunk.
+- Giữ nguyên dấu câu, khoảng trắng và ký tự xuống dòng.
+- Không tự viết lại nội dung evidence theo cách diễn đạt của mình.
+- Nếu bằng chứng quá dài, chọn đoạn ngắn hơn nhưng vẫn đủ chứng minh.
+- Không thay đổi dữ kiện đúng chỉ vì evidence bị sai định dạng.
+
+Không gọi công cụ nào.
+""".strip()
+
+_SEMANTIC_VALIDATION_INSTRUCTION = """
+Bạn là Semantic Evidence Validator trong hệ thống Knowledge Graph Ingestion.
+NHIỆM VỤ:
+Đánh giá các evidence không khớp nguyên văn với tài liệu nguồn.
+Đánh giá đồng thời:
+1. evidence do LLM tạo ra có giữ nguyên ngữ nghĩa của đoạn nguồn tương ứng không?
+2. Đoạn nguồn có thực sự hỗ trợ node, edge hoặc property được trích xuất không?
+QUY TẮC:
+- Cho phép thay đổi xuống dòng, khoảng trắng, dấu câu và cách trình bày nếu không đổi ý nghĩa.
+- Không chấp nhận thay đổi số liệu, tên riêng, địa điểm, ngày tháng, phủ định, điều kiện, quan hệ giữa các thực thể hoặc mức độ khẳng định.
+- Không tự suy diễn những thông tin nguồn không nêu.
+- Không tự trích xuất thêm dữ liệu đồ thị.
+- Không gọi công cụ.
+KẾT QUẢ:
+- EQUIVALENT: Evidence khác hình thức nhưng giữ nguyên thông tin và đoạn nguồn hỗ trợ đúng claim.
+- REPAIRABLE: Có sai lệch ngữ nghĩa nhưng nguồn có đủ thông tin để sửa dữ kiện.
+- UNSUPPORTED: Claim không được tài liệu hỗ trợ.
+- UNCERTAIN: Chưa thể xác định chắc chắn.
+Nếu không đủ căn cứ, không được trả EQUIVALENT.
+Trả về kết quả theo structured output schema.
 """.strip()
 
 
@@ -84,11 +164,19 @@ def _single_turn_agent(
 ) -> Agent:
     return Agent(
         name=name,
-        model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+        model=Gemini(
+            model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            retry_options=HttpRetryOptions(
+                attempts=5,
+                initial_delay=3.0,
+                max_delay=30.0,
+                http_status_codes=[429, 503],
+            ),
+        ),
         description="Internal structured ingestion phase.",
         instruction=instruction,
         output_schema=output_schema,
-        mode="single_turn",
+        mode="chat",
         include_contents="none",
         generate_content_config=types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(
@@ -121,6 +209,14 @@ class AdkBatchModel:
                 "ingestion_batch_repairer",
                 _REPAIR_INSTRUCTION,
                 SemanticGraphRepairDelta,
+            ),
+            include_plugins=True,
+        )
+        self._semantic_validator = AgentTool(
+            _single_turn_agent(
+                "ingestion_evidence_validator",
+                _SEMANTIC_VALIDATION_INSTRUCTION,
+                SemanticEvidenceValidationResult,
             ),
             include_plugins=True,
         )
@@ -161,6 +257,16 @@ class AdkBatchModel:
     ) -> SemanticGraphRepairDelta:
         return await self._run(
             self._repairer, payload, tool_context, SemanticGraphRepairDelta
+        )
+
+    async def validate_evidence(
+        self, payload: dict[str, Any], tool_context: Any
+    ) -> SemanticEvidenceValidationResult:
+        return await self._run(
+            self._semantic_validator,
+            payload,
+            tool_context,
+            SemanticEvidenceValidationResult,
         )
 
 
@@ -213,10 +319,16 @@ class BatchExecutionModule:
 
             if prepared.batch.status == "STAGED":
                 result = {
-                    **_batch_result_payload(prepared.workspace, batch_index),
+                    **batch_result_payload(prepared.workspace, batch_index),
                     "idempotent": True,
                 }
-                _store_checkpoint(tool_context, result)
+                store_checkpoint(tool_context, result)
+                scope_keys_val = result.get("scopeKeys")
+                resolved_keys = (
+                    [str(k) for k in scope_keys_val]
+                    if isinstance(scope_keys_val, list)
+                    else []
+                )
                 self._log_metrics(
                     ingestion_id,
                     batch_index,
@@ -224,7 +336,7 @@ class BatchExecutionModule:
                     calls,
                     prompt_bytes,
                     [],
-                    result.get("scopeKeys", []),
+                    resolved_keys,
                     result,
                 )
                 return result
@@ -274,7 +386,7 @@ class BatchExecutionModule:
                             ingestion_id,
                             "MODEL_SELECTED_NO_VALID_SCOPE",
                         )
-                        _store_checkpoint(tool_context, result)
+                        store_checkpoint(tool_context, result)
                         self._log_metrics(
                             ingestion_id,
                             batch_index,
@@ -320,7 +432,7 @@ class BatchExecutionModule:
                 result = self._failure(
                     "scope_selection", ingestion_id, "NO_SCOPE_SELECTED"
                 )
-                _store_checkpoint(tool_context, result)
+                store_checkpoint(tool_context, result)
                 self._log_metrics(
                     ingestion_id,
                     batch_index,
@@ -346,6 +458,24 @@ class BatchExecutionModule:
                     result, workspace = await self._submit(
                         prepared, scope_keys, extraction_output.extraction, tool_context
                     )
+
+            # Semantic Evidence Validation flow
+            working_extraction = extraction_output.extraction
+            if self._should_run_semantic_evidence(result, ingestion_id):
+                (
+                    result,
+                    workspace,
+                    working_extraction,
+                    semantic_calls,
+                ) = await self._handle_semantic_evidence_validation(
+                    prepared=prepared,
+                    scope_keys=scope_keys,
+                    extraction=working_extraction,
+                    result=result,
+                    tool_context=tool_context,
+                )
+                calls += semantic_calls
+
             if self._should_repair(result):
                 repair_context = result["repairContext"]
                 repair_payload = {
@@ -389,8 +519,8 @@ class BatchExecutionModule:
             )
             return result
         except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors.
-            result = _tool_exception("structured_batch_execution", ingestion_id, exc)
-            _store_checkpoint(tool_context, result)
+            result = tool_exception("structured_batch_execution", ingestion_id, exc)
+            store_checkpoint(tool_context, result)
             self._log_metrics(
                 ingestion_id,
                 batch_index,
@@ -412,7 +542,7 @@ class BatchExecutionModule:
         )
         guarded = operations.workflow_guard_payload(workspace, "load_scopes")
         if guarded is not None:
-            _store_checkpoint(tool_context, guarded)
+            store_checkpoint(tool_context, guarded)
             return guarded
         batch, chunks, canonical_nodes = await operations.get_batch(
             container.repository, ingestion_id, batch_index
@@ -472,7 +602,7 @@ class BatchExecutionModule:
         found = {
             catalog[key.strip().casefold()]
             for key in keys
-            if isinstance(key, str) and key.strip().casefold() in catalog
+            if key.strip().casefold() in catalog
         }
         return [key for key in catalog_keys if key in found]
 
@@ -597,16 +727,342 @@ class BatchExecutionModule:
         ), workspace
 
     @staticmethod
+    def _should_run_semantic_evidence(
+        result: dict[str, Any], ingestion_id: str
+    ) -> bool:
+        mode = getattr(settings, "INGESTION_SEMANTIC_EVIDENCE_MODE", "off").casefold()
+        if mode == "off":
+            return False
+        if mode == "canary":
+            percent = getattr(settings, "INGESTION_SEMANTIC_EVIDENCE_CANARY_PERCENT", 5)
+            import hashlib
+
+            h = int(hashlib.md5(ingestion_id.encode("utf-8")).hexdigest(), 16)
+            if (h % 100) >= percent:
+                return False
+
+        errors = result.get("errors", [])
+        return any(
+            isinstance(e, dict) and e.get("code") == "EVIDENCE_NOT_GROUNDED"
+            for e in errors
+        )
+
+    async def _handle_semantic_evidence_validation(
+        self,
+        prepared: _PreparedBatch,
+        scope_keys: list[str],
+        extraction: SemanticGraphPatchFragment,
+        result: dict[str, Any],
+        tool_context: Any,
+    ) -> tuple[dict[str, Any], Any, SemanticGraphPatchFragment, int]:
+        errors = result.get("errors", [])
+        evidence_issues = [
+            e
+            for e in errors
+            if isinstance(e, dict) and e.get("code") == "EVIDENCE_NOT_GROUNDED"
+        ]
+        if not evidence_issues:
+            workspace = await operations.required_workspace(
+                prepared.container.repository, str(prepared.workspace.job.id)
+            )
+            return result, workspace, extraction, 0
+
+        chunks = prepared.payload.get("batch", {}).get("chunks", [])
+        chunks_by_index = {
+            c.get("chunkIndex"): c.get("text", "")
+            for c in chunks
+            if isinstance(c, dict) and "chunkIndex" in c
+        }
+
+        # Build issue items
+        issues_payload: list[dict[str, Any]] = []
+        issues_by_id: dict[str, dict[str, Any]] = {}
+        for _, issue in enumerate(evidence_issues):
+            loc = issue.get("location", "")
+            target_chunk_idx, evidence_text, claim_info = (
+                self._extract_claim_and_evidence(extraction, loc)
+            )
+            issue_id = f"{prepared.batch.batch_index}:{target_chunk_idx}:{loc}"
+            chunk_text = chunks_by_index.get(target_chunk_idx, "")
+            item = {
+                "issue_id": issue_id,
+                "chunk_id": f"chunk-{target_chunk_idx}",
+                "chunk_index": target_chunk_idx,
+                "location": loc,
+                "claim": claim_info,
+                "evidence_text": evidence_text,
+                "candidate_source_excerpt": issue.get("message", ""),
+                "source_chunk_text": chunk_text,
+            }
+            issues_payload.append(item)
+            issues_by_id[issue_id] = item
+
+        semantic_payload = {
+            "batch_index": prepared.batch.batch_index,
+            "ingestionId": str(prepared.workspace.job.id),
+            "issues": issues_payload,
+        }
+
+        calls = 1
+        try:
+            val_res = await self._model.validate_evidence(
+                semantic_payload, tool_context
+            )
+        except Exception:
+            # On validator error, fail closed
+            workspace = await operations.required_workspace(
+                prepared.container.repository, str(prepared.workspace.job.id)
+            )
+            return result, workspace, extraction, calls
+
+        # Validate decisions
+        decisions = val_res.decisions
+        dec_ids = [d.issue_id for d in decisions]
+        if len(dec_ids) != len(set(dec_ids)) or set(dec_ids) != set(issues_by_id):
+            # Missing or duplicated issues -> fail closed
+            workspace = await operations.required_workspace(
+                prepared.container.repository, str(prepared.workspace.job.id)
+            )
+            return result, workspace, extraction, calls
+
+        working_copy = extraction.model_copy(deep=True)
+        has_unsupported = False
+        has_uncertain = False
+        repairable_issues: list[dict[str, Any]] = []
+
+        for decision in decisions:
+            issue_item = issues_by_id[decision.issue_id]
+            chunk_text = chunks_by_index.get(issue_item["chunk_index"], "")
+
+            if decision.verdict == EvidenceVerdict.EQUIVALENT:
+                quote = decision.source_quote or ""
+                # Strict verbatim verification
+                if quote and quote in chunk_text:
+                    self._apply_source_quote_at_location(
+                        working_copy, issue_item["location"], quote
+                    )
+                else:
+                    has_uncertain = True
+            elif decision.verdict == EvidenceVerdict.REPAIRABLE:
+                repairable_issues.append(issue_item)
+            elif decision.verdict == EvidenceVerdict.UNSUPPORTED:
+                has_unsupported = True
+            else:
+                has_uncertain = True
+
+        # If any unsupported, make batch terminal fail-closed
+        if has_unsupported:
+            fail_result = self._failure(
+                "explicit_extraction_failure",
+                str(prepared.workspace.job.id),
+                "EVIDENCE_NOT_GROUNDED_UNSUPPORTED",
+            )
+            store_checkpoint(tool_context, fail_result)
+            return fail_result, prepared.workspace, working_copy, calls
+
+        # Re-submit with updated exact quotes
+        new_result, workspace = await self._submit(
+            prepared, scope_keys, working_copy, tool_context
+        )
+
+        # Log structured semantic validation event
+        log_ingestion_event(
+            "INGESTION_SEMANTIC_EVIDENCE_VALIDATION",
+            request={
+                "ingestion_id": str(prepared.workspace.job.id),
+                "batch_index": prepared.batch.batch_index,
+            },
+            payload={
+                "issue_count": len(issues_payload),
+                "semantic_validator_calls": 1,
+                "decisions": {
+                    "EQUIVALENT": sum(
+                        1 for d in decisions if d.verdict == EvidenceVerdict.EQUIVALENT
+                    ),
+                    "REPAIRABLE": len(repairable_issues),
+                    "UNSUPPORTED": sum(
+                        1 for d in decisions if d.verdict == EvidenceVerdict.UNSUPPORTED
+                    ),
+                    "UNCERTAIN": sum(
+                        1 for d in decisions if d.verdict == EvidenceVerdict.UNCERTAIN
+                    ),
+                },
+                "final_stage": new_result.get("stage"),
+                "success": new_result.get("success"),
+            },
+        )
+
+        if has_uncertain and not new_result.get("success"):
+            # Mark needs human review if uncertain
+            new_result["needsReview"] = True
+            store_checkpoint(tool_context, new_result)
+
+        return new_result, workspace, working_copy, calls
+
+    @staticmethod
+    def _extract_claim_and_evidence(
+        extraction: SemanticGraphPatchFragment, location: str
+    ) -> tuple[int, str, dict[str, Any]]:
+        parts = location.split(".")
+        chunk_idx = 0
+        ev_text = ""
+        claim_info: dict[str, Any] = {"location": location}
+
+        try:
+            if parts[0] == "nodes" and len(parts) >= 2 and parts[1].isdigit():
+                node_idx = int(parts[1])
+                if node_idx < len(extraction.nodes):
+                    node = extraction.nodes[node_idx]
+                    claim_info = {
+                        "kind": "node",
+                        "className": node.class_name,
+                        "tempId": node.temp_id,
+                    }
+                    if "properties" in parts:
+                        p_pos = parts.index("properties")
+                        if p_pos + 1 < len(parts) and parts[p_pos + 1].isdigit():
+                            prop_idx = int(parts[p_pos + 1])
+                            if prop_idx < len(node.properties):
+                                prop = node.properties[prop_idx]
+                                claim_info["property"] = prop.property_name
+                                claim_info["value"] = prop.value
+                                ev_list = prop.evidence
+                                ev_idx = 0
+                                if "evidence" in parts:
+                                    e_pos = parts.index("evidence")
+                                    if (
+                                        e_pos + 1 < len(parts)
+                                        and parts[e_pos + 1].isdigit()
+                                    ):
+                                        ev_idx = int(parts[e_pos + 1])
+                                if ev_idx < len(ev_list):
+                                    ev_text = ev_list[ev_idx].text
+                                    chunk_idx = ev_list[ev_idx].chunk_index
+                    elif "evidence" in parts:
+                        e_pos = parts.index("evidence")
+                        ev_idx = 0
+                        if e_pos + 1 < len(parts) and parts[e_pos + 1].isdigit():
+                            ev_idx = int(parts[e_pos + 1])
+                        if ev_idx < len(node.evidence):
+                            ev_text = node.evidence[ev_idx].text
+                            chunk_idx = node.evidence[ev_idx].chunk_index
+            elif parts[0] == "edges" and len(parts) >= 2 and parts[1].isdigit():
+                edge_idx = int(parts[1])
+                if edge_idx < len(extraction.edges):
+                    edge = extraction.edges[edge_idx]
+                    claim_info = {
+                        "kind": "edge",
+                        "edgeName": edge.edge_name,
+                        "source": edge.source_temp_id,
+                        "target": edge.target_temp_id,
+                    }
+                    if "properties" in parts:
+                        p_pos = parts.index("properties")
+                        if p_pos + 1 < len(parts) and parts[p_pos + 1].isdigit():
+                            prop_idx = int(parts[p_pos + 1])
+                            if prop_idx < len(edge.properties):
+                                prop = edge.properties[prop_idx]
+                                claim_info["property"] = prop.property_name
+                                claim_info["value"] = prop.value
+                                ev_list = prop.evidence
+                                ev_idx = 0
+                                if "evidence" in parts:
+                                    e_pos = parts.index("evidence")
+                                    if (
+                                        e_pos + 1 < len(parts)
+                                        and parts[e_pos + 1].isdigit()
+                                    ):
+                                        ev_idx = int(parts[e_pos + 1])
+                                if ev_idx < len(ev_list):
+                                    ev_text = ev_list[ev_idx].text
+                                    chunk_idx = ev_list[ev_idx].chunk_index
+                    elif "evidence" in parts:
+                        e_pos = parts.index("evidence")
+                        ev_idx = 0
+                        if e_pos + 1 < len(parts) and parts[e_pos + 1].isdigit():
+                            ev_idx = int(parts[e_pos + 1])
+                        if ev_idx < len(edge.evidence):
+                            ev_text = edge.evidence[ev_idx].text
+                            chunk_idx = edge.evidence[ev_idx].chunk_index
+        except Exception:
+            pass
+
+        return chunk_idx, ev_text, claim_info
+
+    @staticmethod
+    def _apply_source_quote_at_location(
+        extraction: SemanticGraphPatchFragment, location: str, quote: str
+    ) -> None:
+        parts = location.split(".")
+        try:
+            if parts[0] == "nodes" and len(parts) >= 2 and parts[1].isdigit():
+                node_idx = int(parts[1])
+                if node_idx < len(extraction.nodes):
+                    node = extraction.nodes[node_idx]
+                    if "properties" in parts:
+                        p_pos = parts.index("properties")
+                        if p_pos + 1 < len(parts) and parts[p_pos + 1].isdigit():
+                            prop_idx = int(parts[p_pos + 1])
+                            if prop_idx < len(node.properties):
+                                prop = node.properties[prop_idx]
+                                ev_idx = 0
+                                if "evidence" in parts:
+                                    e_pos = parts.index("evidence")
+                                    if (
+                                        e_pos + 1 < len(parts)
+                                        and parts[e_pos + 1].isdigit()
+                                    ):
+                                        ev_idx = int(parts[e_pos + 1])
+                                if ev_idx < len(prop.evidence):
+                                    prop.evidence[ev_idx].text = quote
+                    elif "evidence" in parts:
+                        e_pos = parts.index("evidence")
+                        ev_idx = 0
+                        if e_pos + 1 < len(parts) and parts[e_pos + 1].isdigit():
+                            ev_idx = int(parts[e_pos + 1])
+                        if ev_idx < len(node.evidence):
+                            node.evidence[ev_idx].text = quote
+            elif parts[0] == "edges" and len(parts) >= 2 and parts[1].isdigit():
+                edge_idx = int(parts[1])
+                if edge_idx < len(extraction.edges):
+                    edge = extraction.edges[edge_idx]
+                    if "properties" in parts:
+                        p_pos = parts.index("properties")
+                        if p_pos + 1 < len(parts) and parts[p_pos + 1].isdigit():
+                            prop_idx = int(parts[p_pos + 1])
+                            if prop_idx < len(edge.properties):
+                                prop = edge.properties[prop_idx]
+                                ev_idx = 0
+                                if "evidence" in parts:
+                                    e_pos = parts.index("evidence")
+                                    if (
+                                        e_pos + 1 < len(parts)
+                                        and parts[e_pos + 1].isdigit()
+                                    ):
+                                        ev_idx = int(parts[e_pos + 1])
+                                if ev_idx < len(prop.evidence):
+                                    prop.evidence[ev_idx].text = quote
+                    elif "evidence" in parts:
+                        e_pos = parts.index("evidence")
+                        ev_idx = 0
+                        if e_pos + 1 < len(parts) and parts[e_pos + 1].isdigit():
+                            ev_idx = int(parts[e_pos + 1])
+                        if ev_idx < len(edge.evidence):
+                            edge.evidence[ev_idx].text = quote
+        except Exception:
+            pass
+
+    @staticmethod
     def _result_and_state(
         workspace: Any, ingestion_id: str, batch_index: int, tool_context: Any
     ) -> dict[str, Any]:
-        result = _batch_result_payload(workspace, batch_index)
+        result = batch_result_payload(workspace, batch_index)
         tool_context.state["active_ingestion_id"] = ingestion_id
         if result.get("submittedBatchIndex") == batch_index and result.get("success"):
-            _update_batch_accumulator(
+            update_batch_accumulator(
                 tool_context, ingestion_id, batch_index, result, workspace
             )
-        _store_checkpoint(tool_context, result)
+        store_checkpoint(tool_context, result)
         return result
 
     @staticmethod
@@ -664,5 +1120,8 @@ __all__ = [
     "BatchExecutionModule",
     "BatchExtractionOutput",
     "BatchModel",
+    "EvidenceVerdict",
     "ScopeSelectionOutput",
+    "SemanticEvidenceDecision",
+    "SemanticEvidenceValidationResult",
 ]

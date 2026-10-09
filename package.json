@@ -1,0 +1,9 @@
+{
+  "name": "ai-receptionist-be-py",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Receptionist Backend Python",
+  "scripts": {
+    "test": "powershell -Command \"npx pyright . --outputjson | Out-File -FilePath pyright-report.json -Encoding utf8\""
+  }
+}
