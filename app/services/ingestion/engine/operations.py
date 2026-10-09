@@ -501,7 +501,13 @@ async def submit_batch(
         and batch.scope_keys
         and set(scope_keys) != set(batch.scope_keys)
     ):
-        raise ValueError("Repair must reuse the previously selected scope set")
+        previous_scope_keys = set(batch.scope_keys)
+        requested_scope_keys = set(scope_keys)
+        missing_scope_only = bool(batch.validation_issues) and all(
+            item.get("code") == "MISSING_SCOPE" for item in batch.validation_issues
+        )
+        if not (missing_scope_only and previous_scope_keys < requested_scope_keys):
+            raise ValueError("Repair must reuse the previously selected scope set")
 
     projection = await ontology_cache.get_many(
         scope_keys, str(workspace.job.ontology_version_id)
@@ -1043,6 +1049,17 @@ async def _classify_missing_scopes(
             other_registry = OntologyRegistry(other_projection)
 
     classified: list[dict[str, Any]] = []
+
+    async def candidate_scopes(matches: Any) -> list[str]:
+        if not hasattr(ontology_cache, "get"):
+            return []
+        candidates: list[str] = []
+        for scope_key in other_keys:
+            projection = await ontology_cache.get(scope_key, ontology_version_id)
+            if matches(OntologyRegistry(projection)):
+                candidates.append(scope_key)
+        return sorted(candidates)
+
     for issue in issues:
         code = issue.get("code")
         location = str(issue.get("location") or "")
@@ -1052,7 +1069,12 @@ async def _classify_missing_scopes(
             if code == "UNKNOWN_ENTITY_TYPE" and other_registry is not None:
                 node = semantic.nodes[int(parts[1])]
                 if other_registry.resolve_entity_name(node.class_name) is not None:
-                    updated = _missing_scope_issue(issue)
+                    updated = {
+                        **_missing_scope_issue(issue),
+                        "candidateScopes": await candidate_scopes(
+                            lambda registry, class_name=node.class_name: registry.resolve_entity_name(class_name) is not None
+                        ),
+                    }
 
             elif code == "UNKNOWN_PROPERTY" and other_registry is not None:
                 node = semantic.nodes[int(parts[1])]
@@ -1061,12 +1083,25 @@ async def _classify_missing_scopes(
                 if other_class and other_registry.resolve_property_name(
                     other_class, fact.property_name
                 ):
-                    updated = _missing_scope_issue(issue)
+                    updated = {
+                        **_missing_scope_issue(issue),
+                        "candidateScopes": await candidate_scopes(
+                            lambda registry, class_name=node.class_name, property_name=fact.property_name: (
+                                (resolved_class := registry.resolve_entity_name(class_name)) is not None
+                                and registry.resolve_property_name(resolved_class, property_name) is not None
+                            )
+                        ),
+                    }
 
             elif code == "UNKNOWN_RELATIONSHIP" and other_registry is not None:
                 edge = semantic.edges[int(parts[1])]
                 if other_registry.resolve_relationship_name(edge.edge_name) is not None:
-                    updated = _missing_scope_issue(issue)
+                    updated = {
+                        **_missing_scope_issue(issue),
+                        "candidateScopes": await candidate_scopes(
+                            lambda registry, edge_name=edge.edge_name: registry.resolve_relationship_name(edge_name) is not None
+                        ),
+                    }
 
             elif code == "RELATIONSHIP_DOMAIN_RANGE_MISMATCH":
                 edge = semantic.edges[int(parts[1])]
