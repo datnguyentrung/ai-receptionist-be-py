@@ -18,7 +18,8 @@ from app.agent.skills.skill_loader import (
     discover_skill_descriptors,
     discover_skill_tools,
 )
-from app.utils.ingestion_logger import ADKDetailedLoggerPlugin
+from app.agent.plugins import ToolAutoCorrectPlugin
+from app.utils.ingestion_logger import ADKDetailedLoggerPlugin, reset_log_file
 
 BASE_DIR = Path(__file__).resolve().parent
 SKILLS_DIR = BASE_DIR / "skills"
@@ -145,10 +146,14 @@ def _compact_ingestion_context(contents: list[types.Content]) -> list[types.Cont
     return [c for i, c in enumerate(contents) if i in keep or i > batch[1]]
 
 
+# Reset file log đúng 1 lần khi server ADK khởi động (adk web / adk run)
+reset_log_file()
+
 app = App(
     name="taekwondo_assistant",
     root_agent=root_agent,
     plugins=[
+        ToolAutoCorrectPlugin(),
         ADKDetailedLoggerPlugin(),
         ContextFilterPlugin(custom_filter=_compact_ingestion_context),
         SaveFilesAsArtifactsPlugin(),

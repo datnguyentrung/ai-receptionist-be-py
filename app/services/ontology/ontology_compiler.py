@@ -92,9 +92,13 @@ class OntologyCompiler:
             .order_by(OntologyAlias.alias)
         )).all())
 
+        entity_name_by_id = {str(e.id): e.technical_name for e in entities}
+
         entities_payload = [
             {
-                "id": str(e.id), "technicalName": e.technical_name,
+                "id": str(e.id),
+                "technicalName": e.technical_name,
+                "displayName": e.display_name or e.technical_name,
                 "domain": str((e.metadata_ or {}).get("domain", "")),
                 "identityStrategy": e.identity_strategy,
                 "allowDynamicProperties": bool((e.metadata_ or {}).get("allow_dynamic_properties", False)),
@@ -102,30 +106,47 @@ class OntologyCompiler:
             }
             for e in entities
         ]
-        props_by_entity: dict[uuid.UUID, list[dict[str, Any]]] = {}
-        for p in properties:
-            props_by_entity.setdefault(p.entity_type_id, []).append({
-                "id": str(p.id), "technicalName": p.technical_name,
-                "dataType": p.data_type.value, "isRequired": p.required,
-                "isList": p.multi_value, "validationRules": p.constraints,
+
+        # 4. Danh sách thuộc tính phẳng (list[dict]) có kèm trường entityType
+        props_payload = [
+            {
+                "id": str(p.id),
+                "entityType": entity_name_by_id.get(str(p.entity_type_id), ""),
+                "technicalName": p.technical_name,
+                "displayName": p.display_name or p.technical_name,
+                "dataType": p.data_type.value,
+                "required": p.required,
+                "multiValue": p.multi_value,
+                "constraints": p.constraints or {},
                 "description": p.description,
-            })
+            }
+            for p in properties
+        ]
+
+        # 5. Danh sách quan hệ có kèm sourceEntityType và targetEntityType
         rel_payload = [
             {
-                "id": str(r.id), "name": r.technical_name,
-                "sourceEntityTypeId": str(r.source_entity_type_id),
-                "targetEntityTypeId": str(r.target_entity_type_id),
-                "cardinality": r.cardinality.value, "description": r.description,
+                "id": str(r.id),
+                "technicalName": r.technical_name,
+                "displayName": r.display_name or r.technical_name,
+                "sourceEntityType": entity_name_by_id.get(str(r.source_entity_type_id), ""),
+                "targetEntityType": entity_name_by_id.get(str(r.target_entity_type_id), ""),
+                "cardinality": r.cardinality.value,
+                "constraints": r.constraints or {},
+                "description": r.description,
             }
             for r in relationships
         ]
+
         aliases_payload = [self._alias_payload(a) for a in alias_items]
         payload = {
             "scopeKey": scope.scope_key,
             "versionId": str(version.id),
-            "versionNumber": version.version,
-            "entities": entities_payload,
-            "properties": props_by_entity,
+            "version": version.version,
+            "description": scope.description or "",
+            "compilerVersion": COMPILER_VERSION,
+            "entityTypes": entities_payload,
+            "properties": props_payload,
             "relationships": rel_payload,
             "aliases": aliases_payload,
         }

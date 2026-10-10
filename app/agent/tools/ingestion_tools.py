@@ -41,7 +41,7 @@ from app.schemas import (
     Workspace,
 )
 from app.services.ingestion.engine import operations
-from app.utils import log_ingestion_event, reset_log_file, stable_entity_key
+from app.utils import log_ingestion_event, stable_entity_key
 
 SchemaProposalTypeLiteral = Literal[
     "NEW_ENTITY_TYPE",
@@ -73,10 +73,7 @@ async def begin_ingestion(
     Returns:
         dict[str, Any]: Payload trạng thái workspace (ingestionId, stage, chunks, batches).
     """
-    # 1. Reset file log khi bắt đầu một chu trình Ingestion mới
-    reset_log_file()
-
-    # 2. Đóng gói thông tin yêu cầu đầu vào để ghi log trace
+    # 1. Đóng gói thông tin yêu cầu đầu vào để ghi log trace
     req = {
         "artifact_name": artifact_name,
         "document_key": document_key,
