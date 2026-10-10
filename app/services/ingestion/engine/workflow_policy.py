@@ -45,6 +45,7 @@ WORKFLOW_POLICY: dict[str, frozenset[str]] = {
     # Giai đoạn bị chặn do phát hiện schema ontology mới cần duyệt
     "BLOCKED_SCHEMA": frozenset({
         "get_status",
+        "create_schema_proposal",
         "get_schema_proposal",
         "review_schema_proposal",
         "apply_schema_proposal",
