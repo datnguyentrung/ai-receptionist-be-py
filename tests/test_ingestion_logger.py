@@ -28,6 +28,72 @@ def test_model_response_logs_token_usage(tmp_path: Path, monkeypatch) -> None:
     assert "TOKEN USAGE (batch)" in content
     assert "promptTokenCount:        12" in content
     assert "totalTokenCount:         15" in content
+    assert '"usage"' not in content
+
+
+def test_logger_omits_raw_event_prompt_and_user_payload(tmp_path: Path, monkeypatch) -> None:
+    log_file = tmp_path / "log.txt"
+    monkeypatch.setattr(ingestion_logger, "LOG_FILE", log_file)
+    plugin = ingestion_logger.ADKDetailedLoggerPlugin()
+
+    asyncio.run(
+        plugin.on_event_callback(
+            invocation_context=object(), event=SimpleNamespace(secret="event-secret")
+        )
+    )
+    asyncio.run(
+        plugin.on_user_message_callback(
+            invocation_context=object(),
+            user_message=SimpleNamespace(
+                parts=[SimpleNamespace(text="hello")], secret="user-secret"
+            ),
+        )
+    )
+    asyncio.run(
+        plugin.before_model_callback(
+            callback_context=SimpleNamespace(agent=SimpleNamespace(name="root")),
+            llm_request=SimpleNamespace(
+                model="model",
+                contents=[SimpleNamespace(parts=[SimpleNamespace(text="prompt-secret")])],
+                tools=[],
+            ),
+        )
+    )
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "ADK EVENT TRACE" not in content
+    assert "event-secret" not in content
+    assert '"message": "hello"' in content
+    assert "user-secret" not in content
+    assert '"contentCount": 1' in content
+    assert '"contentPartCount": 1' in content
+    assert "prompt-secret" not in content
+
+
+def test_tool_request_and_response_remain_detailed(tmp_path: Path, monkeypatch) -> None:
+    log_file = tmp_path / "log.txt"
+    monkeypatch.setattr(ingestion_logger, "LOG_FILE", log_file)
+    plugin = ingestion_logger.ADKDetailedLoggerPlugin()
+    tool = SimpleNamespace(name="example_tool")
+
+    asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"request": {"id": 1}}, tool_context=object()
+        )
+    )
+    asyncio.run(
+        plugin.after_tool_callback(
+            tool=tool,
+            tool_args={},
+            tool_context=object(),
+            result={"result": {"id": 1}},
+        )
+    )
+
+    content = log_file.read_text(encoding="utf-8")
+    assert '"arguments": {' in content
+    assert '"result": {' in content
+    assert '"id": 1' in content
 
 
 def test_model_error_retries_using_retry_delay(tmp_path: Path, monkeypatch) -> None:
