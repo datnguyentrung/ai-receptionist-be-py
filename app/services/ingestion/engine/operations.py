@@ -896,6 +896,8 @@ async def build_preview(
         "previousVersionId": str(workspace.document.current_version_id) if workspace.document.current_version_id else None,
         "contentHash": workspace.version.content_hash,
         "ontologyVersionId": str(workspace.version.ontology_version_id),
+        "contractHash": workspace.job.summary.get("contractHash"),
+        "modelAssignments": workspace.job.summary.get("modelAssignments", {}),
         "knowledgeRevision": await repository.knowledge_revision(),
         "activeOntologyVersionId": active_ontology_version_id,
         "schemaChanges": schema_changes or [],
@@ -928,6 +930,8 @@ async def commit(
     async with repository.commit_lock():
         workspace = await required_workspace(repository, ingestion_id)
         if workspace.job.status == IngestionJobStatus.COMMITTED:
+            if workspace.job.error_stage or workspace.job.error_message:
+                workspace = await repository.mark_committed(ingestion_id, {})
             return {**status_payload(workspace, idempotent=True), **workspace.job.summary}
         if workspace.job.status not in {
             IngestionJobStatus.AWAITING_COMMIT_APPROVAL, IngestionJobStatus.COMMITTING
@@ -1598,6 +1602,8 @@ def status_payload(
         "idempotent": idempotent,
         "reportDigest": workspace.job.summary.get("reportDigest"),
         "commitPhase": workspace.job.summary.get("commitPhase"),
+        "contractHash": workspace.job.summary.get("contractHash"),
+        "modelAssignments": workspace.job.summary.get("modelAssignments", {}),
     }
     if pending and not terminal:
         result["nextBatch"] = {
@@ -1613,6 +1619,8 @@ def status_payload(
                 "location": workspace.job.error_stage,
             }
         ]
+    if pending and pending.validation_issues:
+        result["validationErrors"] = pending.validation_issues
     return result
 
 

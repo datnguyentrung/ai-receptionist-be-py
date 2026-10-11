@@ -327,6 +327,34 @@ class OntologyLifecycle:
             return bool(row and row.status == OntologyVersionStatus.DRAFT
                         and row.created_by == f"ingestion:{ingestion_id}")
 
+    async def validate_identity_property_contracts(self, version_id: str) -> None:
+        """Reject a draft whose identity strategy references undeclared properties."""
+        async with self._session_factory() as session:
+            entities = list((await session.scalars(select(OntologyEntityType).where(
+                OntologyEntityType.ontology_version_id == uuid.UUID(version_id)
+            ))).all())
+            properties = list((await session.scalars(select(OntologyProperty).where(
+                OntologyProperty.ontology_version_id == uuid.UUID(version_id)
+            ))).all())
+        property_names = {
+            entity.id: set()
+            for entity in entities
+        }
+        for item in properties:
+            property_names.setdefault(item.entity_type_id, set()).add(item.technical_name)
+        errors = identity_property_contract_errors(
+            [
+                {"technicalName": item.technical_name, "identityStrategy": item.identity_strategy}
+                for item in entities
+            ],
+            {
+                item.technical_name: property_names.get(item.id, set())
+                for item in entities
+            },
+        )
+        if errors:
+            raise ValueError("Invalid identity property contract: " + "; ".join(errors))
+
     async def activate_ingestion_draft(self, ingestion_id: str) -> OntologyVersion | None:
         """Publish one compiled draft only after final commit approval."""
         async with self._session_factory() as session, session.begin():
@@ -847,6 +875,18 @@ class OntologyLifecycle:
         if scope is None:
             raise KeyError(f"Unknown ontology scope: {key}")
         return scope
+
+def identity_property_contract_errors(
+    entities: list[dict[str, Any]], properties_by_entity: dict[str, set[str]]
+) -> list[str]:
+    """Return every identity field that is absent from its entity property contract."""
+    return [
+        f"{entity['technicalName']}.{field}"
+        for entity in entities
+        for field in (entity.get("identityStrategy") or {}).get("required") or []
+        if field not in properties_by_entity.get(entity["technicalName"], set())
+    ]
+
 
 def _validate_proposal_payload(
     proposal_type: SchemaProposalType, payload: dict[str, Any], affected_scopes: list[str]

@@ -23,13 +23,15 @@ from app.agent.tools.ingestion_tools import (
     update_batch_accumulator,
 )
 from app.core.config import settings
-from app.core.ingestion_runtime import get_service_container
+from app.core.ingestion_runtime import get_service_container, ingestion_model_assignments
 from app.schemas.ingestion.base import IngestionModel
 from app.schemas.ingestion.semantic_patch import (
     SemanticGraphPatchFragment,
     SemanticGraphRepairDelta,
 )
+from app.schemas.ingestion.ontology import OntologyProjection
 from app.services.ingestion.engine import operations
+from app.services.ingestion.schema.extraction_contract import build_entity_extraction_contract
 from app.utils.ingestion_helpers import stable_entity_key
 
 
@@ -102,13 +104,52 @@ _REPAIR_INSTRUCTION = _load_instruction("repair.md")
 _SEMANTIC_VALIDATION_INSTRUCTION = _load_instruction("semantic-evidence-validation.md")
 
 
+def _model_for_role(role: str) -> str:
+    return ingestion_model_assignments()[role]
+
+
+def model_assignments() -> dict[str, str]:
+    """Return the role-to-model mapping for the current batch invocation."""
+    return ingestion_model_assignments()
+
+
+def _contract_from_scope(scope: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a contract when the scope payload is a compiled ontology projection."""
+    try:
+        return build_entity_extraction_contract(OntologyProjection.model_validate(scope))
+    except Exception:  # Test doubles and legacy callers may expose only a scope summary.
+        return None
+
+
+def _required_coverage_updates(batch: Any) -> list[dict[str, Any]]:
+    """Expose unresolved coverage rows explicitly to the repair model."""
+    fragment = getattr(batch, "semantic_fragment", None) or {}
+    coverage = fragment.get("coverage", []) if isinstance(fragment, dict) else []
+    required = []
+    for issue in getattr(batch, "validation_issues", []) or []:
+        if issue.get("code") != "MAPPED_WITHOUT_MAPPING":
+            continue
+        parts = str(issue.get("location") or "").split(".")
+        if len(parts) < 2 or not parts[1].isdigit():
+            continue
+        index = int(parts[1])
+        if index < len(coverage):
+            required.append(
+                {
+                    "chunkIndex": coverage[index].get("chunkIndex"),
+                    "requirement": "Add a sourced fact or edge, or replace MAPPED with the correct non-MAPPED decision.",
+                }
+            )
+    return required
+
+
 def _single_turn_agent(
-    name: str, instruction: str, output_schema: type[IngestionModel]
+    name: str, instruction: str, output_schema: type[IngestionModel], model: str
 ) -> Agent:
     return Agent(
         name=name,
         model=Gemini(
-            model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            model=model,
             client_kwargs={"api_key": settings.GEMINI_API_KEY},
             retry_options=HttpRetryOptions(
                 attempts=5,
@@ -136,7 +177,8 @@ class AdkBatchModel:
     def __init__(self) -> None:
         self._selector = AgentTool(
             _single_turn_agent(
-                "ingestion_scope_selector", _SELECTOR_INSTRUCTION, ScopeSelectionOutput
+                "ingestion_scope_selector", _SELECTOR_INSTRUCTION, ScopeSelectionOutput,
+                _model_for_role("routing"),
             ),
             include_plugins=True,
         )
@@ -145,6 +187,7 @@ class AdkBatchModel:
                 "ingestion_batch_extractor",
                 _EXTRACTION_INSTRUCTION,
                 BatchExtractionOutput,
+                _model_for_role("extract"),
             ),
             include_plugins=True,
         )
@@ -153,6 +196,7 @@ class AdkBatchModel:
                 "ingestion_batch_repairer",
                 _REPAIR_INSTRUCTION,
                 SemanticGraphRepairDelta,
+                _model_for_role("repair"),
             ),
             include_plugins=True,
         )
@@ -161,6 +205,7 @@ class AdkBatchModel:
                 "ingestion_evidence_validator",
                 _SEMANTIC_VALIDATION_INSTRUCTION,
                 SemanticEvidenceValidationResult,
+                _model_for_role("evidence"),
             ),
             include_plugins=True,
         )
@@ -307,6 +352,19 @@ class BatchExecutionModule:
                         "batch": prepared.payload["batch"],
                         **rep_ctx,
                     }
+                    repair_payload["entityExtractionContract"] = _contract_from_scope(
+                        repair_payload["scope"]
+                    )
+                    repair_payload["modelAssignments"] = model_assignments()
+                    repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
+                        prepared.batch
+                    )
+                    if repair_payload["entityExtractionContract"]:
+                        await prepared.container.repository.record_runtime_metadata(
+                            ingestion_id,
+                            model_assignments=repair_payload["modelAssignments"],
+                            contract_hash=repair_payload["entityExtractionContract"]["contractHash"],
+                        )
                     calls += 1
                     delta = await self._model.repair(repair_payload, tool_context)
                     workspace = await operations.repair_batch(
@@ -348,7 +406,7 @@ class BatchExecutionModule:
                 selected_scope = await operations.load_scope(
                     prepared.container.ontology_cache, selected, prepared.version_id
                 )
-                extraction_payload = self._extraction_payload(
+                extraction_payload = await self._extraction_payload(
                     prepared, selected_scope["scope"], selected
                 )
                 prompt_bytes = self._payload_size(extraction_payload)
@@ -358,7 +416,7 @@ class BatchExecutionModule:
                     prepared.catalog_keys,
                     prepared.version_id,
                 )
-                inline_payload = self._extraction_payload(
+                inline_payload = await self._extraction_payload(
                     prepared, all_scope["scope"], selected
                 )
                 prompt_bytes = self._payload_size(inline_payload)
@@ -394,7 +452,7 @@ class BatchExecutionModule:
                         selected,
                         prepared.version_id,
                     )
-                    extraction_payload = self._extraction_payload(
+                    extraction_payload = await self._extraction_payload(
                         prepared, selected_scope["scope"], selected
                     )
                 else:
@@ -484,6 +542,19 @@ class BatchExecutionModule:
                     "batch": prepared.payload["batch"],
                     **rep_context,
                 }
+                repair_payload["entityExtractionContract"] = _contract_from_scope(
+                    repair_payload["scope"]
+                )
+                repair_payload["modelAssignments"] = model_assignments()
+                repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
+                    prepared.batch
+                )
+                if repair_payload["entityExtractionContract"]:
+                    await prepared.container.repository.record_runtime_metadata(
+                        ingestion_id,
+                        model_assignments=repair_payload["modelAssignments"],
+                        contract_hash=repair_payload["entityExtractionContract"]["contractHash"],
+                    )
                 calls += 1
                 delta = await self._model.repair(repair_payload, tool_context)
                 workspace = await operations.repair_batch(
@@ -622,14 +693,24 @@ class BatchExecutionModule:
         }
 
     @staticmethod
-    def _extraction_payload(
+    async def _extraction_payload(
         prepared: _PreparedBatch, scope: dict[str, Any], selected: list[str]
     ) -> dict[str, Any]:
+        contract = _contract_from_scope(scope)
+        assignments = model_assignments()
+        if contract:
+            await prepared.container.repository.record_runtime_metadata(
+                str(prepared.workspace.job.id),
+                model_assignments=assignments,
+                contract_hash=contract["contractHash"],
+            )
         return {
             "phase": "extract",
             "ingestionId": str(prepared.workspace.job.id),
             "requiredScopeKeys": selected,
             "scope": scope,
+            "entityExtractionContract": contract,
+            "modelAssignments": assignments,
             **prepared.payload,
         }
 

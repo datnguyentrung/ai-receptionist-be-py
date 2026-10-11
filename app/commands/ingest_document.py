@@ -19,18 +19,22 @@ from app.core.ingestion_runtime import get_service_container, shutdown_service_c
 from app.services.ingestion.engine import operations
 
 
-async def ingest(path: Path) -> dict:
+async def ingest(path: Path, ingestion_id: str | None = None) -> dict:
     if path.suffix.casefold() not in {".md", ".txt"}:
         raise ValueError("Only Markdown and UTF-8 TXT are supported")
     document_key = path.resolve().relative_to(Path.cwd().resolve()).as_posix()
     container = await get_service_container()
     try:
-        workspace = await operations.begin(
-            container.repository, container.ontology_cache, path.name, path.read_bytes(),
-            max_file_size=container.max_file_size, chunk_size_chars=container.chunk_size_chars,
-            batch_size=container.batch_size, skill_digest=container.skill_digest,
-            model_id=container.model_id, document_key=document_key,
-            mime_type="text/markdown" if path.suffix.casefold() == ".md" else "text/plain",
+        workspace = (
+            await operations.required_workspace(container.repository, ingestion_id)
+            if ingestion_id
+            else await operations.begin(
+                container.repository, container.ontology_cache, path.name, path.read_bytes(),
+                max_file_size=container.max_file_size, chunk_size_chars=container.chunk_size_chars,
+                batch_size=container.batch_size, skill_digest=container.skill_digest,
+                model_id=container.model_id, document_key=document_key,
+                mime_type="text/markdown" if path.suffix.casefold() == ".md" else "text/plain",
+            )
         )
         if workspace.job.status.value == "COMMITTED":
             return operations.status_payload(workspace, idempotent=True)
@@ -68,8 +72,9 @@ async def ingest(path: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("document", type=Path)
+    parser.add_argument("--ingestion-id")
     args = parser.parse_args()
-    print(json.dumps(asyncio.run(ingest(args.document.resolve())), ensure_ascii=True, default=str))
+    print(json.dumps(asyncio.run(ingest(args.document.resolve(), args.ingestion_id)), ensure_ascii=True, default=str))
 
 
 if __name__ == "__main__":
