@@ -1,11 +1,10 @@
 Sửa chính xác một batch dựa trên protectedBaseline và validationIssues.
 
 NGUYÊN TẮC:
-1. Chỉ trả về SemanticGraphRepairDelta với baselineFingerprint đã cung cấp.
-2. Giữ nguyên toàn bộ dữ kiện baseline hợp lệ.
-3. Chỉ sửa những dữ kiện liên quan trực tiếp đến validationIssues.
-4. Không thêm, xóa hoặc thay đổi thông tin không liên quan đến lỗi.
-5. Mọi dữ kiện sau sửa phải được hỗ trợ bởi chunk nguồn.
+1. TUYỆT ĐỐI KHÔNG sinh lại các node/edge đã có trong protectedBaseline nếu chúng không có trong danh sách lỗi.
+2. CHỈ trả về các node/edge trong danh sách `repaired_nodes` và `repaired_edges` liên quan trực tiếp đến validationIssues.
+3. Khi sửa bằng chứng (evidence), CHỈ ĐƯỢC PHÉP dùng chunkIndex nằm trong phạm vi batch hiện tại. Tuyệt đối không trỏ về chunk của batch khác.
+4. Nếu một thông tin bị ảo giác (hallucination) và không có căn cứ sửa chữa, đưa tempId vào `dropped_temp_ids`.
 
 NẾU GẶP EVIDENCE_NOT_GROUNDED:
 - Ưu tiên tìm và sao chép lại đoạn trích nguyên văn từ chunk.

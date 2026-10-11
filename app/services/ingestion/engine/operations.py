@@ -257,7 +257,14 @@ async def repair_batch(
         registry.canonicalize_semantic_fragment(semantic), projection, staged_entities=staged
     )
     issues = list(compiled.issues)
-    merged = _merge_repair_fragment(baseline, compiled.fragment, batch.graph_fragment, repair_delta.coverage)
+    dropped_temp_ids = getattr(repair_delta, "dropped_temp_ids", []) or []
+    merged = _merge_repair_fragment(
+        baseline,
+        compiled.fragment,
+        batch.graph_fragment,
+        repair_delta.coverage,
+        dropped_temp_ids=dropped_temp_ids,
+    )
     chunks = workspace_chunks(workspace, batch.chunk_indexes)
     if merged is not None:
         merged = GraphFragmentEvidenceGuard().canonicalize(merged, chunks)
@@ -275,6 +282,7 @@ async def repair_batch(
                 previous_canonical_fragment=baseline,
                 new_canonical_fragment=merged,
                 previous_validation_issues=batch.validation_issues,
+                dropped_temp_ids=dropped_temp_ids,
             )
         )
     issue_dicts = [issue.model_dump(by_alias=True, mode="json") for issue in issues]
@@ -287,6 +295,31 @@ async def repair_batch(
             issue_dicts,
             external_node_types={ref: item["className"] for ref, item in staged.items()},
         )
+
+    # Fault-Tolerant Quarantine: Khi chạm ngưỡng thử lại tối đa, cách ly lỗi vào warnings và cho phép stage batch
+    current_attempts = getattr(batch, "validation_attempts", 0) + 1
+    if issue_dicts and current_attempts >= MAX_BATCH_VALIDATION_ATTEMPTS:
+        logger.warning(
+            "REPAIR_FAULT_TOLERANT_FALLBACK ingestionId=%s batchIndex=%s attempts=%s issues=%s",
+            ingestion_id,
+            batch_index,
+            current_attempts,
+            issue_dicts,
+        )
+        quarantine_notes = [
+            f"[QUARANTINE] {issue.get('code')}: {issue.get('message')} (loc: {issue.get('location')})"
+            for issue in issue_dicts
+        ]
+        if merged is not None:
+            merged = merged.model_copy(
+                update={"warnings": [*merged.warnings, *quarantine_notes]}
+            )
+        elif baseline is not None:
+            merged = baseline.model_copy(
+                update={"warnings": [*baseline.warnings, *quarantine_notes]}
+            )
+        issue_dicts = []
+
     return await repository.store_batch_result(
         ingestion_id,
         batch_index,
@@ -371,40 +404,103 @@ def _merge_repair_fragment(
     delta: GraphPatchFragment | None,
     previous_fragment: dict | None,
     coverage_updates: list[Any],
+    dropped_temp_ids: list[str] | set[str] | None = None,
 ) -> GraphPatchFragment | None:
     if delta is None:
         return None
-    nodes = {stable_entity_key(node.class_name, node.identity): node for node in baseline.nodes}
-    for node in delta.nodes:
-        key = stable_entity_key(node.class_name, node.identity)
-        previous = nodes.get(key)
-        if previous is None:
-            nodes[key] = node
+    dropped_set = set(dropped_temp_ids or [])
+
+    # 1. Khởi tạo danh sách nodes từ baseline, loại bỏ các nút trong dropped_set
+    nodes_by_key: dict[str, GraphNode] = {}
+    nodes_by_tempid: dict[str, GraphNode] = {}
+
+    for node in baseline.nodes:
+        if node.temp_id in dropped_set:
             continue
-        facts = {
-            (fact.property_name, json.dumps(fact.value, ensure_ascii=False, sort_keys=True, default=str)): fact
-            for fact in [*previous.properties, *node.properties]
-        }
-        nodes[key] = previous.model_copy(
-            update={"properties": list(facts.values()), "evidence": [*previous.evidence, *node.evidence]}
+        key = stable_entity_key(node.class_name, node.identity)
+        nodes_by_key[key] = node
+        nodes_by_tempid[node.temp_id] = node
+
+    # 2. Hợp nhất các nodes từ delta
+    for node in delta.nodes:
+        if node.temp_id in dropped_set:
+            continue
+        key = stable_entity_key(node.class_name, node.identity)
+        previous = nodes_by_key.get(key) or nodes_by_tempid.get(node.temp_id)
+        if previous is None:
+            # Node mới hoàn toàn từ repair delta
+            nodes_by_key[key] = node
+            nodes_by_tempid[node.temp_id] = node
+            continue
+
+        # Property-level Overwrite:
+        # Thuộc tính trong delta ghi đè thuộc tính cùng tên trong baseline (thay vì gộp duplicate)
+        delta_props = {fact.property_name: fact for fact in node.properties}
+        merged_properties = [
+            fact for fact in previous.properties if fact.property_name not in delta_props
+        ]
+        merged_properties.extend(node.properties)
+
+        # Gộp evidence (bảo toàn chứng cứ từ cả baseline và delta)
+        merged_evidence = [*previous.evidence, *node.evidence]
+
+        # Cập nhật thông tin node
+        merged_node = previous.model_copy(
+            update={
+                "class_name": node.class_name or previous.class_name,
+                "identity": node.identity if node.identity else previous.identity,
+                "properties": merged_properties,
+                "evidence": merged_evidence,
+            }
         )
-    edges = {
+        # Đồng bộ lại vào cả hai từ điển
+        old_key = stable_entity_key(previous.class_name, previous.identity)
+        nodes_by_key.pop(old_key, None)
+        new_key = stable_entity_key(merged_node.class_name, merged_node.identity)
+        nodes_by_key[new_key] = merged_node
+        nodes_by_tempid[merged_node.temp_id] = merged_node
+
+    # 3. Hợp nhất các edges
+    # Lọc bỏ các cạnh baseline liên quan đến dropped_temp_ids
+    valid_baseline_edges = [
+        edge for edge in baseline.edges
+        if edge.source_temp_id not in dropped_set and edge.target_temp_id not in dropped_set
+    ]
+    edges_map = {
         (edge.edge_name, edge.source_temp_id, edge.target_temp_id): edge
-        for edge in baseline.edges
+        for edge in valid_baseline_edges
     }
     for edge in delta.edges:
-        key = (edge.edge_name, edge.source_temp_id, edge.target_temp_id)
-        previous = edges.get(key)
-        edges[key] = edge if previous is None else previous.model_copy(
-            update={"properties": {**previous.properties, **edge.properties}, "evidence": [*previous.evidence, *edge.evidence]}
-        )
-    old_coverage = GraphPatchFragment.model_validate(previous_fragment).coverage if previous_fragment else []
+        if edge.source_temp_id in dropped_set or edge.target_temp_id in dropped_set:
+            continue
+        edge_key = (edge.edge_name, edge.source_temp_id, edge.target_temp_id)
+        previous_edge = edges_map.get(edge_key)
+        if previous_edge is None:
+            edges_map[edge_key] = edge
+        else:
+            edges_map[edge_key] = previous_edge.model_copy(
+                update={
+                    "properties": {**previous_edge.properties, **edge.properties},
+                    "evidence": [*previous_edge.evidence, *edge.evidence],
+                }
+            )
+
+    # 4. Coverage
+    old_coverage = (
+        GraphPatchFragment.model_validate(previous_fragment).coverage
+        if previous_fragment
+        else []
+    )
     coverage = {item.chunk_index: item for item in old_coverage}
     coverage.update({item.chunk_index: item for item in coverage_updates})
+
+    # Lấy danh sách nodes duy nhất từ nodes_by_tempid
+    final_nodes = list(nodes_by_tempid.values())
+
     return GraphPatchFragment(
         ontology_version=delta.ontology_version,
-        nodes=list(nodes.values()),
-        edges=list(edges.values()),
+        nodes=final_nodes,
+        edges=list(edges_map.values()),
         coverage=list(coverage.values()),
         warnings=[*baseline.warnings, *delta.warnings],
     )
