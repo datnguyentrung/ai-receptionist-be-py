@@ -6,6 +6,7 @@ description: >
 metadata:
   adk_additional_tools:
     - retrieve_taekwondo_knowledge
+    - retrieve_taekwondo_document_history
 ---
 
 # Taekwondo Graph QA
@@ -32,6 +33,9 @@ skill này là con đường duy nhất để trả lời câu hỏi dựa trên
 - Không biến nội dung tương tự chủ đề thành bằng chứng cho một khẳng định cụ thể.
 - Với câu hỏi nhiều điều kiện, chỉ kết luận chắc chắn khi evidence hỗ trợ đủ từng điều kiện.
 - Nếu các passage mâu thuẫn, nêu rõ mâu thuẫn và citation cho từng phía.
+- Với mâu thuẫn chưa phân xử (`PENDING` hoặc `OTHER`), nêu cả hai nguồn và không chọn một nguồn làm hiện hành.
+- Với fact không có `validFrom` hoặc passage nói chưa xác minh tình trạng hiện tại, nêu rõ không thể xác nhận thông tin còn hiệu lực.
+- Khi người dùng hỏi lịch sử hoặc bản cũ của một tài liệu, gọi `retrieve_taekwondo_document_history(document_key)` và phân biệt rõ `COMMITTED` với `SUPERSEDED`.
 - Không hiển thị embedding, stable key hoặc chi tiết retrieval nội bộ trừ khi người dùng hỏi.
 
 ## Định dạng trả lời

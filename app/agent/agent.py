@@ -19,6 +19,7 @@ from app.agent.skills.skill_loader import (
     discover_skill_tools,
 )
 from app.agent.plugins import ToolAutoCorrectPlugin
+from app.core.config import settings
 from app.utils.ingestion_logger import ADKDetailedLoggerPlugin, reset_log_file
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,6 +51,7 @@ def create_root_agent() -> Agent:
         name="root_agent",
         model=Gemini(
             model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            client_kwargs={"api_key": settings.GEMINI_API_KEY},
             retry_options=HttpRetryOptions(
                 attempts=5,
                 initial_delay=3.0,

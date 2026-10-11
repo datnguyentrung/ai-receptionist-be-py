@@ -88,6 +88,7 @@ class OntologySchemaProposal(Base):
         SQLEnum(
             SchemaProposalType,
             name="ontology_schema_proposal_type",
+            schema="public",
         ),
         nullable=False,
         index=True,
@@ -98,6 +99,7 @@ class OntologySchemaProposal(Base):
         SQLEnum(
             SchemaProposalStatus,
             name="ontology_schema_proposal_status",
+            schema="public",
         ),
         nullable=False,
         default=SchemaProposalStatus.PROPOSED,

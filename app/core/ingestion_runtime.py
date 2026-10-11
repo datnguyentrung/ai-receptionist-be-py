@@ -169,7 +169,7 @@ async def build_service_container() -> ServiceContainer:
         await engine.dispose()
         raise RuntimeInitializationError("neo4j-index", exc) from exc
 
-    repository = IngestionRepository()
+    repository = IngestionRepository(session_factory)
     ontology_cache = OntologyCache(session_factory)
     ontology_compiler = OntologyCompiler()
     ontology_lifecycle = OntologyLifecycle(
@@ -177,6 +177,23 @@ async def build_service_container() -> ServiceContainer:
         compiler=ontology_compiler,
         cache=ontology_cache,
     )
+
+    # A human-approved publication may have stopped between the two datastores.
+    # Finish it before accepting a new commit, using its persisted approval.
+    from app.services.ingestion.engine import operations
+    for pending_id in await repository.unfinished_commits():
+        pending = await repository.get_workspace(pending_id)
+        if pending is None:
+            continue
+        digest = pending.job.summary.get("approvedDigest")
+        if not digest:
+            logger.error("Commit %s has no durable approval and requires repair", pending_id)
+            continue
+        result = await operations.commit(
+            repository, graph_store, pending_id, digest, ontology_lifecycle
+        )
+        if result.get("errorCode") or result.get("code"):
+            logger.error("Commit recovery for %s requires repair: %s", pending_id, result)
 
     return ServiceContainer(
         engine=engine,

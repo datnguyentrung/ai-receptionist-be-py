@@ -97,6 +97,7 @@ class OntologyProperty(Base):
         SQLEnum(
             OntologyPropertyDataType,
             name="ontology_property_data_type",
+            schema="public",
         ),
         nullable=False,
     )

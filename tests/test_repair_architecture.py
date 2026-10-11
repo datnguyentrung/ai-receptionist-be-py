@@ -284,8 +284,8 @@ def test_merge_repair_fragment_removes_dropped_nodes_and_edges():
     assert len(merged.edges) == 0
 
 
-def test_repair_batch_fault_tolerant_fallback(monkeypatch):
-    """Verify that when retry limit is reached with lingering issues, batch is quarantined and STAGED."""
+def test_repair_batch_keeps_validation_failures_explicit(monkeypatch):
+    """A lingering validation error must never be staged as successful."""
     async def _run():
         ev = [_dummy_evidence()]
         node_base = GraphNode(
@@ -383,17 +383,14 @@ def test_repair_batch_fault_tolerant_fallback(monkeypatch):
             repair_delta=delta,
         )
 
-        # Assert repo_mock.store_batch_result was called with issue_dicts=[] (quarantined)
+        # The repository must receive the real issue and decide retry/terminal state.
         repo_mock.store_batch_result.assert_called_once()
         call_args = repo_mock.store_batch_result.call_args[0]
 
-        # issues passed to store_batch_result must be empty list
         passed_issues = call_args[6]
-        assert passed_issues == []
-
-        # merged fragment passed to store_batch_result must contain quarantine warning
-        passed_merged = call_args[5]
-        assert passed_merged is not None
-        assert any("[QUARANTINE]" in w for w in passed_merged.warnings)
+        assert "SYNTAX_OR_SEMANTIC_ISSUE" in {
+            issue["code"] for issue in passed_issues
+        }
+        assert passed_issues
 
     asyncio.run(_run())

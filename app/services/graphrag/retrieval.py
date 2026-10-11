@@ -59,16 +59,16 @@ class GraphRAGRetriever:
         entity_keys = [
             str(item["stableKey"]) for item in entity_hits if item.get("stableKey")
         ]
-        fact_chunk_ids = sorted(
-            {
-                str(chunk_id)
-                for fact in fact_hits
-                for chunk_id in fact.get("chunkIds", [])
-            }
-        )
-        entity_chunks, fact_chunks = await asyncio.gather(
+        fact_chunk_ids = sorted({str(chunk_id) for fact in fact_hits
+                                 for chunk_id in fact.get("chunkIds") or []})
+        peer_chunk_ids = sorted({str(chunk_id) for fact in fact_hits
+                                 for peer in fact.get("conflictPeers") or []
+                                 if peer.get("decision") in {"PENDING", "OTHER"}
+                                 for chunk_id in peer.get("chunkIds") or []})
+        entity_chunks, fact_chunks, peer_chunks = await asyncio.gather(
             self._graph_store.chunks_for_entities(entity_keys, self._candidate_limit),
-            self._graph_store.chunks_by_ids(fact_chunk_ids),
+            self._graph_store.chunks_by_ids(fact_chunk_ids, include_historical=True),
+            self._graph_store.chunks_by_ids(peer_chunk_ids, include_historical=True),
         )
 
         paths = {
@@ -89,6 +89,20 @@ class GraphRAGRetriever:
             key=lambda item: (-float(item["cosineScore"]), -float(item["rrfScore"]))
         )
         selected = _within_context_budget(ranked[:top_k], self._context_max_chars)
+        selected_ids = {str(item.get("chunkId")) for item in selected}
+        peer_ids = {
+            str(peer_chunk)
+            for fact in fact_hits
+            if selected_ids.intersection(str(cid) for cid in fact.get("chunkIds") or [])
+            for peer in fact.get("conflictPeers") or []
+            if peer.get("decision") in {"PENDING", "OTHER"}
+            for peer_chunk in peer.get("chunkIds") or []
+        }
+        selected.extend(
+            item for item in peer_chunks
+            if str(item.get("chunkId")) in peer_ids
+            and str(item.get("chunkId")) not in selected_ids
+        )
         top_score = float(selected[0]["cosineScore"]) if selected else 0.0
         sufficient = bool(selected and top_score >= self._min_cosine_score)
         passages = [_public_passage(item) for item in selected] if sufficient else []
@@ -100,6 +114,13 @@ class GraphRAGRetriever:
                 "factId": item.get("factId"),
                 "statement": item.get("statement"),
                 "factType": item.get("factType"),
+                "validFrom": item.get("validFrom"),
+                "validTo": item.get("validTo"),
+                "conflictPeers": item.get("conflictPeers") or [],
+                "currentnessNote": "No current winner; compare the cited sources."
+                if any(peer.get("decision") in {"PENDING", "OTHER"} for peer in item.get("conflictPeers") or [])
+                else ("The source gives no unambiguous date; do not assume this remains current."
+                      if not item.get("validFrom") else None),
                 "score": item.get("score"),
                 "chunkIds": sorted(
                     selected_chunk_ids.intersection(

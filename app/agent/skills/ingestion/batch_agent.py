@@ -10,6 +10,8 @@ from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
 from google.genai.types import HttpRetryOptions
 
+from app.core.config import settings
+
 from app.agent.skills.ingestion.batch_execution import (
     BatchExecutionModule,
     BatchExtractionOutput,
@@ -86,6 +88,7 @@ def create_ingestion_batch_agent() -> Agent:
         name="ingestion_batch_agent",
         model=Gemini(
             model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            client_kwargs={"api_key": settings.GEMINI_API_KEY},
             retry_options=HttpRetryOptions(
                 attempts=5,
                 initial_delay=3.0,
