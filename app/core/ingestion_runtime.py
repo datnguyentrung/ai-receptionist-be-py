@@ -30,6 +30,7 @@ from app.services.graphrag.embeddings import GeminiEmbeddingProvider
 from app.services.graphrag.graph_store import Neo4jGraphStore
 from app.services.ingestion.engine.graph_store import Neo4jIngestionStore
 from app.services.ingestion.engine.repository import IngestionRepository
+from app.services.ontology.schema_context import SchemaContextService
 from app.services.ingestion.schema.ontology import OntologyCache
 from app.services.ontology.ontology_compiler import OntologyCompiler
 from app.services.ontology.ontology_lifecycle import OntologyLifecycle
@@ -63,6 +64,7 @@ class ServiceContainer:
     embedding_provider: GeminiEmbeddingProvider
     repository: IngestionRepository
     ontology_cache: OntologyCache
+    schema_context: SchemaContextService
     model_id: str
     ontology_lifecycle: OntologyLifecycle
     max_file_size: int = settings.INGESTION_MAX_FILE_SIZE_BYTES
@@ -187,6 +189,7 @@ async def build_service_container() -> ServiceContainer:
 
     repository = IngestionRepository(session_factory)
     ontology_cache = OntologyCache(session_factory)
+    schema_context = SchemaContextService(ontology_cache)
     ontology_compiler = OntologyCompiler()
     ontology_lifecycle = OntologyLifecycle(
         session_factory=session_factory,
@@ -220,6 +223,7 @@ async def build_service_container() -> ServiceContainer:
         embedding_provider=embedding_provider,
         repository=repository,
         ontology_cache=ontology_cache,
+        schema_context=schema_context,
         model_id=json.dumps(ingestion_model_assignments(), sort_keys=True),
         ontology_lifecycle=ontology_lifecycle,
         max_file_size=settings.INGESTION_MAX_FILE_SIZE_BYTES,

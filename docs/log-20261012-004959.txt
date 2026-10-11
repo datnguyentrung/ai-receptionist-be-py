@@ -1,0 +1,2618 @@
+# Ingestion Real-time Logs (Started at 2026-10-12 00:36:29)
+
+[2026-10-12 00:36:52] === 👤 USER INPUT MESSAGE ===
+{
+  "message": "câu lạc bộ tên là gì ?"
+}
+
+[2026-10-12 00:36:52] === 🤖 [AGENT START] root_agent ===
+{
+  "agent": "root_agent",
+  "model": {
+    "model": "gemini-3.5-flash-lite",
+    "base_url": null,
+    "speech_config": null,
+    "use_interactions_api": false,
+    "retry_options": {
+      "attempts": 5,
+      "initialDelay": 3.0,
+      "maxDelay": 30.0,
+      "expBase": null,
+      "jitter": null,
+      "httpStatusCodes": [
+        429,
+        503
+      ]
+    }
+  }
+}
+
+[2026-10-12 00:36:54] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 1,
+  "contentPartCount": 1,
+  "tools": []
+}
+
+[2026-10-12 00:36:55] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "load_skill",
+      "args": {
+        "skill_name": "graph-qa"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:36:55] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        1,334
+     • candidatesTokenCount:    20
+     • thoughtsTokenCount:      270
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         1,624
+
+[2026-10-12 00:36:55] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:36:55] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        1,334
+     • candidatesTokenCount:    20
+     • thoughtsTokenCount:      270
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         1,624
+
+[2026-10-12 00:36:55] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "load_skill",
+      "args": {
+        "skill_name": "graph-qa"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:36:55] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        1,334
+     • candidatesTokenCount:    20
+     • thoughtsTokenCount:      270
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         1,624
+
+[2026-10-12 00:36:55] === 🛠️ [TOOL REQUEST] load_skill ===
+{
+  "tool": "load_skill",
+  "arguments": {
+    "skill_name": "graph-qa"
+  }
+}
+
+[2026-10-12 00:36:55] === 📦 [TOOL RESPONSE] load_skill ===
+{
+  "tool": "load_skill",
+  "result": {
+    "skill_name": "graph-qa",
+    "instructions": "# Taekwondo Graph QA\n\nSkill này là **con đường duy nhất** để trả lời câu hỏi dựa trên tri thức đã lưu trong Knowledge Graph.\nIngestion skill chỉ nạp dữ liệu. Tuyệt đối **không được trả lời từ kiến thức có sẵn** của mô hình.\n\nTổng số lần gọi công cụ truy xuất tối đa là **2** (1 lần chính + tối đa 1 lần fallback hợp lệ).\n\n---\n\n## Quy trình 6 bước chuẩn\n\n```\n[B1: Khám phá Scope] → [B2: Tải Schema Context] → [B3: Lập Kế hoạch Mapping] \n  → [B4: Chọn 1 Chiến lược] → [B5: Truy xuất (max 2)] → [B6: Đánh giá & Trả lời]\n```\n\n### Bước 1 — Khám phá Scope Domain\nNếu câu hỏi thuộc về một lĩnh vực cụ thể, gọi công cụ từ skill `schema-context`:\n`list_active_schema_scopes()` để lấy danh mục các scope hiện có.\n- Chọn `scope_key` **hẹp nhất** phù hợp với câu hỏi (ví dụ: `poomsae`, `competition`, `training`).\n- Nếu câu hỏi mơ hồ hoặc bao trùm nhiều miền: đặt `scope_key = None` và không lọc theo scope.\n\n### Bước 2 — Tải Schema Kỹ thuật (Technical Schema)\nVới `scope_key` đã chọn ở Bước 1, gọi công cụ từ skill `schema-context`:\n`load_active_schema_context(scope_keys=[scope_key])`.\nCông cụ trả về:\n- `entityTypes`: các kiểu thực thể kèm `neo4jLabel`.\n- `properties`: các thuộc tính kèm `neo4jPropertyKey` vật lý.\n- `relationships`: các quan hệ kèm `relationshipType` dạng `UPPER_SNAKE_CASE`.\n\n### Bước 3 — Lập kế hoạch Entity / Property / Relation\nDựa trên schema đã nạp ở Bước 2:\n- Xác định chính xác các node label, property key vật lý và quan hệ cần truy vấn.\n- **Tuyệt đối không** dùng tên ontology namespace (ví dụ: `pskg:...`, `p.pskg:name`) mà phải dùng `neo4jPropertyKey` thuần túy.\n\n### Bước 4 — Chọn 1 trong 3 Chiến lược Truy xuất\n\n| Chiến lược | Công cụ | Dùng khi nào |\n|---|---|---|\n| **Cypher chính xác** | `execute_read_cypher` | Biết rõ thực thể, quan hệ, cần lọc/đếm/tổng hợp/join chính xác nhiều bảng |\n| **Vector ngữ nghĩa** | `vector_search` | Câu hỏi khái niệm, tìm theo ý nghĩa, chưa rõ tên thực thể cụ thể |\n| **Hybrid** | `retrieve_taekwondo_knowledge` (hoặc `hybrid_search`) | Câu hỏi phức tạp, cần cả tìm kiếm ngữ nghĩa lẫn mở rộng đồ thị thực thể & facts |\n\n### Bước 5 — Thực thi Truy xuất (Ngân sách nghiêm ngặt)\n- **Lần 1 (Truy xuất chính)**: Gọi công cụ đã chọn với tham số tối ưu.\n- **Lần 2 (Chỉ khi fallback hợp lệ)**: CHỈ ĐƯỢC PHÉP khi:\n  - Lần 1 gặp lỗi cú pháp/schema Cypher có thể sửa được, HOẶC\n  - Lần 1 không tìm thấy kết quả nhưng có chiến lược thay thế rõ ràng (ví dụ: Cypher trả về 0 dòng → fallback sang `vector_search`).\n  - **Cấm fallback** chỉ vì muốn \"kiểm tra thêm\" hoặc điểm tương đồng chưa vừa ý.\n- **Tuyệt đối không** gọi quá 2 lần truy xuất trong một câu hỏi.\n\n### Bước 6 — Đánh giá Evidence & Sinh Câu trả lời\n1. Kiểm tra bằng chứng:\n   - Nếu `sufficientEvidence = false` hoặc `rowCount = 0`: Trả lời chính xác nguyên văn `abstentionMessage` (\"Không có đủ bằng chứng trong kho tri thức để trả lời câu hỏi này.\"). Tuyệt đối không tự suy diễn.\n2. Nếu đủ bằng chứng (`sufficientEvidence = true` hoặc `rowCount > 0`):\n   - Chỉ sử dụng các đoạn trích (`passages`), sự thật (`facts`), hoặc các dòng dữ liệu (`rows`) do công cụ trả về.\n   - Mọi khẳng định thực tế phải có trích dẫn inline ngay sau câu: `[Tên tài liệu — Section/Trang]`.\n\n---\n\n## Quy tắc Cypher An toàn\n\nKhi sử dụng `execute_read_cypher`:\n- Luôn dùng tham số hóa `$param_name` trong `parameters`, không ghép chuỗi thủ công.\n- Luôn kèm mệnh đề `LIMIT` (khuyến nghị $\\le 50$).\n- Chỉ dùng các nhãn node (`neo4jLabel`), thuộc tính (`neo4jPropertyKey`), và quan hệ (`relationshipType`) có trong schema đã tải.\n- **Cấm tuyệt đối**: `CREATE`, `MERGE`, `DELETE`, `DETACH`, `SET`, `REMOVE`, `DROP`, và dấu chấm phẩy `;`.\n- **Cấm tuyệt đối**: Truy cập namespace property như `n.pskg:itemName`.\n\n---\n\n## Quy tắc Grounding & Bằng chứng\n\n- **Không dùng kiến thức nền của LLM**: Mọi thông tin phải xuất phát từ kết quả truy xuất.\n- **Xung đột thông tin**: Nếu các đoạn trích mâu thuẫn nhau, trình bày rõ cả hai quan điểm kèm trích dẫn nguồn riêng biệt. Không tự ý chọn một bên là chân lý.\n- **Thông tin chưa phân xử**: Với trạng thái `PENDING` hoặc `OTHER`, nêu rõ cả 2 nguồn và ghi rõ chưa xác minh.\n- **Hiệu lực dữ liệu**: Fact không có `validFrom` cần ghi chú rõ không thể xác nhận thông tin còn hiệu lực hiện hành hay không.\n- **Lịch sử tài liệu**: Khi người dùng hỏi về bản cũ hoặc lịch sử tài liệu, gọi `retrieve_taekwondo_document_history(document_key)` và phân biệt rõ `COMMITTED` với `SUPERSEDED`.\n- **Không hiển thị chi tiết nội bộ**: Không hiển thị embedding, stable key, điểm vector thô hoặc vết truy xuất kỹ thuật trừ khi người dùng yêu cầu cụ thể.\n\n---\n\n## Định dạng trả lời\n\nTrả lời ngắn gọn bằng ngôn ngữ của người dùng, đặt citation ngay sau câu được hỗ trợ.\nKhông thêm mục “Nguồn” riêng nếu citation nội dòng đã đầy đủ.",
+    "frontmatter": {
+      "name": "graph-qa",
+      "description": "Trả lời câu hỏi về Taekwondo bằng multi-strategy retrieval trên Neo4j knowledge graph: Cypher chính xác, vector semantic, hoặc hybrid — với citation và abstention nghiêm ngặt.\n",
+      "license": null,
+      "compatibility": null,
+      "allowed_tools": null,
+      "metadata": {
+        "adk_additional_tools": [
+          "execute_read_cypher",
+          "vector_search",
+          "hybrid_search",
+          "retrieve_taekwondo_knowledge",
+          "retrieve_taekwondo_document_history"
+        ]
+      }
+    }
+  }
+}
+
+[2026-10-12 00:36:55] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 3,
+  "contentPartCount": 4,
+  "tools": []
+}
+
+[2026-10-12 00:36:57] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "retrieve_taekwondo_knowledge",
+      "args": {
+        "question": "câu lạc bộ tên là gì"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:36:57] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        3,900
+     • candidatesTokenCount:    25
+     • thoughtsTokenCount:      422
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         4,347
+
+[2026-10-12 00:36:57] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:36:57] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        4,170
+     • candidatesTokenCount:    25
+     • thoughtsTokenCount:      422
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         4,617
+
+[2026-10-12 00:36:57] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "retrieve_taekwondo_knowledge",
+      "args": {
+        "question": "câu lạc bộ tên là gì"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:36:57] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        4,170
+     • candidatesTokenCount:    25
+     • thoughtsTokenCount:      422
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         4,617
+
+[2026-10-12 00:36:57] === 🛠️ [TOOL REQUEST] retrieve_taekwondo_knowledge ===
+{
+  "tool": "retrieve_taekwondo_knowledge",
+  "arguments": {
+    "question": "câu lạc bộ tên là gì"
+  }
+}
+
+[2026-10-12 00:37:04] === 📦 [TOOL RESPONSE] retrieve_taekwondo_knowledge ===
+{
+  "tool": "retrieve_taekwondo_knowledge",
+  "result": {
+    "success": true,
+    "strategy": "neo4j_hybrid_graphrag",
+    "query": "câu lạc bộ tên là gì",
+    "scopeKey": null,
+    "sufficientEvidence": true,
+    "abstentionMessage": null,
+    "passages": [
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_90db33c99c7646e9e9cb6b16cf32a8d030ee5c9c",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — 2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán",
+        "content": "2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán\n\nSau 7 năm phát triển, năm 2019, CLB Taekwondo Văn Quán chính thức sử dụng tên:\n\n> HỆ THỐNG TAEKWONDO VĂN QUÁN\n\nTên gọi đánh dấu giai đoạn phát triển từ mô hình câu lạc bộ ban đầu thành hệ thống gồm nhiều cơ sở tập luyện.",
+        "quote": "2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán\n\nSau 7 năm phát triển, năm 2019, CLB Taekwondo Văn Quán chính thức sử dụng tên:\n\n> HỆ THỐNG TAEKWONDO VĂN QUÁN\n\nTên gọi đánh dấu giai đoạn phát triển từ mô hình câu lạc bộ ban đầu thành hệ thống gồm nhiều cơ sở tập luyện.",
+        "score": 0.667332,
+        "rrfScore": 0.047938,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_90db33c99c7646e9e9cb6b16cf32a8d030ee5c9c",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 5,
+          "section": "2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Lịch sử hình thành và phát triển > 2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán#0:L54-L58",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_2b400f7ba75bc66de697745325ff18468ca9e549",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — Cơ sở 2 — Văn Quán, Nhóm Nâng Cao",
+        "content": "Cơ sở 2 — Văn Quán, Nhóm Nâng Cao\n\nĐịa điểm:\nSân sau Tòa nhà CT2A, Khu đô thị mới Văn Quán, phường Phúc La, quận Hà Đông, Hà Nội.\n\nNhóm: Nâng Cao.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Hai và Thứ Sáu.",
+        "quote": "Cơ sở 2 — Văn Quán, Nhóm Nâng Cao\n\nĐịa điểm:\nSân sau Tòa nhà CT2A, Khu đô thị mới Văn Quán, phường Phúc La, quận Hà Đông, Hà Nội.\n\nNhóm: Nâng Cao.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Hai và Thứ Sáu.",
+        "score": 0.658988,
+        "rrfScore": 0.031054,
+        "retrievalPaths": [
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_2b400f7ba75bc66de697745325ff18468ca9e549",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 10,
+          "section": "Cơ sở 2 — Văn Quán, Nhóm Nâng Cao",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Hệ thống cơ sở tập luyện > Cơ sở 2 — Văn Quán, Nhóm Nâng Cao#0:L108-L116",
+          "scopeKey": "facility,finance,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_0122026a145c11bbfedea742f2d746b1ab20e213",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — Cơ sở 5 — Lucky House",
+        "content": "Cơ sở 5 — Lucky House\n\nĐịa điểm:\nSân chơi Tòa nhà 19T1 Lucky House Kiến Hưng, Mậu Lương, Hà Đông.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Ba và Thứ Sáu.",
+        "quote": "Cơ sở 5 — Lucky House\n\nĐịa điểm:\nSân chơi Tòa nhà 19T1 Lucky House Kiến Hưng, Mậu Lương, Hà Đông.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Ba và Thứ Sáu.",
+        "score": 0.657865,
+        "rrfScore": 0.030366,
+        "retrievalPaths": [
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_0122026a145c11bbfedea742f2d746b1ab20e213",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 13,
+          "section": "Cơ sở 5 — Lucky House",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Hệ thống cơ sở tập luyện > Cơ sở 5 — Lucky House#0:L140-L146",
+          "scopeKey": "facility,finance,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_990847597d8715d46cc0954bf8bff333c8188420",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — HỆ THỐNG TAEKWONDO VĂN QUÁN",
+        "content": "HỆ THỐNG TAEKWONDO VĂN QUÁN\n\n> Nơi hội tụ những bạn trẻ yêu thích võ thuật, đặc biệt với bộ môn Taekwondo",
+        "quote": "HỆ THỐNG TAEKWONDO VĂN QUÁN\n\n> Nơi hội tụ những bạn trẻ yêu thích võ thuật, đặc biệt với bộ môn Taekwondo",
+        "score": 0.655919,
+        "rrfScore": 0.028783,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_990847597d8715d46cc0954bf8bff333c8188420",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 0,
+          "section": "HỆ THỐNG TAEKWONDO VĂN QUÁN",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#HỆ THỐNG TAEKWONDO VĂN QUÁN#0:L3-L3",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_fd814f137298054a2e4bf7878f724c9958b468ba",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — Cơ sở 1 — Văn Quán",
+        "content": "Cơ sở 1 — Văn Quán\n\nĐịa điểm:\nSân sau Tòa nhà CT2A, Khu đô thị mới Văn Quán, phường Phúc La, quận Hà Đông, Hà Nội.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Tư và Thứ Bảy.",
+        "quote": "Cơ sở 1 — Văn Quán\n\nĐịa điểm:\nSân sau Tòa nhà CT2A, Khu đô thị mới Văn Quán, phường Phúc La, quận Hà Đông, Hà Nội.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Tư và Thứ Bảy.",
+        "score": 0.654964,
+        "rrfScore": 0.015385,
+        "retrievalPaths": [
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_fd814f137298054a2e4bf7878f724c9958b468ba",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 9,
+          "section": "Cơ sở 1 — Văn Quán",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Hệ thống cơ sở tập luyện > Cơ sở 1 — Văn Quán#0:L98-L104",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_f3c29a98b324b8e4b8269b0d56f1b8ea479aab0a",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — Cơ sở 3 — Xa La",
+        "content": "Cơ sở 3 — Xa La\n\nĐịa điểm:\nSân chơi Tòa nhà CT4C, Khu đô thị Xa La, Hà Đông, Hà Nội.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Ba và Thứ Năm.",
+        "quote": "Cơ sở 3 — Xa La\n\nĐịa điểm:\nSân chơi Tòa nhà CT4C, Khu đô thị Xa La, Hà Đông, Hà Nội.\n\nLịch được công bố năm 2022:\n17:30 – 19:00, Thứ Ba và Thứ Năm.",
+        "score": 0.652197,
+        "rrfScore": 0.029857,
+        "retrievalPaths": [
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_f3c29a98b324b8e4b8269b0d56f1b8ea479aab0a",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 11,
+          "section": "Cơ sở 3 — Xa La",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Hệ thống cơ sở tập luyện > Cơ sở 3 — Xa La#0:L120-L126",
+          "scopeKey": "facility,finance,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_96e0e7963bf2cdabb01f1f7c2b8720fdd661661e",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — Cơ sở 6 — Văn Quán 2",
+        "content": "Cơ sở 6 — Văn Quán 2\n\nĐịa điểm:\nSân sau Tòa nhà CT7A, Khu đô thị mới Văn Quán, phường Phúc La, quận Hà Đông, Hà Nội.\n\nLịch được công bố năm 2022:\n18:00 – 19:30, Thứ Hai và Thứ Sáu.",
+        "quote": "Cơ sở 6 — Văn Quán 2\n\nĐịa điểm:\nSân sau Tòa nhà CT7A, Khu đô thị mới Văn Quán, phường Phúc La, quận Hà Đông, Hà Nội.\n\nLịch được công bố năm 2022:\n18:00 – 19:30, Thứ Hai và Thứ Sáu.",
+        "score": 0.649365,
+        "rrfScore": 0.029211,
+        "retrievalPaths": [
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_96e0e7963bf2cdabb01f1f7c2b8720fdd661661e",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 14,
+          "section": "Cơ sở 6 — Văn Quán 2",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Hệ thống cơ sở tập luyện > Cơ sở 6 — Văn Quán 2#0:L150-L156",
+          "scopeKey": "facility,finance,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_6a948e5b754759faa78d233ad8eef2b27b9dbc1a",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 4. Cơ sở tập luyện, lịch tập và người phụ trách",
+        "content": "4. Cơ sở tập luyện, lịch tập và người phụ trách\n\nPhần bên phải sheet có bảng “DS các cơ sở”, trong đó ghi cơ sở, người phụ trách, thứ tập và địa điểm. Nội dung được chép lại theo từng dòng như sau.\n\nSTT trong sheet: Thầy cô chủ nhiệm/HLV được ghi | Mã CS | Ngày tập được ghi | Địa điểm\n---:: --- | ---: | --- | ---\n1: Nguyễn Trung Đạt; Nguyễn Hữu Trung | 1 | T4, T7 | Sân chơi tòa CT2A, KĐT Văn Quán\n2: Nguyễn Minh Văn; Hà Thị Thảo | 2 | T3, T6 | Phòng tập CLC Văn Quán\n3: Việt Trọng Hải; Đặng Quốc Toàn | 2 | T2, T5 | Phòng tập CLC Văn Quán\n4: Nguyễn Minh Văn; Hà Thị Thảo | 3 | T2, T6 | Phòng tập CLC Hemisco Xa La\n5: Nguyễn Minh Văn; Hà Thị Thảo | 3 | T4, T7 | Phòng tập CLC Hemisco Xa La\n6: Nguyễn Trung Đạt; Nguyễn Hữu Trung | 4 | T3, T5 | Sân chơi tòa CT2A, KĐT Văn Quán\n7: Việt Trọng Hải; Đặng Quốc Toàn | 5 | T3, T6 | Sân chơi tòa 19T1, KĐT Mậu Lương\n\nLưu ý khi đọc bảng: mã CS 2 và CS 3 xuất hiện ở nhiều dòng với lịch hoặc người phụ trách khác nhau. Tài liệu giữ nguyên cách ghi trong sheet, không tự gộp các dòng thành một lịch duy nhất. Lịch thực tế, khả năng học bù tại cơ sở khác và tình trạng hoạt động của từng lớp cần được xác nhận trước khi đến tập.",
+        "quote": "4. Cơ sở tập luyện, lịch tập và người phụ trách\n\nPhần bên phải sheet có bảng “DS các cơ sở”, trong đó ghi cơ sở, người phụ trách, thứ tập và địa điểm. Nội dung được chép lại theo từng dòng như sau.\n\nSTT trong sheet: Thầy cô chủ nhiệm/HLV được ghi | Mã CS | Ngày tập được ghi | Địa điểm\n---:: --- | ---: | --- | ---\n1: Nguyễn Trung Đạt; Nguyễn Hữu Trung | 1 | T4, T7 | Sân chơi tòa CT2A, KĐT Văn Quán\n2: Nguyễn Minh Văn; Hà Thị Thảo | 2 | T3, T6 | Phòng tập CLC Văn Quán\n3: Việt Trọng Hải; Đặng Quốc Toàn | 2 | T2, T5 | Phòng tập CLC Văn Quán\n4: Nguyễn Minh Văn; Hà Thị Thảo | 3 | T2, T6 | Phòng tập CLC Hemisco Xa La\n5: Nguyễn Minh Văn; Hà Thị Thảo | 3 | T4, T7 | Phòng tập CLC Hemisco Xa La\n6: Nguyễn Trung Đạt; Nguyễn Hữu Trung | 4 | T3, T5 | Sân chơi tòa CT2A, KĐT Văn Quán\n7: Việt Trọng Hải; Đặng Quốc Toàn | 5 | T3, T6 | Sân chơi tòa 19T1, KĐT Mậu Lương\n\nLưu ý khi đọc bảng: mã CS 2 và CS 3 xuất hiện ở nhiều dòng với lịch hoặc người phụ trách khác nhau. Tài liệu giữ nguyên cách ghi trong sheet, không tự gộp các dòng thành một lịch duy nhất. Lịch thực tế, khả năng học bù tại cơ sở khác và tình trạng hoạt động của từng lớp cần được xác nhận trước khi đến tập.",
+        "score": 0.647545,
+        "rrfScore": 0.030835,
+        "retrievalPaths": [
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_6a948e5b754759faa78d233ad8eef2b27b9dbc1a",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 5,
+          "section": "4. Cơ sở tập luyện, lịch tập và người phụ trách",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 4. Cơ sở tập luyện, lịch tập và người phụ trách#0:L51-L63",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_a28ab35f0dfb9fd9bc6ed09fb3b28ae1330734af",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — Thầy Phùng Thế Lịch",
+        "content": "Thầy Phùng Thế Lịch\n\nThầy Phùng Thế Lịch là:\n\n- Người sáng lập CLB Taekwondo Văn Quán\n- Huấn luyện viên trưởng Hệ Thống Taekwondo Văn Quán\n\nThầy Phùng Thế Lịch là người đứng lên thành lập CLB Taekwondo Văn Quán và đưa câu lạc bộ chính thức đi vào hoạt động từ ngày 15/05/2012.\n\nTừ nền tảng ban đầu đó, Taekwondo Văn Quán phát triển qua nhiều năm và chính thức mang tên Hệ Thống Taekwondo Văn Quán vào năm 2019.\n\nLiên hệ HLV trưởng Phùng Thế Lịch:\n033 999 8191",
+        "quote": "Thầy Phùng Thế Lịch\n\nThầy Phùng Thế Lịch là:\n\n- Người sáng lập CLB Taekwondo Văn Quán\n- Huấn luyện viên trưởng Hệ Thống Taekwondo Văn Quán\n\nThầy Phùng Thế Lịch là người đứng lên thành lập CLB Taekwondo Văn Quán và đưa câu lạc bộ chính thức đi vào hoạt động từ ngày 15/05/2012.\n\nTừ nền tảng ban đầu đó, Taekwondo Văn Quán phát triển qua nhiều năm và chính thức mang tên Hệ Thống Taekwondo Văn Quán vào năm 2019.\n\nLiên hệ HLV trưởng Phùng Thế Lịch:\n033 999 8191",
+        "score": 0.646619,
+        "rrfScore": 0.030118,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_a28ab35f0dfb9fd9bc6ed09fb3b28ae1330734af",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 7,
+          "section": "Thầy Phùng Thế Lịch",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Huấn luyện viên trưởng > Thầy Phùng Thế Lịch#0:L76-L88",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_5f02d18c8b213c6a0f4422237e8334e3d2f1761b",
+        "citation": "he-thong-taekwondo-van-quan-gioi-thieu.md — 2012 — Thành lập CLB Taekwondo Văn Quán",
+        "content": "2012 — Thành lập CLB Taekwondo Văn Quán\n\nNgày 15/05/2012, CLB Taekwondo Văn Quán chính thức đi vào hoạt động.\n\nCâu lạc bộ do thầy Phùng Thế Lịch sáng lập, đồng thời đảm nhiệm vai trò Huấn luyện viên trưởng.\n\nĐây là dấu mốc khởi đầu cho quá trình hình thành và phát triển của Hệ Thống Taekwondo Văn Quán sau này.",
+        "quote": "2012 — Thành lập CLB Taekwondo Văn Quán\n\nNgày 15/05/2012, CLB Taekwondo Văn Quán chính thức đi vào hoạt động.\n\nCâu lạc bộ do thầy Phùng Thế Lịch sáng lập, đồng thời đảm nhiệm vai trò Huấn luyện viên trưởng.\n\nĐây là dấu mốc khởi đầu cho quá trình hình thành và phát triển của Hệ Thống Taekwondo Văn Quán sau này.",
+        "score": 0.645854,
+        "rrfScore": 0.02967,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "2890b10c-1fe5-59f4-bed1-2fa13ba7a08d",
+          "versionId": "9f6ed423-243f-40b8-b7b2-99945d7e41e4",
+          "chunkId": "chk_5f02d18c8b213c6a0f4422237e8334e3d2f1761b",
+          "documentName": "he-thong-taekwondo-van-quan-gioi-thieu.md",
+          "chunkIndex": 3,
+          "section": "2012 — Thành lập CLB Taekwondo Văn Quán",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/he-thong-taekwondo-van-quan-gioi-thieu.md#Lịch sử hình thành và phát triển > 2012 — Thành lập CLB Taekwondo Văn Quán#0:L40-L44",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      }
+    ],
+    "facts": [
+      {
+        "factId": "28b0d06ef3c748a6d3ab194844588b2f832d08e331ef323bb6d7f962911d5562",
+        "statement": "schedule | name | Lịch tập Cơ sở 5 — Lucky House | name: Lịch tập Cơ sở 5 — Lucky House",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8378664255142212,
+        "chunkIds": [
+          "chk_0122026a145c11bbfedea742f2d746b1ab20e213"
+        ]
+      },
+      {
+        "factId": "bdcd595a33ba709f27bdff3530834c2b293d043d45bd50241605f8875d750162",
+        "statement": "class_program | name | Lớp Cơ sở 5 — Lucky House | name: Lớp Cơ sở 5 — Lucky House",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8374539613723755,
+        "chunkIds": [
+          "chk_0122026a145c11bbfedea742f2d746b1ab20e213"
+        ]
+      },
+      {
+        "factId": "fff45067810a267c113516a27e682b65228bc38cd0b9c80ce7de11d1135871b5",
+        "statement": "location | name | Phòng tập CLC Hemisco Xa La | name: Phòng tập CLC Hemisco Xa La",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8372347354888916,
+        "chunkIds": [
+          "chk_6a948e5b754759faa78d233ad8eef2b27b9dbc1a"
+        ]
+      },
+      {
+        "factId": "adbab2f9f7871c7075907b7c2a4c4c50bffb5aa8801b76fe26f994b7a703f3fd",
+        "statement": "location | name | Phòng tập CLC Văn Quán | name: Phòng tập CLC Văn Quán",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8366703987121582,
+        "chunkIds": [
+          "chk_6a948e5b754759faa78d233ad8eef2b27b9dbc1a"
+        ]
+      },
+      {
+        "factId": "64fb7379d13ce21d36b01d7f7dc5c32117a8969d662ec7074709ff38fdaf295f",
+        "statement": "organization | name | Hệ Thống Taekwondo Văn Quán | description: Tên gọi đánh dấu giai đoạn phát triển từ mô hình câu lạc bộ ban đầu thành hệ thống gồm nhiều cơ sở tập luyện.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8349548578262329,
+        "chunkIds": [
+          "chk_90db33c99c7646e9e9cb6b16cf32a8d030ee5c9c"
+        ]
+      },
+      {
+        "factId": "565b0958b798161feafd47d1dc5b4f5f4e2fa2e96831f58de1a4f797b1f9f6fb",
+        "statement": "schedule | name | Lịch tập Cơ sở 5 — Lucky House | day_of_week: Thứ Ba và Thứ Sáu",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8334629535675049,
+        "chunkIds": [
+          "chk_0122026a145c11bbfedea742f2d746b1ab20e213"
+        ]
+      },
+      {
+        "factId": "26020e59f6e455b8a6cb52d990e4b02b26db13f515526ebb4cf11a19281d981c",
+        "statement": "class_program | name | Nhóm Nâng Cao Cơ sở 2 — Văn Quán | name: Nhóm Nâng Cao Cơ sở 2 — Văn Quán",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.831865131855011,
+        "chunkIds": [
+          "chk_2b400f7ba75bc66de697745325ff18468ca9e549"
+        ]
+      }
+    ],
+    "retrievalTrace": {
+      "pathCounts": {
+        "chunkVector": 20,
+        "chunkFulltext": 20,
+        "entityTraversal": 1,
+        "factSupport": 11
+      },
+      "fusedCandidates": 31,
+      "returnedPassages": 10,
+      "topCosineScore": 0.6673321833401757,
+      "minimumCosineScore": 0.55,
+      "latencyMs": 1753.32,
+      "citationIds": [
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_90db33c99c7646e9e9cb6b16cf32a8d030ee5c9c",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_2b400f7ba75bc66de697745325ff18468ca9e549",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_0122026a145c11bbfedea742f2d746b1ab20e213",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_990847597d8715d46cc0954bf8bff333c8188420",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_fd814f137298054a2e4bf7878f724c9958b468ba",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_f3c29a98b324b8e4b8269b0d56f1b8ea479aab0a",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_96e0e7963bf2cdabb01f1f7c2b8720fdd661661e",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_6a948e5b754759faa78d233ad8eef2b27b9dbc1a",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_a28ab35f0dfb9fd9bc6ed09fb3b28ae1330734af",
+        "9f6ed423-243f-40b8-b7b2-99945d7e41e4:chk_5f02d18c8b213c6a0f4422237e8334e3d2f1761b"
+      ]
+    }
+  }
+}
+
+[2026-10-12 00:37:04] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 5,
+  "contentPartCount": 7,
+  "tools": []
+}
+
+[2026-10-12 00:37:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Câu lạc bộ ban đầu được thành lập với tên gọi **CLB Taekwondo Văn Quán** (đi vào",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        12,931
+     • candidatesTokenCount:    23
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,328
+
+[2026-10-12 00:37:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "hoạt động từ ngày 15/05/2012)",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        12,931
+     • candidatesTokenCount:    47
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,352
+
+[2026-10-12 00:37:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[he-thong-taekwondo-van-quan-gioi-thieu.md — Thầy Phùng Thế Lịch]. Sau 7 năm phát triển,",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        12,931
+     • candidatesTokenCount:    75
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,380
+
+[2026-10-12 00:37:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "từ năm 2019 câu lạc bộ chính thức mang tên **Hệ Thống Taekwondo Văn Quán",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        12,931
+     • candidatesTokenCount:    99
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,404
+
+[2026-10-12 00:37:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "**",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        12,931
+     • candidatesTokenCount:    125
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,430
+
+[2026-10-12 00:37:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[he-thong-taekwondo-van-quan-gioi-thieu.md — 2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        12,931
+     • candidatesTokenCount:    140
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,445
+
+[2026-10-12 00:37:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        13,623
+     • candidatesTokenCount:    140
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 4,067
+     • totalTokenCount:         14,137
+
+[2026-10-12 00:37:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Câu lạc bộ ban đầu được thành lập với tên gọi **CLB Taekwondo Văn Quán** (đi vào hoạt động từ ngày 15/05/2012) [he-thong-taekwondo-van-quan-gioi-thieu.md — Thầy Phùng Thế Lịch]. Sau 7 năm phát triển, từ năm 2019 câu lạc bộ chính thức mang tên **Hệ Thống Taekwondo Văn Quán** [he-thong-taekwondo-van-quan-gioi-thieu.md — 2019 — Chính thức mang tên Hệ Thống Taekwondo Văn Quán].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:37:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        13,623
+     • candidatesTokenCount:    140
+     • thoughtsTokenCount:      374
+     • cachedContentTokenCount: 4,067
+     • totalTokenCount:         14,137
+
+[2026-10-12 00:37:07] === 🏁 [AGENT FINISH] root_agent ===
+
+[2026-10-12 00:38:01] === 👤 USER INPUT MESSAGE ===
+{
+  "message": "Để được thi lên đai thì cần đạt yêu cầu gì ?"
+}
+
+[2026-10-12 00:38:01] === 🤖 [AGENT START] root_agent ===
+{
+  "agent": "root_agent",
+  "model": {
+    "model": "gemini-3.5-flash-lite",
+    "base_url": null,
+    "speech_config": null,
+    "use_interactions_api": false,
+    "retry_options": {
+      "attempts": 5,
+      "initialDelay": 3.0,
+      "maxDelay": 30.0,
+      "expBase": null,
+      "jitter": null,
+      "httpStatusCodes": [
+        429,
+        503
+      ]
+    }
+  }
+}
+
+[2026-10-12 00:38:01] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 7,
+  "contentPartCount": 10,
+  "tools": []
+}
+
+[2026-10-12 00:38:02] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "retrieve_taekwondo_knowledge",
+      "args": {
+        "question": "điều kiện thi lên đai yêu cầu thi lên đai"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:38:02] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        13,086
+     • candidatesTokenCount:    31
+     • thoughtsTokenCount:      117
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         13,234
+
+[2026-10-12 00:38:02] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:02] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        14,152
+     • candidatesTokenCount:    31
+     • thoughtsTokenCount:      117
+     • cachedContentTokenCount: 10,162
+     • totalTokenCount:         14,300
+
+[2026-10-12 00:38:02] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "retrieve_taekwondo_knowledge",
+      "args": {
+        "question": "điều kiện thi lên đai yêu cầu thi lên đai"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:38:02] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        14,152
+     • candidatesTokenCount:    31
+     • thoughtsTokenCount:      117
+     • cachedContentTokenCount: 10,162
+     • totalTokenCount:         14,300
+
+[2026-10-12 00:38:02] === 🛠️ [TOOL REQUEST] retrieve_taekwondo_knowledge ===
+{
+  "tool": "retrieve_taekwondo_knowledge",
+  "arguments": {
+    "question": "điều kiện thi lên đai yêu cầu thi lên đai"
+  }
+}
+
+[2026-10-12 00:38:03] === 📦 [TOOL RESPONSE] retrieve_taekwondo_knowledge ===
+{
+  "tool": "retrieve_taekwondo_knowledge",
+  "result": {
+    "success": true,
+    "strategy": "neo4j_hybrid_graphrag",
+    "query": "điều kiện thi lên đai yêu cầu thi lên đai",
+    "scopeKey": null,
+    "sufficientEvidence": true,
+    "abstentionMessage": null,
+    "passages": [
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_cac55727cd80a36d8fc3f12ae7833841fdf28697",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung",
+        "content": "14.1. Điều kiện chung\n\nHọc viên cần:\n\n1. Đủ cấp đai và kỹ năng, kỹ thuật theo yêu cầu.\n2. Rèn luyện đủ thời lượng quy định; sheet ghi mốc 85% số buổi tập.\n3. Tham gia đầy đủ các buổi tập huấn của Hệ thống: 100% số buổi, dự kiến 10 buổi, bắt buộc.\n4. Vượt qua bài khảo sát kỹ thuật/trình độ thi (thi thử).\n5. Có đủ hồ sơ đăng ký và lệ phí theo quy định của Liên đoàn.",
+        "quote": "14.1. Điều kiện chung\n\nHọc viên cần:\n\n1. Đủ cấp đai và kỹ năng, kỹ thuật theo yêu cầu.\n2. Rèn luyện đủ thời lượng quy định; sheet ghi mốc 85% số buổi tập.\n3. Tham gia đầy đủ các buổi tập huấn của Hệ thống: 100% số buổi, dự kiến 10 buổi, bắt buộc.\n4. Vượt qua bài khảo sát kỹ thuật/trình độ thi (thi thử).\n5. Có đủ hồ sơ đăng ký và lệ phí theo quy định của Liên đoàn.",
+        "score": 0.794223,
+        "rrfScore": 0.063524,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_cac55727cd80a36d8fc3f12ae7833841fdf28697",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 46,
+          "section": "14.1. Điều kiện chung",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 14. Thi đẳng > 14.1. Điều kiện chung#0:L437-L443",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_943bebfa99c332ca7d9931b6821a9bacd642fda0",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai",
+        "content": "11. Thi chính thức lên đai\n\nCẩm nang quy định những yêu cầu chính sau:\n\n1. Kỳ thi chính thức được tổ chức một lần theo quy định của Liên đoàn Taekwondo Việt Nam.\n2. Học viên phải có mặt đúng giờ và đúng địa điểm.\n3. Học viên phải mặc đủ võ phục và đeo đúng màu đai theo quy định.\n4. Học viên phải tuân thủ kỷ luật, tổ chức, sắp xếp và hướng dẫn/giám sát của các HLV điều hành buổi thi.\n5. Hệ thống chỉ cấp phép cho học viên có phiếu “ĐẠT”, nghĩa là đã đạt đủ các chỉ tiêu kỹ năng – kỹ thuật theo quy định ghi trong sheet, để tham dự kỳ thi chính thức dưới sự giám sát, đánh giá của Liên đoàn Taekwondo Hà Nội – Việt Nam.\n\nTên gọi cơ quan tổ chức/giám sát ở trên được giữ theo đúng cách viết trong cẩm nang; cần đối chiếu với thông báo kỳ thi hiện hành khi thực hiện đăng ký chính thức.",
+        "quote": "11. Thi chính thức lên đai\n\nCẩm nang quy định những yêu cầu chính sau:\n\n1. Kỳ thi chính thức được tổ chức một lần theo quy định của Liên đoàn Taekwondo Việt Nam.\n2. Học viên phải có mặt đúng giờ và đúng địa điểm.\n3. Học viên phải mặc đủ võ phục và đeo đúng màu đai theo quy định.\n4. Học viên phải tuân thủ kỷ luật, tổ chức, sắp xếp và hướng dẫn/giám sát của các HLV điều hành buổi thi.\n5. Hệ thống chỉ cấp phép cho học viên có phiếu “ĐẠT”, nghĩa là đã đạt đủ các chỉ tiêu kỹ năng – kỹ thuật theo quy định ghi trong sheet, để tham dự kỳ thi chính thức dưới sự giám sát, đánh giá của Liên đoàn Taekwondo Hà Nội – Việt Nam.\n\nTên gọi cơ quan tổ chức/giám sát ở trên được giữ theo đúng cách viết trong cẩm nang; cần đối chiếu với thông báo kỳ thi hiện hành khi thực hiện đăng ký chính thức.",
+        "score": 0.780215,
+        "rrfScore": 0.064525,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_943bebfa99c332ca7d9931b6821a9bacd642fda0",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 33,
+          "section": "11. Thi chính thức lên đai",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 11. Thi chính thức lên đai#0:L309-L317",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_f2d1b2f2c41f009dfab5cc523bd8a1aefd1e0ecf",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 7.2. Các buổi kiểm tra và thi thử",
+        "content": "7.2. Các buổi kiểm tra và thi thử\n\nHọc viên phải tham dự đầy đủ các buổi kiểm tra và thi thử được yêu cầu. Sheet nêu hai mục đích: đánh giá kỹ năng chuyên môn và để Hệ thống lên kế hoạch bổ trợ cần thiết, giúp học viên theo kịp nhóm và tiến độ cấp đai.\n\nĐiều này có nghĩa là việc đủ số tháng tập chưa phải điều kiện duy nhất; học viên còn cần tham gia các bước đánh giá theo lịch của Hệ thống.",
+        "quote": "7.2. Các buổi kiểm tra và thi thử\n\nHọc viên phải tham dự đầy đủ các buổi kiểm tra và thi thử được yêu cầu. Sheet nêu hai mục đích: đánh giá kỹ năng chuyên môn và để Hệ thống lên kế hoạch bổ trợ cần thiết, giúp học viên theo kịp nhóm và tiến độ cấp đai.\n\nĐiều này có nghĩa là việc đủ số tháng tập chưa phải điều kiện duy nhất; học viên còn cần tham gia các bước đánh giá theo lịch của Hệ thống.",
+        "score": 0.776027,
+        "rrfScore": 0.045965,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_f2d1b2f2c41f009dfab5cc523bd8a1aefd1e0ecf",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 19,
+          "section": "7.2. Các buổi kiểm tra và thi thử",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 7. Điều kiện và quy trình thi lên đai > 7.2. Các buổi kiểm tra và thi thử#0:L194-L196",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_4141463c349854e21160da705632e504f52fd883",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 12.1. Khoản liên quan đến thi lên đai",
+        "content": "12.1. Khoản liên quan đến thi lên đai\n\nCẩm nang liệt kê các khoản/giấy tờ:\n\n- Ảnh (nếu cần).\n- Thẻ chuyên môn.\n- Lệ phí thi: 300.000 đồng/lần thi.\n\nSheet không giải thích khoản phí này bao gồm những hạng mục nào hoặc có thay đổi theo kỳ thi hay không.",
+        "quote": "12.1. Khoản liên quan đến thi lên đai\n\nCẩm nang liệt kê các khoản/giấy tờ:\n\n- Ảnh (nếu cần).\n- Thẻ chuyên môn.\n- Lệ phí thi: 300.000 đồng/lần thi.\n\nSheet không giải thích khoản phí này bao gồm những hạng mục nào hoặc có thay đổi theo kỳ thi hay không.",
+        "score": 0.771546,
+        "rrfScore": 0.062764,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_4141463c349854e21160da705632e504f52fd883",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 35,
+          "section": "12.1. Khoản liên quan đến thi lên đai",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 12. Các khoản đóng góp và học phí > 12.1. Khoản liên quan đến thi lên đai#0:L325-L331",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_a2e3ccfe0263b705feacffd661b387bb3ffe8bd6",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 14.3. Các trường hợp không được thi đẳng",
+        "content": "14.3. Các trường hợp không được thi đẳng\n\nCẩm nang liệt kê năm trường hợp:\n\n- Không đủ cấp đai.\n- Nghỉ quá số buổi rèn luyện quy định.\n- Không tham gia đủ các buổi tập huấn của Hệ thống.\n- Không đạt khảo sát trình độ kỹ thuật (thi thử).\n- Không hoàn thành hồ sơ và lệ phí tham dự đúng thời hạn.",
+        "quote": "14.3. Các trường hợp không được thi đẳng\n\nCẩm nang liệt kê năm trường hợp:\n\n- Không đủ cấp đai.\n- Nghỉ quá số buổi rèn luyện quy định.\n- Không tham gia đủ các buổi tập huấn của Hệ thống.\n- Không đạt khảo sát trình độ kỹ thuật (thi thử).\n- Không hoàn thành hồ sơ và lệ phí tham dự đúng thời hạn.",
+        "score": 0.761574,
+        "rrfScore": 0.058093,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_a2e3ccfe0263b705feacffd661b387bb3ffe8bd6",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 48,
+          "section": "14.3. Các trường hợp không được thi đẳng",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 14. Thi đẳng > 14.3. Các trường hợp không được thi đẳng#0:L460-L466",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_1961528b17a0410efa041f72cacd80b18437ffb1",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 14. Thi đẳng",
+        "content": "14. Thi đẳng\n\nPhần thi đẳng nêu các yêu cầu về cấp đai, thời lượng rèn luyện, tập huấn, đánh giá trình độ và hồ sơ.",
+        "quote": "14. Thi đẳng\n\nPhần thi đẳng nêu các yêu cầu về cấp đai, thời lượng rèn luyện, tập huấn, đánh giá trình độ và hồ sơ.",
+        "score": 0.757464,
+        "rrfScore": 0.030777,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_1961528b17a0410efa041f72cacd80b18437ffb1",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 45,
+          "section": "14. Thi đẳng",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 14. Thi đẳng#0:L433-L433",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_0ec83b7b96c17f24697ee77c7a70bb94ea66b1ed",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 2. Tổng quan về cách vận hành được mô tả trong cẩm nang",
+        "content": "2. Tổng quan về cách vận hành được mô tả trong cẩm nang\n\nTheo sheet, quá trình học tập tại Hệ thống được quản lý theo chuỗi hoạt động liên tiếp:\n\n1. Đăng ký và làm quen: học viên tập thử theo điều kiện độ tuổi, hoàn tất thông tin, chuẩn bị võ phục và thực hiện nghĩa vụ học phí.\n2. Tập luyện thường xuyên: tuân thủ lịch tập, đồng phục, giờ giấc, quy trình xin nghỉ và tập bù.\n3. Theo dõi rèn luyện: điểm danh và đánh giá ý thức/chuyên môn được dùng để theo dõi quá trình học, xét điều kiện thi thử và ghi nhận thành tích.\n4. Kiểm tra, thi thử và học bổ trợ: kiểm tra mức độ sẵn sàng, xác định phần còn thiếu và sắp xếp rèn luyện bổ sung khi cần.\n5. Đăng ký thi lên đai chính thức: chỉ những học viên đáp ứng chỉ tiêu và được cấp phiếu “ĐẠT” mới được Hệ thống cho phép đăng ký theo mô tả trong sheet.\n6. Hoạt động và quyền lợi bổ sung: điểm cộng, thành tích, quỹ hoạt động, thẻ thành viên và các chương trình hỗ trợ được quy định riêng.\n7. Thi đẳng và phản hồi: có các điều kiện riêng về cấp đai, thời lượng rèn luyện, tập huấn, khảo sát kỹ thuật và hồ sơ; phụ huynh có kênh gửi góp ý và liên hệ trực tiếp.\n\nCác bước trên là cách hệ thống hóa nội dung trong sheet để dễ hiểu, không thay thế từng điều kiện chi tiết được ghi ở các phần dưới đây.",
+        "quote": "2. Tổng quan về cách vận hành được mô tả trong cẩm nang\n\nTheo sheet, quá trình học tập tại Hệ thống được quản lý theo chuỗi hoạt động liên tiếp:\n\n1. Đăng ký và làm quen: học viên tập thử theo điều kiện độ tuổi, hoàn tất thông tin, chuẩn bị võ phục và thực hiện nghĩa vụ học phí.\n2. Tập luyện thường xuyên: tuân thủ lịch tập, đồng phục, giờ giấc, quy trình xin nghỉ và tập bù.\n3. Theo dõi rèn luyện: điểm danh và đánh giá ý thức/chuyên môn được dùng để theo dõi quá trình học, xét điều kiện thi thử và ghi nhận thành tích.\n4. Kiểm tra, thi thử và học bổ trợ: kiểm tra mức độ sẵn sàng, xác định phần còn thiếu và sắp xếp rèn luyện bổ sung khi cần.\n5. Đăng ký thi lên đai chính thức: chỉ những học viên đáp ứng chỉ tiêu và được cấp phiếu “ĐẠT” mới được Hệ thống cho phép đăng ký theo mô tả trong sheet.\n6. Hoạt động và quyền lợi bổ sung: điểm cộng, thành tích, quỹ hoạt động, thẻ thành viên và các chương trình hỗ trợ được quy định riêng.\n7. Thi đẳng và phản hồi: có các điều kiện riêng về cấp đai, thời lượng rèn luyện, tập huấn, khảo sát kỹ thuật và hồ sơ; phụ huynh có kênh gửi góp ý và liên hệ trực tiếp.\n\nCác bước trên là cách hệ thống hóa nội dung trong sheet để dễ hiểu, không thay thế từng điều kiện chi tiết được ghi ở các phần dưới đây.",
+        "score": 0.727859,
+        "rrfScore": 0.030077,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_0ec83b7b96c17f24697ee77c7a70bb94ea66b1ed",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 2,
+          "section": "2. Tổng quan về cách vận hành được mô tả trong cẩm nang",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 2. Tổng quan về cách vận hành được mô tả trong cẩm nang#0:L17-L27",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_20e119013daff6e0edaea1de3e2846dfa8fa92bf",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 16. Hệ thống cấp đai được liệt kê trong sheet",
+        "content": "16. Hệ thống cấp đai được liệt kê trong sheet\n\nBên cạnh phần cẩm nang chính, sheet có bảng “Hệ thống các cấp đai (quy định Liên đoàn Taekwondo Việt Nam)”. Bảng này được chép lại dưới đây theo tên màu đai và cấp ghi trong nguồn; tài liệu không xác nhận độc lập đây có phải bảng áp dụng hiện hành hay không.\n\nSTT: Màu đai ghi trong sheet | Cấp ghi trong sheet\n---:: --- | ---\n1: Đai trắng | 10\n2: Đai vàng | 9–8\n3: Đai xanh lá | 7\n4: Đai xanh dương | 6–5\n5: Đai đỏ | 4\n6: Đai đỏ | 3\n7: Đai đỏ | 2\n8: Đai đỏ | 1\n9: Đai đen | I Đẳng\n10: Đai đen | II Đẳng\n11: Đai đen | III Đẳng\n12: Đai đen | IV Đẳng\n13: Đai đen | V Đẳng\n14: Đai đen | VI Đẳng\n15: Đai đen | VII Đẳng\n16: Đai đen | VIII Đẳng\n17: Đai đen | IX Đẳng\n18: Đai đen | X Đẳng\n\nBảng trong sheet ghi nhiều cấp liên tiếp cùng màu đai đỏ và các cấp đẳng từ I đến X đối với đai đen. Việc xác định cấp đai tương ứng với kỳ thi cụ thể cần căn cứ hướng dẫn chính thức đang áp dụng của Hệ thống/Liên đoàn.",
+        "quote": "16. Hệ thống cấp đai được liệt kê trong sheet\n\nBên cạnh phần cẩm nang chính, sheet có bảng “Hệ thống các cấp đai (quy định Liên đoàn Taekwondo Việt Nam)”. Bảng này được chép lại dưới đây theo tên màu đai và cấp ghi trong nguồn; tài liệu không xác nhận độc lập đây có phải bảng áp dụng hiện hành hay không.\n\nSTT: Màu đai ghi trong sheet | Cấp ghi trong sheet\n---:: --- | ---\n1: Đai trắng | 10\n2: Đai vàng | 9–8\n3: Đai xanh lá | 7\n4: Đai xanh dương | 6–5\n5: Đai đỏ | 4\n6: Đai đỏ | 3\n7: Đai đỏ | 2\n8: Đai đỏ | 1\n9: Đai đen | I Đẳng\n10: Đai đen | II Đẳng\n11: Đai đen | III Đẳng\n12: Đai đen | IV Đẳng\n13: Đai đen | V Đẳng\n14: Đai đen | VI Đẳng\n15: Đai đen | VII Đẳng\n16: Đai đen | VIII Đẳng\n17: Đai đen | IX Đẳng\n18: Đai đen | X Đẳng\n\nBảng trong sheet ghi nhiều cấp liên tiếp cùng màu đai đỏ và các cấp đẳng từ I đến X đối với đai đen. Việc xác định cấp đai tương ứng với kỳ thi cụ thể cần căn cứ hướng dẫn chính thức đang áp dụng của Hệ thống/Liên đoàn.",
+        "score": 0.716454,
+        "rrfScore": 0.059289,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_20e119013daff6e0edaea1de3e2846dfa8fa92bf",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 53,
+          "section": "16. Hệ thống cấp đai được liệt kê trong sheet",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 16. Hệ thống cấp đai được liệt kê trong sheet#0:L490-L513",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_683868d01ab6a468c4a36db15455a9153dfeb334",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử",
+        "content": "6.4. Các trường hợp không đủ điểm thi thử\n\nSheet liệt kê các tình huống không đủ điều kiện thi thử:\n\n- Nghỉ không phép quá 2 buổi, ngoại trừ học viên tập cả tuần.\n- Có nhiều hơn 3 buổi được đánh giá Yếu (Y).\n- Tổng điểm rèn luyện nhỏ hơn 0.\n- Có dưới 8 buổi được đánh giá Tốt (T).\n\nCác tiêu chí được chép theo đúng nội dung sheet. Trường hợp ngoại lệ “học viên tập cả tuần” không được giải thích thêm trong tài liệu nguồn; phụ huynh nên hỏi Hệ thống để biết đối tượng và cách áp dụng.",
+        "quote": "6.4. Các trường hợp không đủ điểm thi thử\n\nSheet liệt kê các tình huống không đủ điều kiện thi thử:\n\n- Nghỉ không phép quá 2 buổi, ngoại trừ học viên tập cả tuần.\n- Có nhiều hơn 3 buổi được đánh giá Yếu (Y).\n- Tổng điểm rèn luyện nhỏ hơn 0.\n- Có dưới 8 buổi được đánh giá Tốt (T).\n\nCác tiêu chí được chép theo đúng nội dung sheet. Trường hợp ngoại lệ “học viên tập cả tuần” không được giải thích thêm trong tài liệu nguồn; phụ huynh nên hỏi Hệ thống để biết đối tượng và cách áp dụng.",
+        "score": 0.704342,
+        "rrfScore": 0.0569,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_683868d01ab6a468c4a36db15455a9153dfeb334",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 14,
+          "section": "6.4. Các trường hợp không đủ điểm thi thử",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 6. Điểm danh và đánh giá ý thức – chuyên môn > 6.4. Các trường hợp không đủ điểm thi thử#0:L148-L155",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_88bcb7b827ff7478dcc2aa13dc3666f5d3a21cd1",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành",
+        "content": "18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành\n\nĐể tránh áp dụng sai nội dung, nên xác minh các điểm dưới đây với Ban quản lý. Đây là các chỗ có mốc thời gian cũ, cách ghi chưa rõ hoặc thông tin cần cập nhật được phát hiện ngay trong sheet Cẩm nang.\n\n1. Ngày hiệu lực: tiêu đề ghi áp dụng tháng 10/2019, nhưng có ghi chú năm 2023 và các mốc dự kiến/áp dụng năm 2025. Cần xác nhận phiên bản nào đang có hiệu lực.\n2. Lịch và cơ sở: mã CS 2, CS 3 lặp ở nhiều dòng; cần xác nhận ngày tập, địa điểm và người phụ trách hiện tại.\n3. Độ tuổi tập thử: sheet ghi trên 6 tuổi và dưới 6 tuổi, nhưng không nêu trường hợp đúng 6 tuổi.\n4. Điểm rèn luyện và điểm chuyên môn: cần xác nhận chu kỳ tính, công thức tổng hợp, điều kiện “miễn thi thử”, mức 85 điểm và các ngoại lệ.\n5. Thi thử: phần điểm danh có điều kiện miễn thi thử nhưng phần thi thử ghi là bắt buộc; cần làm rõ nhóm nào được miễn và quy trình hiện hành.\n6. Điểm cộng kỷ lục kỹ năng: “Căn bản: NO.1” xuất hiện hai lần với mức +20 và +50 điểm.\n7. Điểm học phí: các dòng “đúng hạn +10”, “quá hạn -10”, “trước mồng 10 -10” và “sau mồng 10 -20” chưa nhất quán về cách hiểu.\n8. Học phí: các mức giá được ghi trong sheet có thể đã cũ; mốc cập nhật dự kiến Quý II/2025 đã qua.\n9. Thời hạn đóng theo quý: câu “từ ngày 01–30 tháng cuối cùng quý đã nộp” trong phần lớp ngoài trời cần được giải thích.\n10. Quỹ hoạt động và thẻ VIP: cần xác nhận khoản thu, điều kiện hưởng voucher, phạm vi hoàn phí thẻ và thời điểm áp dụng thực tế.\n11. Thi đẳng: bảng ghi cả “85% số buổi tập (40 buổi)” lẫn “48 buổi”, nhưng không nêu cách đối chiếu hai con số.\n12. Liên kết biểu mẫu và thông tin chuyển khoản: xác nhận các biểu mẫu còn hoạt động và thông tin tài khoản chính xác trước khi gửi thông tin hoặc thanh toán.\n13. Tên gọi tổ chức thi: cách ghi tên cơ quan Liên đoàn/đơn vị giám sát trong sheet cần được đối chiếu với thông báo kỳ thi chính thức đang áp dụng.",
+        "quote": "18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành\n\nĐể tránh áp dụng sai nội dung, nên xác minh các điểm dưới đây với Ban quản lý. Đây là các chỗ có mốc thời gian cũ, cách ghi chưa rõ hoặc thông tin cần cập nhật được phát hiện ngay trong sheet Cẩm nang.\n\n1. Ngày hiệu lực: tiêu đề ghi áp dụng tháng 10/2019, nhưng có ghi chú năm 2023 và các mốc dự kiến/áp dụng năm 2025. Cần xác nhận phiên bản nào đang có hiệu lực.\n2. Lịch và cơ sở: mã CS 2, CS 3 lặp ở nhiều dòng; cần xác nhận ngày tập, địa điểm và người phụ trách hiện tại.\n3. Độ tuổi tập thử: sheet ghi trên 6 tuổi và dưới 6 tuổi, nhưng không nêu trường hợp đúng 6 tuổi.\n4. Điểm rèn luyện và điểm chuyên môn: cần xác nhận chu kỳ tính, công thức tổng hợp, điều kiện “miễn thi thử”, mức 85 điểm và các ngoại lệ.\n5. Thi thử: phần điểm danh có điều kiện miễn thi thử nhưng phần thi thử ghi là bắt buộc; cần làm rõ nhóm nào được miễn và quy trình hiện hành.\n6. Điểm cộng kỷ lục kỹ năng: “Căn bản: NO.1” xuất hiện hai lần với mức +20 và +50 điểm.\n7. Điểm học phí: các dòng “đúng hạn +10”, “quá hạn -10”, “trước mồng 10 -10” và “sau mồng 10 -20” chưa nhất quán về cách hiểu.\n8. Học phí: các mức giá được ghi trong sheet có thể đã cũ; mốc cập nhật dự kiến Quý II/2025 đã qua.\n9. Thời hạn đóng theo quý: câu “từ ngày 01–30 tháng cuối cùng quý đã nộp” trong phần lớp ngoài trời cần được giải thích.\n10. Quỹ hoạt động và thẻ VIP: cần xác nhận khoản thu, điều kiện hưởng voucher, phạm vi hoàn phí thẻ và thời điểm áp dụng thực tế.\n11. Thi đẳng: bảng ghi cả “85% số buổi tập (40 buổi)” lẫn “48 buổi”, nhưng không nêu cách đối chiếu hai con số.\n12. Liên kết biểu mẫu và thông tin chuyển khoản: xác nhận các biểu mẫu còn hoạt động và thông tin tài khoản chính xác trước khi gửi thông tin hoặc thanh toán.\n13. Tên gọi tổ chức thi: cách ghi tên cơ quan Liên đoàn/đơn vị giám sát trong sheet cần được đối chiếu với thông báo kỳ thi chính thức đang áp dụng.",
+        "score": 0.697098,
+        "rrfScore": 0.014286,
+        "retrievalPaths": [
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_88bcb7b827ff7478dcc2aa13dc3666f5d3a21cd1",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 55,
+          "section": "18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành#0:L539-L553",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      }
+    ],
+    "facts": [
+      {
+        "factId": "c63e202d1cfb0063cb303b2a047a61598a2e71b424d58e0077bea88745c586be",
+        "statement": "requirement | name | Điều kiện thi đẳng | description: Học viên cần đủ cấp đai và kỹ năng, kỹ thuật; rèn luyện đủ thời lượng (mốc 85% số buổi tập); tham gia 100% số buổi tập huấn của Hệ thống (dự kiến 10 buổi); vượt qua bài khảo sát kỹ thuật/trình độ thi (thi thử); có đủ hồ sơ đăng ký và lệ phí theo quy định.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.9002574682235718,
+        "chunkIds": [
+          "chk_cac55727cd80a36d8fc3f12ae7833841fdf28697"
+        ]
+      },
+      {
+        "factId": "ee581305685b076fea06f57150bed3134e18ff178a1131011cded1fcd42c684b",
+        "statement": "assessment_event | name | Thi chính thức lên đai | assessment_details: {\"conditions\": \"Học viên phải có mặt đúng giờ và đúng địa điểm, mặc đủ võ phục và đeo đúng màu đai theo quy định, tuân thủ kỷ luật và có phiếu 'ĐẠT'.\", \"timing\": \"Kỳ thi chính thức được tổ chức một lần theo quy định của Liên đoàn Taekwondo Việt Nam.\"}",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8838768005371094,
+        "chunkIds": [
+          "chk_943bebfa99c332ca7d9931b6821a9bacd642fda0"
+        ]
+      },
+      {
+        "factId": "2e95cdd9e5017b1c22369c86ab13fea24ee9f976ca69a5881e33e72ce1007ce5",
+        "statement": "requirement | name | Các trường hợp không được thi đẳng | description: Bao gồm 5 trường hợp không được thi đẳng: Không đủ cấp đai; Nghỉ quá số buổi rèn luyện quy định; Không tham gia đủ các buổi tập huấn của Hệ thống; Không đạt khảo sát trình độ kỹ thuật (thi thử); Không hoàn thành hồ sơ và lệ phí tham dự đúng thời hạn.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8812488317489624,
+        "chunkIds": [
+          "chk_a2e3ccfe0263b705feacffd661b387bb3ffe8bd6"
+        ]
+      },
+      {
+        "factId": "82e3edaf7f7316140ef9f0635f28cd79b56d5b45147dbf85c97735c25ffd6beb",
+        "statement": "assessment_event | name | Thi chính thức lên đai | name: Thi chính thức lên đai",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8756424188613892,
+        "chunkIds": [
+          "chk_943bebfa99c332ca7d9931b6821a9bacd642fda0"
+        ]
+      },
+      {
+        "factId": "b20b4d635f5e9cf3d23ec762f83a85a96a5862ccdd3f646ee8e4d5bfcd19aeb8",
+        "statement": "fee | name | Lệ phí thi lên đai | amount: 300000",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.875257670879364,
+        "chunkIds": [
+          "chk_4141463c349854e21160da705632e504f52fd883"
+        ]
+      },
+      {
+        "factId": "aae91c85931d60407ee805e23de4499f1543923f9d4e6fab50c5629e0a65b9be",
+        "statement": "fee | name | Lệ phí thi lên đai | description: Lệ phí thi: 300.000 đồng/lần thi.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8749055862426758,
+        "chunkIds": [
+          "chk_4141463c349854e21160da705632e504f52fd883"
+        ]
+      },
+      {
+        "factId": "4a46168c265e38f4db4a4a7270445365e494eea9aaa4bdc10d1568e704e075c0",
+        "statement": "fee | name | Lệ phí thi lên đai | name: Lệ phí thi lên đai",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8614935874938965,
+        "chunkIds": [
+          "chk_4141463c349854e21160da705632e504f52fd883"
+        ]
+      },
+      {
+        "factId": "e3d0d997d7ab60bd1d0f39bbe8b18cd5efe6b9b8d264fa643750f2d1594e659d",
+        "statement": "fee | name | Lệ phí thi lên đai | currency: đồng",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8609822392463684,
+        "chunkIds": [
+          "chk_4141463c349854e21160da705632e504f52fd883"
+        ]
+      },
+      {
+        "factId": "5415cb8445d6ab4c83c61c6c47945911f616515e84561e489f80c0d791b752b7",
+        "statement": "requirement | name | Điều kiện thi đẳng | name: Điều kiện thi đẳng",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8514690399169922,
+        "chunkIds": [
+          "chk_cac55727cd80a36d8fc3f12ae7833841fdf28697"
+        ]
+      }
+    ],
+    "retrievalTrace": {
+      "pathCounts": {
+        "chunkVector": 20,
+        "chunkFulltext": 20,
+        "entityTraversal": 15,
+        "factSupport": 8
+      },
+      "fusedCandidates": 28,
+      "returnedPassages": 10,
+      "topCosineScore": 0.7942231761773519,
+      "minimumCosineScore": 0.55,
+      "latencyMs": 1217.37,
+      "citationIds": [
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_cac55727cd80a36d8fc3f12ae7833841fdf28697",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_943bebfa99c332ca7d9931b6821a9bacd642fda0",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_f2d1b2f2c41f009dfab5cc523bd8a1aefd1e0ecf",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_4141463c349854e21160da705632e504f52fd883",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_a2e3ccfe0263b705feacffd661b387bb3ffe8bd6",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_1961528b17a0410efa041f72cacd80b18437ffb1",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_0ec83b7b96c17f24697ee77c7a70bb94ea66b1ed",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_20e119013daff6e0edaea1de3e2846dfa8fa92bf",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_683868d01ab6a468c4a36db15455a9153dfeb334",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_88bcb7b827ff7478dcc2aa13dc3666f5d3a21cd1"
+      ]
+    }
+  }
+}
+
+[2026-10-12 00:38:03] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 9,
+  "contentPartCount": 13,
+  "tools": []
+}
+
+[2026-10-12 00:38:05] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Theo cẩm nang",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:05] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    4
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,114
+
+[2026-10-12 00:38:05] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "luyện tập, để được đăng ký và tham gia kỳ thi lên đai (thi đẳng), học viên cần đáp ứng các điều kiện chung",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:05] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    32
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,142
+
+[2026-10-12 00:38:05] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "sau:\n\n1. **Cấp đai và trình độ:** Đủ cấp đai hiện tại và đạt yêu",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:05] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    56
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,166
+
+[2026-10-12 00:38:05] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "cầu về kỹ năng, kỹ thuật theo quy định",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:05] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    82
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,192
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung].\n2. **Thời lượng rèn luyện:** Tham",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    106
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,216
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "gia rèn luyện đạt đủ thời lượng quy định (sheet ghi mốc khoảng 85% số buổi tập)",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    135
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,245
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    159
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,269
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "3. **Tập huấn bắt buộc:** Tham gia đầy đủ 100% số buổi tập huấn do",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    183
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,293
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Hệ thống tổ chức (dự kiến khoảng 10 buổi)",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    207
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,317
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung].\n4. **Kh",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    231
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,341
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "ảo sát chuyên môn (Thi thử):** Vượt qua bài khảo sát trình độ kỹ thuật/thi thử và nhận được phiếu",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    257
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,367
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "**“ĐẠT”** để Hệ thống cấp phép dự thi chính thức",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    284
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,394
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung, 11. Thi chính thức lên đai].\n5. **Hồ sơ và Lệ phí:** Hoàn tất hồ sơ đăng ký (",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    309
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,419
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "ảnh, thẻ chuyên môn nếu có) và nộp lệ phí thi (mức phí theo quy định là **300.00",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    338
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,448
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "0 đồng/lần thi**) đúng thời hạn",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    365
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,475
+
+[2026-10-12 00:38:06] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung, 12.1. Khoản liên quan đến thi lên đai].\n\n**Yêu cầu trong ngày thi chính thức:**\n* Có mặt đúng giờ và đúng địa",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:06] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    389
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,499
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "điểm thông báo",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    415
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,525
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai].\n* Mặc đúng võ phục và đeo đúng màu đai theo quy định",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    439
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,549
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai].\n* Tuân thủ kỷ luật, nội quy tổ chức và sự hướng dẫn, giám sát của các huấn",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    466
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,576
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "luyện viên điều hành buổi thi",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    490
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,600
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        24,669
+     • candidatesTokenCount:    502
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,612
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        25,852
+     • candidatesTokenCount:    502
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 12,232
+     • totalTokenCount:         26,795
+
+[2026-10-12 00:38:07] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Theo cẩm nang luyện tập, để được đăng ký và tham gia kỳ thi lên đai (thi đẳng), học viên cần đáp ứng các điều kiện chung sau:\n\n1. **Cấp đai và trình độ:** Đủ cấp đai hiện tại và đạt yêu cầu về kỹ năng, kỹ thuật theo quy định [cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung].\n2. **Thời lượng rèn luyện:** Tham gia rèn luyện đạt đủ thời lượng quy định (sheet ghi mốc khoảng 85% số buổi tập) [cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung].\n3. **Tập huấn bắt buộc:** Tham gia đầy đủ 100% số buổi tập huấn do Hệ thống tổ chức (dự kiến khoảng 10 buổi) [cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung].\n4. **Khảo sát chuyên môn (Thi thử):** Vượt qua bài khảo sát trình độ kỹ thuật/thi thử và nhận được phiếu **“ĐẠT”** để Hệ thống cấp phép dự thi chính thức [cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung, 11. Thi chính thức lên đai].\n5. **Hồ sơ và Lệ phí:** Hoàn tất hồ sơ đăng ký (ảnh, thẻ chuyên môn nếu có) và nộp lệ phí thi (mức phí theo quy định là **300.000 đồng/lần thi**) đúng thời hạn [cam_nang_taekwondo_van_quan_chi_tiet.md — 14.1. Điều kiện chung, 12.1. Khoản liên quan đến thi lên đai].\n\n**Yêu cầu trong ngày thi chính thức:**\n* Có mặt đúng giờ và đúng địa điểm thông báo [cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai].\n* Mặc đúng võ phục và đeo đúng màu đai theo quy định [cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai].\n* Tuân thủ kỷ luật, nội quy tổ chức và sự hướng dẫn, giám sát của các huấn luyện viên điều hành buổi thi [cam_nang_taekwondo_van_quan_chi_tiet.md — 11. Thi chính thức lên đai].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:07] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        25,852
+     • candidatesTokenCount:    502
+     • thoughtsTokenCount:      441
+     • cachedContentTokenCount: 12,232
+     • totalTokenCount:         26,795
+
+[2026-10-12 00:38:07] === 🏁 [AGENT FINISH] root_agent ===
+
+[2026-10-12 00:38:41] === 👤 USER INPUT MESSAGE ===
+{
+  "message": "Thế còn điểm rèn luyện ?"
+}
+
+[2026-10-12 00:38:41] === 🤖 [AGENT START] root_agent ===
+{
+  "agent": "root_agent",
+  "model": {
+    "model": "gemini-3.5-flash-lite",
+    "base_url": null,
+    "speech_config": null,
+    "use_interactions_api": false,
+    "retry_options": {
+      "attempts": 5,
+      "initialDelay": 3.0,
+      "maxDelay": 30.0,
+      "expBase": null,
+      "jitter": null,
+      "httpStatusCodes": [
+        429,
+        503
+      ]
+    }
+  }
+}
+
+[2026-10-12 00:38:41] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 11,
+  "contentPartCount": 16,
+  "tools": []
+}
+
+[2026-10-12 00:38:43] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "retrieve_taekwondo_knowledge",
+      "args": {
+        "question": "điểm rèn luyện quy định như thế nào trong cẩm nang"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:38:43] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        25,253
+     • candidatesTokenCount:    32
+     • thoughtsTokenCount:      89
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         25,374
+
+[2026-10-12 00:38:43] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:43] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        26,877
+     • candidatesTokenCount:    32
+     • thoughtsTokenCount:      89
+     • cachedContentTokenCount: 24,457
+     • totalTokenCount:         26,998
+
+[2026-10-12 00:38:43] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "retrieve_taekwondo_knowledge",
+      "args": {
+        "question": "điểm rèn luyện quy định như thế nào trong cẩm nang"
+      }
+    }
+  ]
+}
+
+[2026-10-12 00:38:43] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        26,877
+     • candidatesTokenCount:    32
+     • thoughtsTokenCount:      89
+     • cachedContentTokenCount: 24,457
+     • totalTokenCount:         26,998
+
+[2026-10-12 00:38:43] === 🛠️ [TOOL REQUEST] retrieve_taekwondo_knowledge ===
+{
+  "tool": "retrieve_taekwondo_knowledge",
+  "arguments": {
+    "question": "điểm rèn luyện quy định như thế nào trong cẩm nang"
+  }
+}
+
+[2026-10-12 00:38:44] === 📦 [TOOL RESPONSE] retrieve_taekwondo_knowledge ===
+{
+  "tool": "retrieve_taekwondo_knowledge",
+  "result": {
+    "success": true,
+    "strategy": "neo4j_hybrid_graphrag",
+    "query": "điểm rèn luyện quy định như thế nào trong cẩm nang",
+    "scopeKey": null,
+    "sufficientEvidence": true,
+    "abstentionMessage": null,
+    "passages": [
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_ff27d304c6fa3b9be1ba6830e038f7a231d6383f",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện",
+        "content": "6.2. Điểm rèn luyện\n\nCẩm nang nêu các mức cộng/trừ điểm sau.\n\nTình huống: Điểm theo sheet\n---: ---:\nKhông nghỉ, không đi học muộn: +5 điểm\nTập bù (được ghi chú là tương đương buổi nghỉ có phép): +0,5 điểm\nĐi học muộn (M): -0,5 điểm\nNghỉ có phép (P): -0,5 điểm\nNghỉ không phép (V): -1 điểm\n\nTrong phần điều kiện miễn thi thử, sheet gọi 5 điểm là mức điểm rèn luyện tối đa. Tuy nhiên, sheet không trình bày đầy đủ công thức cộng/trừ theo từng kỳ và cách xử lý mọi trường hợp ngoại lệ. Do đó, bảng trên là bản chép các quy tắc được ghi, không phải công thức tính điểm đã được kiểm chứng độc lập.",
+        "quote": "6.2. Điểm rèn luyện\n\nCẩm nang nêu các mức cộng/trừ điểm sau.\n\nTình huống: Điểm theo sheet\n---: ---:\nKhông nghỉ, không đi học muộn: +5 điểm\nTập bù (được ghi chú là tương đương buổi nghỉ có phép): +0,5 điểm\nĐi học muộn (M): -0,5 điểm\nNghỉ có phép (P): -0,5 điểm\nNghỉ không phép (V): -1 điểm\n\nTrong phần điều kiện miễn thi thử, sheet gọi 5 điểm là mức điểm rèn luyện tối đa. Tuy nhiên, sheet không trình bày đầy đủ công thức cộng/trừ theo từng kỳ và cách xử lý mọi trường hợp ngoại lệ. Do đó, bảng trên là bản chép các quy tắc được ghi, không phải công thức tính điểm đã được kiểm chứng độc lập.",
+        "score": 0.783117,
+        "rrfScore": 0.064332,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_ff27d304c6fa3b9be1ba6830e038f7a231d6383f",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 12,
+          "section": "6.2. Điểm rèn luyện",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 6. Điểm danh và đánh giá ý thức – chuyên môn > 6.2. Điểm rèn luyện#0:L124-L134",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_60e2be654426767dd297a3123960c352c8619cc4",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 6.5. Trường hợp được miễn thi thử",
+        "content": "6.5. Trường hợp được miễn thi thử\n\nCẩm nang ghi mục “Miễn thi thử” với ba điều kiện:\n\n1. Đã rèn luyện đủ 16 buổi trở lên.\n2. Điểm rèn luyện đạt mức tối đa 5 điểm.\n3. Điểm ý thức – chuyên môn luôn đạt mức tối đa 85 điểm.\n\nCần xác nhận với Ban quản lý về cách phối hợp các điều kiện này trong thực tế, vì cùng phần cẩm nang cũng ghi thi thử là hoạt động bắt buộc đối với học viên đủ điều kiện. Sheet không giải thích rõ cách xác định trường hợp được miễn, cách tính 85 điểm hoặc mối quan hệ giữa số buổi và tổng điểm.",
+        "quote": "6.5. Trường hợp được miễn thi thử\n\nCẩm nang ghi mục “Miễn thi thử” với ba điều kiện:\n\n1. Đã rèn luyện đủ 16 buổi trở lên.\n2. Điểm rèn luyện đạt mức tối đa 5 điểm.\n3. Điểm ý thức – chuyên môn luôn đạt mức tối đa 85 điểm.\n\nCần xác nhận với Ban quản lý về cách phối hợp các điều kiện này trong thực tế, vì cùng phần cẩm nang cũng ghi thi thử là hoạt động bắt buộc đối với học viên đủ điều kiện. Sheet không giải thích rõ cách xác định trường hợp được miễn, cách tính 85 điểm hoặc mối quan hệ giữa số buổi và tổng điểm.",
+        "score": 0.764059,
+        "rrfScore": 0.047883,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_60e2be654426767dd297a3123960c352c8619cc4",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 15,
+          "section": "6.5. Trường hợp được miễn thi thử",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 6. Điểm danh và đánh giá ý thức – chuyên môn > 6.5. Trường hợp được miễn thi thử#0:L159-L165",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_8fb2c7427c5532b5f464e8db3bef9e8ab6c29bf8",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 8. Điểm cộng, thành tích và đóng góp",
+        "content": "8. Điểm cộng, thành tích và đóng góp\n\nCẩm nang có một phần riêng quy định các điểm cộng. Các nội dung dưới đây được giữ nguyên theo cách ghi trong sheet.",
+        "quote": "8. Điểm cộng, thành tích và đóng góp\n\nCẩm nang có một phần riêng quy định các điểm cộng. Các nội dung dưới đây được giữ nguyên theo cách ghi trong sheet.",
+        "score": 0.751954,
+        "rrfScore": 0.031746,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_8fb2c7427c5532b5f464e8db3bef9e8ab6c29bf8",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 20,
+          "section": "8. Điểm cộng, thành tích và đóng góp",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 8. Điểm cộng, thành tích và đóng góp#0:L200-L200",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_88bcb7b827ff7478dcc2aa13dc3666f5d3a21cd1",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành",
+        "content": "18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành\n\nĐể tránh áp dụng sai nội dung, nên xác minh các điểm dưới đây với Ban quản lý. Đây là các chỗ có mốc thời gian cũ, cách ghi chưa rõ hoặc thông tin cần cập nhật được phát hiện ngay trong sheet Cẩm nang.\n\n1. Ngày hiệu lực: tiêu đề ghi áp dụng tháng 10/2019, nhưng có ghi chú năm 2023 và các mốc dự kiến/áp dụng năm 2025. Cần xác nhận phiên bản nào đang có hiệu lực.\n2. Lịch và cơ sở: mã CS 2, CS 3 lặp ở nhiều dòng; cần xác nhận ngày tập, địa điểm và người phụ trách hiện tại.\n3. Độ tuổi tập thử: sheet ghi trên 6 tuổi và dưới 6 tuổi, nhưng không nêu trường hợp đúng 6 tuổi.\n4. Điểm rèn luyện và điểm chuyên môn: cần xác nhận chu kỳ tính, công thức tổng hợp, điều kiện “miễn thi thử”, mức 85 điểm và các ngoại lệ.\n5. Thi thử: phần điểm danh có điều kiện miễn thi thử nhưng phần thi thử ghi là bắt buộc; cần làm rõ nhóm nào được miễn và quy trình hiện hành.\n6. Điểm cộng kỷ lục kỹ năng: “Căn bản: NO.1” xuất hiện hai lần với mức +20 và +50 điểm.\n7. Điểm học phí: các dòng “đúng hạn +10”, “quá hạn -10”, “trước mồng 10 -10” và “sau mồng 10 -20” chưa nhất quán về cách hiểu.\n8. Học phí: các mức giá được ghi trong sheet có thể đã cũ; mốc cập nhật dự kiến Quý II/2025 đã qua.\n9. Thời hạn đóng theo quý: câu “từ ngày 01–30 tháng cuối cùng quý đã nộp” trong phần lớp ngoài trời cần được giải thích.\n10. Quỹ hoạt động và thẻ VIP: cần xác nhận khoản thu, điều kiện hưởng voucher, phạm vi hoàn phí thẻ và thời điểm áp dụng thực tế.\n11. Thi đẳng: bảng ghi cả “85% số buổi tập (40 buổi)” lẫn “48 buổi”, nhưng không nêu cách đối chiếu hai con số.\n12. Liên kết biểu mẫu và thông tin chuyển khoản: xác nhận các biểu mẫu còn hoạt động và thông tin tài khoản chính xác trước khi gửi thông tin hoặc thanh toán.\n13. Tên gọi tổ chức thi: cách ghi tên cơ quan Liên đoàn/đơn vị giám sát trong sheet cần được đối chiếu với thông báo kỳ thi chính thức đang áp dụng.",
+        "quote": "18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành\n\nĐể tránh áp dụng sai nội dung, nên xác minh các điểm dưới đây với Ban quản lý. Đây là các chỗ có mốc thời gian cũ, cách ghi chưa rõ hoặc thông tin cần cập nhật được phát hiện ngay trong sheet Cẩm nang.\n\n1. Ngày hiệu lực: tiêu đề ghi áp dụng tháng 10/2019, nhưng có ghi chú năm 2023 và các mốc dự kiến/áp dụng năm 2025. Cần xác nhận phiên bản nào đang có hiệu lực.\n2. Lịch và cơ sở: mã CS 2, CS 3 lặp ở nhiều dòng; cần xác nhận ngày tập, địa điểm và người phụ trách hiện tại.\n3. Độ tuổi tập thử: sheet ghi trên 6 tuổi và dưới 6 tuổi, nhưng không nêu trường hợp đúng 6 tuổi.\n4. Điểm rèn luyện và điểm chuyên môn: cần xác nhận chu kỳ tính, công thức tổng hợp, điều kiện “miễn thi thử”, mức 85 điểm và các ngoại lệ.\n5. Thi thử: phần điểm danh có điều kiện miễn thi thử nhưng phần thi thử ghi là bắt buộc; cần làm rõ nhóm nào được miễn và quy trình hiện hành.\n6. Điểm cộng kỷ lục kỹ năng: “Căn bản: NO.1” xuất hiện hai lần với mức +20 và +50 điểm.\n7. Điểm học phí: các dòng “đúng hạn +10”, “quá hạn -10”, “trước mồng 10 -10” và “sau mồng 10 -20” chưa nhất quán về cách hiểu.\n8. Học phí: các mức giá được ghi trong sheet có thể đã cũ; mốc cập nhật dự kiến Quý II/2025 đã qua.\n9. Thời hạn đóng theo quý: câu “từ ngày 01–30 tháng cuối cùng quý đã nộp” trong phần lớp ngoài trời cần được giải thích.\n10. Quỹ hoạt động và thẻ VIP: cần xác nhận khoản thu, điều kiện hưởng voucher, phạm vi hoàn phí thẻ và thời điểm áp dụng thực tế.\n11. Thi đẳng: bảng ghi cả “85% số buổi tập (40 buổi)” lẫn “48 buổi”, nhưng không nêu cách đối chiếu hai con số.\n12. Liên kết biểu mẫu và thông tin chuyển khoản: xác nhận các biểu mẫu còn hoạt động và thông tin tài khoản chính xác trước khi gửi thông tin hoặc thanh toán.\n13. Tên gọi tổ chức thi: cách ghi tên cơ quan Liên đoàn/đơn vị giám sát trong sheet cần được đối chiếu với thông báo kỳ thi chính thức đang áp dụng.",
+        "score": 0.726375,
+        "rrfScore": 0.03125,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_88bcb7b827ff7478dcc2aa13dc3666f5d3a21cd1",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 55,
+          "section": "18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 18. Các điểm cần xác minh trước khi sử dụng như quy định hiện hành#0:L539-L553",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_683868d01ab6a468c4a36db15455a9153dfeb334",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử",
+        "content": "6.4. Các trường hợp không đủ điểm thi thử\n\nSheet liệt kê các tình huống không đủ điều kiện thi thử:\n\n- Nghỉ không phép quá 2 buổi, ngoại trừ học viên tập cả tuần.\n- Có nhiều hơn 3 buổi được đánh giá Yếu (Y).\n- Tổng điểm rèn luyện nhỏ hơn 0.\n- Có dưới 8 buổi được đánh giá Tốt (T).\n\nCác tiêu chí được chép theo đúng nội dung sheet. Trường hợp ngoại lệ “học viên tập cả tuần” không được giải thích thêm trong tài liệu nguồn; phụ huynh nên hỏi Hệ thống để biết đối tượng và cách áp dụng.",
+        "quote": "6.4. Các trường hợp không đủ điểm thi thử\n\nSheet liệt kê các tình huống không đủ điều kiện thi thử:\n\n- Nghỉ không phép quá 2 buổi, ngoại trừ học viên tập cả tuần.\n- Có nhiều hơn 3 buổi được đánh giá Yếu (Y).\n- Tổng điểm rèn luyện nhỏ hơn 0.\n- Có dưới 8 buổi được đánh giá Tốt (T).\n\nCác tiêu chí được chép theo đúng nội dung sheet. Trường hợp ngoại lệ “học viên tập cả tuần” không được giải thích thêm trong tài liệu nguồn; phụ huynh nên hỏi Hệ thống để biết đối tượng và cách áp dụng.",
+        "score": 0.723059,
+        "rrfScore": 0.04575,
+        "retrievalPaths": [
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_683868d01ab6a468c4a36db15455a9153dfeb334",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 14,
+          "section": "6.4. Các trường hợp không đủ điểm thi thử",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 6. Điểm danh và đánh giá ý thức – chuyên môn > 6.4. Các trường hợp không đủ điểm thi thử#0:L148-L155",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_dc9061160a974a93eb3915d20e4b55d948886ae0",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn",
+        "content": "6.3. Điểm ý thức – chuyên môn\n\nXếp loại: Ký hiệu trong sheet | Điểm được ghi\n---: --- | ---:\nTốt: T | 5 điểm\nTrung bình: TB | 3 điểm\nYếu: Y | 0 điểm\n\nSheet không nêu chi tiết tiêu chí kỹ thuật cụ thể để phân loại một buổi tập là Tốt, Trung bình hay Yếu. Việc đánh giá chuyên môn cần do HLV/Hệ thống thực hiện theo cách đánh giá đang áp dụng.",
+        "quote": "6.3. Điểm ý thức – chuyên môn\n\nXếp loại: Ký hiệu trong sheet | Điểm được ghi\n---: --- | ---:\nTốt: T | 5 điểm\nTrung bình: TB | 3 điểm\nYếu: Y | 0 điểm\n\nSheet không nêu chi tiết tiêu chí kỹ thuật cụ thể để phân loại một buổi tập là Tốt, Trung bình hay Yếu. Việc đánh giá chuyên môn cần do HLV/Hệ thống thực hiện theo cách đánh giá đang áp dụng.",
+        "score": 0.718596,
+        "rrfScore": 0.046906,
+        "retrievalPaths": [
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_dc9061160a974a93eb3915d20e4b55d948886ae0",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 13,
+          "section": "6.3. Điểm ý thức – chuyên môn",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 6. Điểm danh và đánh giá ý thức – chuyên môn > 6.3. Điểm ý thức – chuyên môn#0:L138-L144",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_bffa84838d22efac13383ff7f678060b976c2b4b",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 6.1. Mục đích",
+        "content": "6.1. Mục đích\n\nSheet giải thích việc điểm danh và đánh giá chuyên môn nhằm:\n\n- Kiểm tra, đánh giá thời lượng rèn luyện thường xuyên.\n- Theo dõi ý thức tập luyện và trình độ chuyên môn đạt được.\n- Làm căn cứ xét duyệt, tuyên dương và khen thưởng những cá nhân có ý thức học tập, rèn luyện tốt.",
+        "quote": "6.1. Mục đích\n\nSheet giải thích việc điểm danh và đánh giá chuyên môn nhằm:\n\n- Kiểm tra, đánh giá thời lượng rèn luyện thường xuyên.\n- Theo dõi ý thức tập luyện và trình độ chuyên môn đạt được.\n- Làm căn cứ xét duyệt, tuyên dương và khen thưởng những cá nhân có ý thức học tập, rèn luyện tốt.",
+        "score": 0.70971,
+        "rrfScore": 0.014925,
+        "retrievalPaths": [
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_bffa84838d22efac13383ff7f678060b976c2b4b",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 11,
+          "section": "6.1. Mục đích",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 6. Điểm danh và đánh giá ý thức – chuyên môn > 6.1. Mục đích#0:L116-L120",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_763b5bb201382b65513d7ed0a007088ab4d5f08a",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 14.2. Bảng thời lượng ghi trong sheet",
+        "content": "14.2. Bảng thời lượng ghi trong sheet\n\nCấp đẳng: Mốc 85% số buổi tập được ghi | Số buổi được ghi riêng | Thời gian rèn luyện được ghi\n---: --- | ---: | ---\nI Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 6 tháng\nII Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 12 tháng\nIII Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 24 tháng\nIV Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 36 tháng\nV Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 48 tháng\nVI Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 60 tháng\n\nĐiểm cần làm rõ: bảng trong sheet thể hiện đồng thời “85% số buổi tập (40 buổi)” và “48 buổi”. Mối quan hệ giữa hai con số này chưa được giải thích rõ, nên không nên tự suy luận rằng chúng tương đương hoặc thay thế nhau. Cần xác nhận cách tính số buổi hợp lệ, thời gian rèn luyện tối thiểu và cách áp dụng theo từng cấp đẳng.",
+        "quote": "14.2. Bảng thời lượng ghi trong sheet\n\nCấp đẳng: Mốc 85% số buổi tập được ghi | Số buổi được ghi riêng | Thời gian rèn luyện được ghi\n---: --- | ---: | ---\nI Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 6 tháng\nII Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 12 tháng\nIII Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 24 tháng\nIV Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 36 tháng\nV Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 48 tháng\nVI Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 60 tháng\n\nĐiểm cần làm rõ: bảng trong sheet thể hiện đồng thời “85% số buổi tập (40 buổi)” và “48 buổi”. Mối quan hệ giữa hai con số này chưa được giải thích rõ, nên không nên tự suy luận rằng chúng tương đương hoặc thay thế nhau. Cần xác nhận cách tính số buổi hợp lệ, thời gian rèn luyện tối thiểu và cách áp dụng theo từng cấp đẳng.",
+        "score": 0.709004,
+        "rrfScore": 0.028405,
+        "retrievalPaths": [
+          "chunkVector",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_763b5bb201382b65513d7ed0a007088ab4d5f08a",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 47,
+          "section": "14.2. Bảng thời lượng ghi trong sheet",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 14. Thi đẳng > 14.2. Bảng thời lượng ghi trong sheet#0:L447-L456",
+          "scopeKey": "fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_7ffd33b69345819af883f87bf8d4a0b070888ce0",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 7.1. Thời lượng rèn luyện",
+        "content": "7.1. Thời lượng rèn luyện\n\nTheo sheet:\n\n- Một kỳ rèn luyện là 3 tháng (1 kỳ), tương đương 24 buổi.\n- Học viên nghỉ quá 4 buổi trong một kỳ thi 3 tháng sẽ không được tham gia kỳ thi đó.",
+        "quote": "7.1. Thời lượng rèn luyện\n\nTheo sheet:\n\n- Một kỳ rèn luyện là 3 tháng (1 kỳ), tương đương 24 buổi.\n- Học viên nghỉ quá 4 buổi trong một kỳ thi 3 tháng sẽ không được tham gia kỳ thi đó.",
+        "score": 0.689914,
+        "rrfScore": 0.045773,
+        "retrievalPaths": [
+          "chunkVector",
+          "entityTraversal",
+          "factSupport"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_7ffd33b69345819af883f87bf8d4a0b070888ce0",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 18,
+          "section": "7.1. Thời lượng rèn luyện",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 7. Điều kiện và quy trình thi lên đai > 7.1. Thời lượng rèn luyện#0:L187-L190",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      },
+      {
+        "citationId": "3d85813a-acce-411a-afce-5c3961b0bf94:chk_239928bab998714c7aa34c4f429412d4ccc65393",
+        "citation": "cam_nang_taekwondo_van_quan_chi_tiet.md — 1. Giới thiệu tài liệu",
+        "content": "1. Giới thiệu tài liệu\n\nTài liệu này diễn giải chi tiết nội dung trong sheet “CẨM NANG” của bộ dữ liệu Trung tâm/Hệ thống Taekwondo Văn Quán. Mục tiêu là giúp phụ huynh, học viên và người phụ trách lớp dễ tra cứu cách đăng ký, quy định tập luyện, điểm rèn luyện, điều kiện thi lên đai, thi thử, học bổ trợ, học phí, thẻ thành viên, thi đẳng và các kênh liên hệ.\n\nĐây là bản ghi chép theo nội dung sheet được cung cấp, không phải văn bản xác nhận chính sách đang còn hiệu lực hoặc bản trích dẫn độc lập từ Liên đoàn Taekwondo. Sheet ghi chú “Áp dụng tháng 10.2019”, đồng thời có một số nội dung bổ sung ở các mốc sau như áp dụng từ năm 2023, áp dụng từ Quý I/2025 và dự kiến áp dụng từ Quý II/2025. Vì vậy, những quy định về học phí, điểm, quy trình đăng ký và thời hạn cần được xác minh với Ban quản lý trước khi áp dụng ở thời điểm hiện tại.",
+        "quote": "1. Giới thiệu tài liệu\n\nTài liệu này diễn giải chi tiết nội dung trong sheet “CẨM NANG” của bộ dữ liệu Trung tâm/Hệ thống Taekwondo Văn Quán. Mục tiêu là giúp phụ huynh, học viên và người phụ trách lớp dễ tra cứu cách đăng ký, quy định tập luyện, điểm rèn luyện, điều kiện thi lên đai, thi thử, học bổ trợ, học phí, thẻ thành viên, thi đẳng và các kênh liên hệ.\n\nĐây là bản ghi chép theo nội dung sheet được cung cấp, không phải văn bản xác nhận chính sách đang còn hiệu lực hoặc bản trích dẫn độc lập từ Liên đoàn Taekwondo. Sheet ghi chú “Áp dụng tháng 10.2019”, đồng thời có một số nội dung bổ sung ở các mốc sau như áp dụng từ năm 2023, áp dụng từ Quý I/2025 và dự kiến áp dụng từ Quý II/2025. Vì vậy, những quy định về học phí, điểm, quy trình đăng ký và thời hạn cần được xác minh với Ban quản lý trước khi áp dụng ở thời điểm hiện tại.",
+        "score": 0.689822,
+        "rrfScore": 0.030679,
+        "retrievalPaths": [
+          "chunkFulltext",
+          "chunkVector"
+        ],
+        "source": {
+          "documentId": "7a852f0f-e212-5d7f-a29b-998ff61a2b77",
+          "versionId": "3d85813a-acce-411a-afce-5c3961b0bf94",
+          "chunkId": "chk_239928bab998714c7aa34c4f429412d4ccc65393",
+          "documentName": "cam_nang_taekwondo_van_quan_chi_tiet.md",
+          "chunkIndex": 0,
+          "section": "1. Giới thiệu tài liệu",
+          "pageStart": null,
+          "pageEnd": null,
+          "sourceAnchor": "docs/cam_nang_taekwondo_van_quan_chi_tiet.md#CẨM NANG TẬP LUYỆN TẠI HỆ THỐNG TAEKWONDO VĂN QUÁN > 1. Giới thiệu tài liệu#0:L5-L7",
+          "scopeKey": "facility,finance,fundamentals,rank,training"
+        }
+      }
+    ],
+    "facts": [
+      {
+        "factId": "bcf84c3bf1804e320f859e14854438353d904bb8c773d0adf6337d6b5fc3bda7",
+        "statement": "policy | name | Điểm rèn luyện | name: Điểm rèn luyện",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8727246522903442,
+        "chunkIds": [
+          "chk_ff27d304c6fa3b9be1ba6830e038f7a231d6383f"
+        ]
+      },
+      {
+        "factId": "3594c4968c713646d64db983957c7d162c289346e9444998c7637723662826bf",
+        "statement": "policy | name | Điểm rèn luyện | description: Không nghỉ, không đi học muộn: +5 điểm. Tập bù (được ghi chú là tương đương buổi nghỉ có phép): +0,5 điểm. Đi học muộn (M): -0,5 điểm. Nghỉ có phép (P): -0,5 điểm. Nghỉ không phép (V): -1 điểm.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8666675090789795,
+        "chunkIds": [
+          "chk_ff27d304c6fa3b9be1ba6830e038f7a231d6383f"
+        ]
+      },
+      {
+        "factId": "438950a96c63c3ba75ad5436cddbb108fe062e5fd767206aef9b9c5de46bfcad",
+        "statement": "requirement | name | Miễn thi thử | description: Đã rèn luyện đủ 16 buổi trở lên. Điểm rèn luyện đạt mức tối đa 5 điểm. Điểm ý thức – chuyên môn luôn đạt mức tối đa 85 điểm.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8625839352607727,
+        "chunkIds": [
+          "chk_60e2be654426767dd297a3123960c352c8619cc4"
+        ]
+      },
+      {
+        "factId": "43b671b8341b67abacc6b637c97c470cdaa5f374aaa1b55e4c2293df6a934050",
+        "statement": "requirement | name | Các trường hợp không đủ điểm thi thử | description: Nghỉ không phép quá 2 buổi, ngoại trừ học viên tập cả tuần. Có nhiều hơn 3 buổi được đánh giá Yếu (Y). Tổng điểm rèn luyện nhỏ hơn 0. Có dưới 8 buổi được đánh giá Tốt (T).",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.852171778678894,
+        "chunkIds": [
+          "chk_683868d01ab6a468c4a36db15455a9153dfeb334"
+        ]
+      },
+      {
+        "factId": "8baaa32412ed15dcd8ee19fd89c83594e76459e8e867b694351c291d27d3757c",
+        "statement": "requirement | name | Thời lượng rèn luyện | description: Một kỳ rèn luyện là 3 tháng (1 kỳ), tương đương 24 buổi. Học viên nghỉ quá 4 buổi trong một kỳ thi 3 tháng sẽ không được tham gia kỳ thi đó.",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8392544984817505,
+        "chunkIds": [
+          "chk_7ffd33b69345819af883f87bf8d4a0b070888ce0"
+        ]
+      },
+      {
+        "factId": "c7a4b4cbae892a15f5307f0224b3faaa48167487b3e398b052dac3d7d258f0b2",
+        "statement": "policy | name | Điểm ý thức – chuyên môn | description: Tốt: T | 5 điểm; Trung bình: TB | 3 điểm; Yếu: Y | 0 điểm",
+        "factType": "PROPERTY",
+        "validFrom": null,
+        "validTo": null,
+        "conflictPeers": [
+          {
+            "chunkIds": null,
+            "decision": null,
+            "factId": null,
+            "versionId": null
+          }
+        ],
+        "currentnessNote": "The source gives no unambiguous date; do not assume this remains current.",
+        "score": 0.8380612134933472,
+        "chunkIds": [
+          "chk_dc9061160a974a93eb3915d20e4b55d948886ae0"
+        ]
+      }
+    ],
+    "retrievalTrace": {
+      "pathCounts": {
+        "chunkVector": 20,
+        "chunkFulltext": 20,
+        "entityTraversal": 9,
+        "factSupport": 13
+      },
+      "fusedCandidates": 34,
+      "returnedPassages": 10,
+      "topCosineScore": 0.7831168812701632,
+      "minimumCosineScore": 0.55,
+      "latencyMs": 1420.28,
+      "citationIds": [
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_ff27d304c6fa3b9be1ba6830e038f7a231d6383f",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_60e2be654426767dd297a3123960c352c8619cc4",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_8fb2c7427c5532b5f464e8db3bef9e8ab6c29bf8",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_88bcb7b827ff7478dcc2aa13dc3666f5d3a21cd1",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_683868d01ab6a468c4a36db15455a9153dfeb334",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_dc9061160a974a93eb3915d20e4b55d948886ae0",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_bffa84838d22efac13383ff7f678060b976c2b4b",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_763b5bb201382b65513d7ed0a007088ab4d5f08a",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_7ffd33b69345819af883f87bf8d4a0b070888ce0",
+        "3d85813a-acce-411a-afce-5c3961b0bf94:chk_239928bab998714c7aa34c4f429412d4ccc65393"
+      ]
+    }
+  }
+}
+
+[2026-10-12 00:38:44] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 13,
+  "contentPartCount": 19,
+  "tools": []
+}
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Theo cẩm nang của",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    5
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,646
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "hệ thống, **điểm rèn luyện** và **điểm ý thức – chuyên môn** được theo dõi qua",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    29
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,670
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "các buổi tập nhằm đánh giá chuyên cần, thái độ và làm căn cứ xét duyệt thi thử, khen thưởng",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    56
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,697
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.1. Mục đích]. Cụ",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    80
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,721
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "thể như sau:\n\n### 1. Quy định cộng/trừ điểm rèn luyện\nMức điểm tối",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    104
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,745
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "đa được ghi nhận là 5 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    128
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,769
+
+[2026-10-12 00:38:47] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện]:\n* **Không nghỉ, không đi học muộn:**",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:47] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    154
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,795
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "+5 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    178
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,819
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Tập bù** (tương đương buổi nghỉ có phép): +0,",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    206
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,847
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "5 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    230
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,871
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Đi học muộn (M):** -0,5 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    254
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,895
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Nghỉ có phép (P):** -0,5 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    278
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,919
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Nghỉ không phép (V):** -1 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    302
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,943
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n\n### 2. Điểm ý thức – chuyên môn (đánh giá theo từng buổi tập)\n* **Tốt",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    330
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,971
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "(T):** 5 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    354
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         36,995
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn].\n* **Trung bình (TB):**",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    378
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,019
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "3 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    402
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,043
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn].\n* **Yếu (Y):** 0 điểm",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    426
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,067
+
+[2026-10-12 00:38:48] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn].\n\n### 3. Các trường hợp không đủ điều kiện về điểm/chuyên cần để thi thử",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:48] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    454
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,095
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Học viên sẽ không đủ điều kiện thi thử nếu vướng phải các tình huống sau",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    480
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,121
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử]:\n* Nghỉ không phép quá 2 buổi (ngoại trừ học viên tập cả tuần)",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    504
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,145
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].\n* Có nhiều hơn 3 buổi bị đánh giá xếp loại Yếu (Y)",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    529
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,170
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].\n* Tổng điểm rèn luyện nhỏ hơn 0",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    553
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,194
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].\n* Có dưới 8 buổi được đánh giá xếp loại Tốt (T)",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    577
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,218
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "[cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        35,868
+     • candidatesTokenCount:    584
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         37,225
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        37,581
+     • candidatesTokenCount:    584
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 26,525
+     • totalTokenCount:         38,938
+
+[2026-10-12 00:38:49] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": "Theo cẩm nang của hệ thống, **điểm rèn luyện** và **điểm ý thức – chuyên môn** được theo dõi qua các buổi tập nhằm đánh giá chuyên cần, thái độ và làm căn cứ xét duyệt thi thử, khen thưởng [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.1. Mục đích]. Cụ thể như sau:\n\n### 1. Quy định cộng/trừ điểm rèn luyện\nMức điểm tối đa được ghi nhận là 5 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện]:\n* **Không nghỉ, không đi học muộn:** +5 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Tập bù** (tương đương buổi nghỉ có phép): +0,5 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Đi học muộn (M):** -0,5 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Nghỉ có phép (P):** -0,5 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n* **Nghỉ không phép (V):** -1 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.2. Điểm rèn luyện].\n\n### 2. Điểm ý thức – chuyên môn (đánh giá theo từng buổi tập)\n* **Tốt (T):** 5 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn].\n* **Trung bình (TB):** 3 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn].\n* **Yếu (Y):** 0 điểm [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.3. Điểm ý thức – chuyên môn].\n\n### 3. Các trường hợp không đủ điều kiện về điểm/chuyên cần để thi thử\nHọc viên sẽ không đủ điều kiện thi thử nếu vướng phải các tình huống sau [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử]:\n* Nghỉ không phép quá 2 buổi (ngoại trừ học viên tập cả tuần) [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].\n* Có nhiều hơn 3 buổi bị đánh giá xếp loại Yếu (Y) [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].\n* Tổng điểm rèn luyện nhỏ hơn 0 [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].\n* Có dưới 8 buổi được đánh giá xếp loại Tốt (T) [cam_nang_taekwondo_van_quan_chi_tiet.md — 6.4. Các trường hợp không đủ điểm thi thử].",
+  "functionCalls": null
+}
+
+[2026-10-12 00:38:49] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        37,581
+     • candidatesTokenCount:    584
+     • thoughtsTokenCount:      773
+     • cachedContentTokenCount: 26,525
+     • totalTokenCount:         38,938
+
+[2026-10-12 00:38:49] === 🏁 [AGENT FINISH] root_agent ===
+

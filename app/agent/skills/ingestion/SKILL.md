@@ -32,7 +32,9 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
 2. Chạy `ingestion_batch_agent` cho đúng `nextBatch.batchIndex`. Sau mỗi batch,
    lấy `nextBatch` mới từ response hoặc `get_ingestion_status`; tiếp tục cho
    đến khi tất cả batch `STAGED`.
-3. Nếu batch báo schema gap, kiểm tra scope hiện có trước. Nếu thật sự thiếu,
+3. Khi cần schema context, tải catalog và schema qua wrappers ingestion; chúng ghim
+   ontology DRAFT của job và lưu version, scope keys, digest vào state. Nếu batch
+   báo schema gap, kiểm tra scope hiện có trước. Nếu thật sự thiếu,
    tạo proposal có bằng chứng. Dừng cho người dùng duyệt qua tool có ADK
    confirmation. `apply_schema_proposal` chỉ tạo/cập nhật ontology DRAFT của
    job. Gọi `rebase_ingestion` với draft ID và chạy đúng `nextBatch` trả về,

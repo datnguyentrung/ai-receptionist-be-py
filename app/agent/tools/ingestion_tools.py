@@ -283,6 +283,11 @@ async def load_ontology_scopes(
         )
         # 4. Cập nhật state và lưu checkpoint
         tool_context.state["active_ontology_scopes"] = scope_keys
+        tool_context.state["ingestion_schema_context"] = {
+            "ontologyVersionId": result["ontologyVersionId"],
+            "scopeKeys": result["scopeKeys"],
+            "schemaDigest": result["schemaDigest"],
+        }
         _store_checkpoint(tool_context, result)
         log_ingestion_event(f"LOAD_SCOPES [{scope_keys}]", payload=result, request=req)
         return result

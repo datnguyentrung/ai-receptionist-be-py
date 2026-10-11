@@ -253,4 +253,4 @@ def _lucene_query(query: str) -> str:
     return " OR ".join(f'"{token}"' for token in tokens[:20])
 
 
-__all__ = ["INSUFFICIENT_EVIDENCE", "GraphRAGRetriever"]
+__all__ = ["INSUFFICIENT_EVIDENCE", "GraphRAGRetriever", "_public_passage"]

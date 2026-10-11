@@ -5,6 +5,7 @@ from .ontology.ontology_entity_type_service import OntologyEntityTypeService
 from .ontology.ontology_lifecycle import OntologyLifecycle
 from .ontology.ontology_property_service import OntologyPropertyService
 from .ontology.ontology_relationship_service import OntologyRelationshipService
+from .ontology.schema_context import SchemaContextService
 from .ontology.ontology_version_service import OntologyVersionService
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "OntologyLifecycle",
     "OntologyPropertyService",
     "OntologyRelationshipService",
+    "SchemaContextService",
     "OntologyVersionService",
 ]
 
