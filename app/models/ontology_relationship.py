@@ -106,6 +106,7 @@ class OntologyRelationship(Base):
         SQLEnum(
             RelationshipCardinality,
             name="ontology_relationship_cardinality",
+            schema="public",
         ),
         nullable=False,
         default=RelationshipCardinality.MANY_TO_MANY,

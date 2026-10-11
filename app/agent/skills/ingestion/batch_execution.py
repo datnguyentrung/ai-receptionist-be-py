@@ -109,6 +109,7 @@ def _single_turn_agent(
         name=name,
         model=Gemini(
             model=os.getenv("GOOGLE_ADK_MODEL", "gemini-3.5-flash-lite"),
+            client_kwargs={"api_key": settings.GEMINI_API_KEY},
             retry_options=HttpRetryOptions(
                 attempts=5,
                 initial_delay=3.0,

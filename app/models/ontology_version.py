@@ -51,6 +51,7 @@ class OntologyVersion(Base):
         SQLEnum(
             OntologyVersionStatus,
             name="ontology_version_status",
+            schema="public",
         ),
         nullable=False,
         default=OntologyVersionStatus.DRAFT,

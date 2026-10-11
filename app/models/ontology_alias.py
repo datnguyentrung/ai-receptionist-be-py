@@ -126,6 +126,7 @@ class OntologyAlias(Base):
         SQLEnum(
             OntologyAliasSource,
             name="ontology_alias_source",
+            schema="public",
         ),
         nullable=False,
         default=OntologyAliasSource.MANUAL,

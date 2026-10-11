@@ -52,9 +52,12 @@ WORKFLOW_POLICY: dict[str, frozenset[str]] = {
         "rebase_ingestion",
     }),
     # Giai đoạn trích xuất xong và sẵn sàng commit dữ liệu vào KG
-    "READY": frozenset({"get_status", "fill"}),
+    "READY": frozenset({"get_status", "preview", "abort"}),
+    "AWAITING_COMMIT_APPROVAL": frozenset({"get_status", "preview", "review_conflict", "commit", "abort"}),
+    "COMMITTING": frozenset({"get_status", "commit"}),
     # Giai đoạn đã commit hoàn tất vào Knowledge Graph
-    "COMMITTED": frozenset({"get_status", "fill"}),
+    "COMMITTED": frozenset({"get_status", "commit"}),
+    "ABORTED": frozenset({"get_status"}),
     # Giai đoạn xử lý thất bại
     "FAILED": frozenset({"get_status"}),
 }
@@ -63,6 +66,7 @@ WORKFLOW_POLICY: dict[str, frozenset[str]] = {
 TERMINAL_NEXT_ACTION: dict[str, str | None] = {
     "FAILED": "explicit_extraction_failure",
     "COMMITTED": None,
+    "ABORTED": None,
     "DELETED": None,
     "ROLLED_BACK": None,
 }

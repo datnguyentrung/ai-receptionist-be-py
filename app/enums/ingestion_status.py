@@ -19,8 +19,12 @@ class IngestionJobStatus(StrEnum):
     VALIDATING_INPUT = "VALIDATING_INPUT"  # Đang kiểm tra tính hợp lệ của dữ liệu đầu vào
     CHUNKING = "CHUNKING"                  # Đang cắt nhỏ văn bản thành các đoạn (chunks)
     BATCHING = "BATCHING"                  # Đang gom nhóm các chunks thành batch để gửi LLM
+    BLOCKED_SCHEMA = "BLOCKED_SCHEMA"      # Batch chờ người dùng duyệt ontology proposal
     VALIDATING_GRAPH = "VALIDATING_GRAPH"  # Đang kiểm tra tính hợp lệ của đồ thị trích xuất đối chiếu Ontology
     READY = "READY"                        # Dữ liệu đã sẵn sàng để ghi vào cơ sở dữ liệu đồ thị
+    AWAITING_COMMIT_APPROVAL = "AWAITING_COMMIT_APPROVAL"
+    COMMITTING = "COMMITTING"
+    ABORTED = "ABORTED"
     WRITING = "WRITING"                    # Đang ghi các nodes/edges vào database/storage
     VERIFYING = "VERIFYING"                # Đang đối soát và xác thực sau khi ghi
     COMMITTED = "COMMITTED"                # Nạp thành công toàn bộ, đã hoàn tất lưu trữ

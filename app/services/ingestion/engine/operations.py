@@ -51,12 +51,13 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable
 
 from pydantic import ValidationError
 
 from app.enums import IngestionJobStatus, SourceVersionStatus
+from app.services.ingestion.engine.assertions import compare_assertions
 from app.schemas import (
     GraphNode,
     GraphPatchFragment,
@@ -139,9 +140,10 @@ async def begin(
 ) -> Workspace:
     if len(data) > max_file_size:
         raise ValueError(f"Artifact exceeds the {max_file_size}-byte ingestion limit")
+    stable_document_key = normalize_document_key(document_key or artifact_name)
     reader = DocumentReader()
     chunks = reader.read_bytes(
-        filename=artifact_name,
+        filename=stable_document_key,
         data=data,
         mime_type=mime_type,
     )
@@ -152,7 +154,7 @@ async def begin(
         content_hash=content_hash,
         chunks=chunks,
         ontology=ontology,
-        document_key=document_key or _document_key(artifact_name),
+        document_key=stable_document_key,
         scope_hint=scope_hint,
         skill_digest=skill_digest,
         model_id=model_id,
@@ -257,7 +259,20 @@ async def repair_batch(
         registry.canonicalize_semantic_fragment(semantic), projection, staged_entities=staged
     )
     issues = list(compiled.issues)
-    dropped_temp_ids = getattr(repair_delta, "dropped_temp_ids", []) or []
+    requested_drops = set(getattr(repair_delta, "dropped_temp_ids", []) or [])
+    # A repair model may only remove a baseline node when validation explicitly
+    # marked that node (or one of its fields) invalid.  Treating the model's
+    # dropped_temp_ids as authority allowed unrelated, already validated facts
+    # to disappear during a schema-gap repair.
+    invalid_locations = {
+        str(item.get("location") or "") for item in batch.validation_issues
+    }
+    dropped_temp_ids = [
+        node.temp_id
+        for index, node in enumerate(baseline.nodes)
+        if node.temp_id in requested_drops
+        and RepairGuard._location_was_invalid(f"nodes.{index}", invalid_locations)
+    ]
     merged = _merge_repair_fragment(
         baseline,
         compiled.fragment,
@@ -296,29 +311,10 @@ async def repair_batch(
             external_node_types={ref: item["className"] for ref, item in staged.items()},
         )
 
-    # Fault-Tolerant Quarantine: Khi chạm ngưỡng thử lại tối đa, cách ly lỗi vào warnings và cho phép stage batch
-    current_attempts = getattr(batch, "validation_attempts", 0) + 1
-    if issue_dicts and current_attempts >= MAX_BATCH_VALIDATION_ATTEMPTS:
-        logger.warning(
-            "REPAIR_FAULT_TOLERANT_FALLBACK ingestionId=%s batchIndex=%s attempts=%s issues=%s",
-            ingestion_id,
-            batch_index,
-            current_attempts,
-            issue_dicts,
-        )
-        quarantine_notes = [
-            f"[QUARANTINE] {issue.get('code')}: {issue.get('message')} (loc: {issue.get('location')})"
-            for issue in issue_dicts
-        ]
-        if merged is not None:
-            merged = merged.model_copy(
-                update={"warnings": [*merged.warnings, *quarantine_notes]}
-            )
-        elif baseline is not None:
-            merged = baseline.model_copy(
-                update={"warnings": [*baseline.warnings, *quarantine_notes]}
-            )
-        issue_dicts = []
+    # Validation failures must remain explicit.  Silently converting them to
+    # warnings used to stage incomplete batches and made the final preview look
+    # successful while claims were missing.  The repository applies the retry
+    # limit and moves the job to FAILED when the limit is exceeded.
 
     return await repository.store_batch_result(
         ingestion_id,
@@ -855,42 +851,158 @@ async def fill(
     graph_store: Neo4jIngestionStore,
     ingestion_id: str,
 ) -> dict[str, Any]:
+    """Legacy entry point: graph writes require a durable human approval."""
+    del repository, graph_store
+    return error_payload(
+        "commit_approval", ingestion_id, "APPROVAL_REQUIRED",
+        "Use the human-confirmed commit_ingestion tool with the preview digest",
+    )
+
+
+async def build_preview(
+    repository: IngestionRepository,
+    graph_store: Neo4jIngestionStore,
+    ingestion_id: str,
+    schema_changes: list[dict[str, Any]] | None = None,
+    active_ontology_version_id: str | None = None,
+) -> dict[str, Any]:
     workspace = await required_workspace(repository, ingestion_id)
-    guarded = workflow_guard_payload(workspace, "fill")
-    if guarded is not None:
-        return guarded
-    if workspace.job.status == IngestionJobStatus.COMMITTED:
-        return status_payload(workspace, idempotent=True)
-    expected = workspace_fingerprint(workspace)
-    if (
-        workspace.job.status != IngestionJobStatus.READY
-        or workspace.job.readiness_fingerprint != expected
-    ):
-        return error_payload(
-            "validation_precondition",
-            ingestion_id,
-            "VALIDATION_PRECONDITION",
-            "finalize_ingestion must succeed before fill_ingestion",
-        )
-    await repository.mark_writing(ingestion_id)
-    try:
-        result = await graph_store.fill(workspace)
-        previous_version_id = workspace.document.current_version_id
-        if previous_version_id and previous_version_id != workspace.version.id:
-            result["superseded"] = await graph_store.deactivate_version(
-                str(previous_version_id), "SUPERSEDED"
-            )
-        committed = await repository.mark_committed(ingestion_id, result)
-        return {**status_payload(committed), **result}
-    except Exception as exc:  # noqa: BLE001 - reconcile cross-store commit
-        reconciled = await graph_store.committed_summary(str(workspace.version.id))
-        if reconciled is not None:
-            committed = await repository.mark_committed(ingestion_id, reconciled)
-            return {**status_payload(committed), **reconciled}
-        await repository.mark_failed(ingestion_id, "persistence_failure", str(exc))
-        return error_payload(
-            "persistence_failure", ingestion_id, "PERSISTENCE_FAILED", str(exc)
-        )
+    workspace = await repository.refresh_document_current(ingestion_id)
+    if workspace.job.status not in {
+        IngestionJobStatus.READY, IngestionJobStatus.AWAITING_COMMIT_APPROVAL
+    } or workspace.job.readiness_fingerprint != workspace_fingerprint(workspace):
+        raise RuntimeError("Finalize and validate all batches before preview")
+    payload = await graph_store.preview_payload(workspace)
+    old_facts = await graph_store.current_assertions(
+        sorted({item["subjectKey"] for item in payload["facts"]})
+    )
+    source_anchors = {item["chunkId"]: item["sourceAnchor"] for item in payload["chunks"]}
+    supports, candidates, assertions = compare_assertions(
+        payload["facts"], old_facts, source_anchors
+    )
+    existing_entities = await graph_store.current_entity_keys(
+        [item["stableKey"] for item in payload["nodes"]]
+    )
+    existing_relations = await graph_store.current_relation_keys(payload["edges"])
+    supported_relations = sum(
+        (item["sourceKey"], item["targetKey"], item["edgeName"], item["propertiesJson"])
+        in existing_relations for item in payload["edges"]
+    )
+    await repository.record_fact_conflicts(ingestion_id, candidates)
+    report = {
+        "ingestionId": ingestion_id,
+        "documentKey": workspace.document.document_key,
+        "documentVersionId": str(workspace.version.id),
+        "previousVersionId": str(workspace.document.current_version_id) if workspace.document.current_version_id else None,
+        "contentHash": workspace.version.content_hash,
+        "ontologyVersionId": str(workspace.version.ontology_version_id),
+        "knowledgeRevision": await repository.knowledge_revision(),
+        "activeOntologyVersionId": active_ontology_version_id,
+        "schemaChanges": schema_changes or [],
+        "counts": {
+            "chunks": len(payload["chunks"]), "entities": len(payload["nodes"]),
+            "relationships": len(payload["edges"]), "facts": len(payload["facts"]),
+            "entitiesAdded": len(payload["nodes"]) - len(existing_entities),
+            "entitiesSupported": len(existing_entities),
+            "relationshipsAdded": len(payload["edges"]) - supported_relations,
+            "relationshipsSupported": supported_relations,
+            "factsAdded": sum(item["classification"] == "ADDED" for item in assertions),
+            "supportingFacts": len(supports), "conflicts": len(candidates),
+        },
+        "assertions": assertions,
+        "supports": supports,
+        "warnings": ["Unknown fact dates are not inferred to be current"]
+        if any(item["validFrom"] is None for item in assertions) else [],
+    }
+    return await repository.store_preview(ingestion_id, report)
+
+
+async def commit(
+    repository: IngestionRepository,
+    graph_store: Neo4jIngestionStore,
+    ingestion_id: str,
+    report_digest: str,
+    ontology_lifecycle: Any | None = None,
+) -> dict[str, Any]:
+    """Resume an approved, checkpointed publication across PostgreSQL and Neo4j."""
+    async with repository.commit_lock():
+        workspace = await required_workspace(repository, ingestion_id)
+        if workspace.job.status == IngestionJobStatus.COMMITTED:
+            return {**status_payload(workspace, idempotent=True), **workspace.job.summary}
+        if workspace.job.status not in {
+            IngestionJobStatus.AWAITING_COMMIT_APPROVAL, IngestionJobStatus.COMMITTING
+        }:
+            return error_payload("commit_approval", ingestion_id, "APPROVAL_REQUIRED", "No approved preview")
+        preview = await repository.get_preview(ingestion_id)
+        if preview["reportDigest"] != report_digest or not await repository.has_commit_approval(ingestion_id, report_digest):
+            return error_payload("commit_approval", ingestion_id, "APPROVAL_REQUIRED", "A matching human approval is required")
+        phase = workspace.job.summary.get("commitPhase")
+        other_commits = [job_id for job_id in await repository.unfinished_commits() if job_id != ingestion_id]
+        if other_commits:
+            return error_payload("commit_recovery", ingestion_id, "RECOVERY_REQUIRED", f"Recover pending commit {other_commits[0]} first")
+        if phase is None and preview["knowledgeRevision"] != await repository.knowledge_revision():
+            return error_payload("preview_stale", ingestion_id, "PREVIEW_STALE", "Knowledge graph changed; create a new preview")
+        if phase is None:
+            if workspace.job.readiness_fingerprint != workspace_fingerprint(workspace):
+                return error_payload("preview_stale", ingestion_id, "PREVIEW_STALE", "Staged extraction changed; create a new preview")
+            workspace = await repository.refresh_document_current(ingestion_id)
+            current_id = str(workspace.document.current_version_id) if workspace.document.current_version_id else None
+            if current_id != preview["previousVersionId"]:
+                return error_payload("preview_stale", ingestion_id, "PREVIEW_STALE", "Source version changed; create a new preview")
+            source_path = Path.cwd() / workspace.document.document_key
+            if source_path.is_file() and hashlib.sha256(source_path.read_bytes()).hexdigest() != workspace.version.content_hash:
+                return error_payload("preview_stale", ingestion_id, "PREVIEW_STALE", "Source document changed; begin a new ingestion version")
+        if phase is None and ontology_lifecycle is not None:
+            if preview.get("schemaChanges") != await ontology_lifecycle.ingestion_schema_changes(ingestion_id):
+                return error_payload("preview_stale", ingestion_id, "PREVIEW_STALE", "Schema draft changed; create a new preview")
+            active_id = await ontology_lifecycle.active_version_id()
+            if preview.get("activeOntologyVersionId") != active_id:
+                return error_payload("preview_stale", ingestion_id, "PREVIEW_STALE", "Active ontology changed; create a new preview")
+        version_id = str(workspace.version.id)
+        try:
+            if phase is None:
+                workspace = await repository.set_commit_phase(ingestion_id, "COMMITTING")
+            graph_status = await graph_store.version_status(version_id)
+            if graph_status not in {"PREPARED", "COMMITTED"}:
+                prepared = await graph_store.prepare_version(workspace)
+                workspace.job.summary["preparedSummary"] = prepared
+                workspace = await repository.set_commit_phase(ingestion_id, "GRAPH_PREPARED")
+            elif phase in {None, "COMMITTING"}:
+                workspace = await repository.set_commit_phase(ingestion_id, "GRAPH_PREPARED")
+            if ontology_lifecycle is not None:
+                await ontology_lifecycle.activate_ingestion_draft(ingestion_id)
+            workspace = await repository.set_commit_phase(ingestion_id, "SCHEMA_ACTIVE")
+            conflicts = await repository.list_fact_conflicts(ingestion_id)
+            if await graph_store.version_status(version_id) != "COMMITTED":
+                await graph_store.publish_version(
+                    version_id,
+                    str(workspace.document.current_version_id) if workspace.document.current_version_id else None,
+                    conflicts,
+                    preview["supports"],
+                )
+            workspace = await repository.set_commit_phase(ingestion_id, "GRAPH_PUBLISHED")
+            readback = await graph_store.committed_summary(version_id)
+            if readback is None or not readback.get("readbackVerified"):
+                raise RuntimeError("Published graph readback failed")
+            expected = workspace.job.summary.get("preparedSummary") or {
+                "nodes": preview["counts"]["entities"],
+                "edges": preview["counts"]["relationships"],
+                "chunks": preview["counts"]["chunks"],
+                "facts": preview["counts"]["facts"],
+            }
+            if any(readback.get(key) != expected.get(key) for key in ("nodes", "edges", "chunks", "facts")):
+                raise RuntimeError("Published graph counts differ from prepared graph")
+            if workspace.document.current_version_id:
+                await repository.mark_superseded(
+                    workspace.document.document_key, str(workspace.document.current_version_id)
+                )
+            await repository.advance_knowledge_revision(ingestion_id)
+            committed = await repository.mark_committed(ingestion_id, readback)
+            return {**status_payload(committed), **readback}
+        except Exception as exc:  # noqa: BLE001 - persisted phase permits reconciliation
+            workspace.job.summary["commitError"] = str(exc)
+            await repository.set_commit_phase(ingestion_id, workspace.job.summary.get("commitPhase") or "COMMITTING")
+            return error_payload("commit_recovery", ingestion_id, "COMMIT_RETRY_REQUIRED", str(exc))
 
 
 # ============================================================================
@@ -1441,6 +1553,12 @@ def status_payload(
     )
     if workspace.job.status == IngestionJobStatus.COMMITTED:
         stage, terminal, next_action = "committed", True, None
+    elif workspace.job.status == IngestionJobStatus.AWAITING_COMMIT_APPROVAL:
+        stage, terminal, next_action = "awaiting_commit_approval", False, "review_preview_and_confirm"
+    elif workspace.job.status == IngestionJobStatus.COMMITTING:
+        stage, terminal, next_action = "committing", False, "resume_commit"
+    elif workspace.job.status == IngestionJobStatus.ABORTED:
+        stage, terminal, next_action = "aborted", True, None
     elif workspace.job.status == IngestionJobStatus.FAILED:
         stage, terminal, next_action = (
             "explicit_extraction_failure",
@@ -1448,7 +1566,7 @@ def status_payload(
             "explicit_extraction_failure",
         )
     elif workspace.job.status == IngestionJobStatus.READY:
-        stage, terminal, next_action = "ready_to_fill", False, "fill"
+        stage, terminal, next_action = "ready_to_preview", False, "finalize"
     elif pending is None:
         stage, terminal, next_action = "ready_to_finalize", False, "finalize"
     elif pending.status == "BLOCKED_SCHEMA":
@@ -1478,8 +1596,10 @@ def status_payload(
         },
         "resumed": resumed,
         "idempotent": idempotent,
+        "reportDigest": workspace.job.summary.get("reportDigest"),
+        "commitPhase": workspace.job.summary.get("commitPhase"),
     }
-    if pending:
+    if pending and not terminal:
         result["nextBatch"] = {
             "batchIndex": pending.batch_index,
             "chunkIndexes": pending.chunk_indexes,
@@ -1539,8 +1659,18 @@ def error_payload(
 #   - str: Khóa định danh tài liệu chuẩn hóa.
 # ----------------------------------------------------------------------------
 def _document_key(filename: str) -> str:
-    stem = re.sub(r"[^a-z0-9]+", "-", Path(filename).stem.casefold()).strip("-")
-    return stem or hashlib.sha256(filename.encode("utf-8")).hexdigest()[:24]
+    return normalize_document_key(filename)
+
+
+def normalize_document_key(value: str) -> str:
+    """Canonical, repository-relative source identity shared by CLI and ADK."""
+    raw = value.strip().replace("\\", "/")
+    path = PurePosixPath(raw)
+    if not raw or path.is_absolute() or PureWindowsPath(value).is_absolute():
+        raise ValueError("document_key must be a relative path")
+    if any(part in {".", ".."} for part in raw.split("/")) or path.suffix.casefold() not in {".md", ".txt"}:
+        raise ValueError("document_key must be a normalized Markdown/TXT path")
+    return path.as_posix().casefold()
 
 
 # ----------------------------------------------------------------------------

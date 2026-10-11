@@ -7,6 +7,7 @@ from google.adk.tools import ToolContext
 from app.core.config import settings
 from app.core.ingestion_runtime import get_service_container
 from app.services.graphrag.retrieval import GraphRAGRetriever
+from app.services.ingestion.engine.operations import normalize_document_key
 
 
 async def retrieve_taekwondo_knowledge(
@@ -39,4 +40,12 @@ async def retrieve_taekwondo_knowledge(
     return result
 
 
-__all__ = ["retrieve_taekwondo_knowledge"]
+async def retrieve_taekwondo_document_history(document_key: str) -> dict[str, Any]:
+    """Return every published version of one document with original evidence."""
+    container = await get_service_container()
+    normalized = normalize_document_key(document_key)
+    rows = await container.rag_graph_store.document_history(normalized)
+    return {"documentKey": normalized, "assertions": rows}
+
+
+__all__ = ["retrieve_taekwondo_knowledge", "retrieve_taekwondo_document_history"]

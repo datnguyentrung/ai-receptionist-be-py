@@ -13,10 +13,13 @@ LOG_FILE = Path(__file__).resolve().parents[2] / "docs" / "log.txt"
 
 
 def reset_log_file() -> None:
-    """Xóa trắng file log khi khởi động một phiên làm việc mới."""
+    """Start a fresh log without destroying the preceding ingestion evidence."""
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            LOG_FILE.replace(LOG_FILE.with_name(f"log-{stamp}.txt"))
         with open(LOG_FILE, "w", encoding="utf-8") as f:
             f.write(f"# Ingestion Real-time Logs (Started at {now_str})\n\n")
     except Exception as e:

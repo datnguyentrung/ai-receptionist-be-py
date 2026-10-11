@@ -7,7 +7,9 @@ Mô-đun này cung cấp:
 - `_normalize`: Hàm phụ trợ chuẩn hóa vector về độ dài đơn vị (L2 norm).
 """
 
+import asyncio
 import math
+import time
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -28,7 +30,8 @@ class GeminiEmbeddingProvider:
         api_key: str,
         model: str = "gemini-embedding-001",
         dimension: int = 768,
-        batch_size: int = 64,
+        batch_size: int = 16,
+        min_request_interval_seconds: float = 12.0,
     ) -> None:
         """Khởi tạo GeminiEmbeddingProvider.
 
@@ -51,6 +54,8 @@ class GeminiEmbeddingProvider:
         self.model = model
         self.dimension = dimension
         self.batch_size = max(1, batch_size)
+        self._min_request_interval_seconds = max(0.0, min_request_interval_seconds)
+        self._next_request_at = 0.0
         self._client = genai.Client(api_key=api_key)
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
@@ -105,19 +110,31 @@ class GeminiEmbeddingProvider:
         # Chia nhỏ danh sách thành các batch để tránh vượt quá giới hạn payload của API
         for start in range(0, len(cleaned), self.batch_size):
             batch = cleaned[start : start + self.batch_size]
-            try:
-                response = await self._client.aio.models.embed_content(
-                    model=self.model,
-                    contents=cast(Any, batch),
-                    config=types.EmbedContentConfig(
-                        task_type=task_type,
-                        output_dimensionality=self.dimension,
-                    ),
-                )
-            except Exception as exc:
-                raise EmbeddingError(
-                    f"Tạo embedding cho tác vụ {task_type} thất bại ({type(exc).__name__}): {exc}"
-                ) from exc
+            for attempt in range(3):
+                delay = self._next_request_at - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    response = await self._client.aio.models.embed_content(
+                        model=self.model,
+                        contents=cast(Any, batch),
+                        config=types.EmbedContentConfig(
+                            task_type=task_type,
+                            output_dimensionality=self.dimension,
+                        ),
+                    )
+                    self._next_request_at = (
+                        time.monotonic() + self._min_request_interval_seconds
+                    )
+                    break
+                except Exception as exc:
+                    if "429" not in str(exc) or attempt == 2:
+                        raise EmbeddingError(
+                            f"Tạo embedding cho tác vụ {task_type} thất bại ({type(exc).__name__}): {exc}"
+                        ) from exc
+                    # ponytail: one process-wide client limiter is sufficient until
+                    # embeddings are generated concurrently across processes.
+                    self._next_request_at = time.monotonic() + 60
 
             embeddings = response.embeddings or []
             if len(embeddings) != len(batch):

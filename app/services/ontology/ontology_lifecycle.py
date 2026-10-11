@@ -10,6 +10,7 @@ Mô-đun này chịu trách nhiệm:
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -112,6 +113,7 @@ class OntologyLifecycle:
         evidence = dict(evidence) if evidence else {}
         if technical_name and "technicalName" not in payload:
             payload["technicalName"] = technical_name
+        _validate_proposal_payload(proposal_kind, payload, affected_scope_keys)
 
         # 3. Tính toán mã băm sha256 định danh duy nhất (digest) cho nội dung đề xuất
         digest = _digest({
@@ -132,6 +134,44 @@ class OntologyLifecycle:
             )
             if existing is not None:
                 return existing
+            if proposal_kind in {
+                SchemaProposalType.NEW_ENTITY_TYPE, SchemaProposalType.NEW_PROPERTY,
+                SchemaProposalType.NEW_RELATIONSHIP, SchemaProposalType.NEW_SCOPE,
+            }:
+                target_name = payload.get("scopeKey") if proposal_kind == SchemaProposalType.NEW_SCOPE else payload.get("technicalName")
+                pending = list((await session.scalars(select(OntologySchemaProposal).where(
+                    OntologySchemaProposal.source_ingestion_id == ingestion_id,
+                    OntologySchemaProposal.proposal_type == proposal_kind,
+                    OntologySchemaProposal.status != SchemaProposalStatus.REJECTED,
+                ))).all())
+                if any((item.payload.get("scopeKey") if proposal_kind == SchemaProposalType.NEW_SCOPE else item.payload.get("technicalName")) == target_name
+                       and item.payload.get("entityType") == payload.get("entityType") for item in pending):
+                    raise ValueError(f"Duplicate schema proposal: {target_name}")
+                version = await session.scalar(select(OntologyVersion).where(
+                    OntologyVersion.created_by == f"ingestion:{ingestion_id}",
+                    OntologyVersion.status == OntologyVersionStatus.DRAFT,
+                ))
+                version_id = version.id if version else uuid.UUID(ontology_version_id)
+                model_and_column = {
+                    SchemaProposalType.NEW_ENTITY_TYPE: (OntologyEntityType, OntologyEntityType.technical_name),
+                    SchemaProposalType.NEW_RELATIONSHIP: (OntologyRelationship, OntologyRelationship.technical_name),
+                    SchemaProposalType.NEW_SCOPE: (OntologyScope, OntologyScope.scope_key),
+                }
+                if proposal_kind in model_and_column:
+                    model, column = model_and_column[proposal_kind]
+                    if await session.scalar(select(model.id).where(model.ontology_version_id == version_id, column == target_name)):
+                        raise ValueError(f"Schema object already exists: {target_name}")
+                else:
+                    entity = await session.scalar(select(OntologyEntityType).where(
+                        OntologyEntityType.ontology_version_id == version_id,
+                        OntologyEntityType.technical_name == payload["entityType"],
+                    ))
+                    if entity and await session.scalar(select(OntologyProperty.id).where(
+                        OntologyProperty.ontology_version_id == version_id,
+                        OntologyProperty.entity_type_id == entity.id,
+                        OntologyProperty.technical_name == target_name,
+                    )):
+                        raise ValueError(f"Schema property already exists: {target_name}")
 
             proposal = OntologySchemaProposal(
                 ontology_version_id=uuid.UUID(ontology_version_id),
@@ -191,9 +231,9 @@ class OntologyLifecycle:
             return proposal
 
     async def apply_proposal(
-        self, proposal_id: str, *, new_version_code: str, applied_by: str
+        self, proposal_id: str, *, new_version_code: str | None, applied_by: str
     ) -> OntologyVersion:
-        """Áp dụng đề xuất đã được phê duyệt để tạo và kích hoạt phiên bản Ontology mới.
+        """Apply an approved proposal to the ingestion job's inactive draft.
 
         Quy trình:
         1. Kiểm tra đề xuất phải ở trạng thái APPROVED.
@@ -216,6 +256,8 @@ class OntologyLifecycle:
             ValueError: Proposal chưa được duyệt hoặc version code đã tồn tại.
             RuntimeError: Không tìm thấy phiên bản active hiện tại để kế thừa.
         """
+        if new_version_code is not None:
+            raise ValueError("Ontology version codes are allocated by the service at commit")
         async with self._session_factory() as session, session.begin():
             # 1. Truy vấn đề xuất schema cần áp dụng
             proposal = await session.scalar(
@@ -225,7 +267,7 @@ class OntologyLifecycle:
             )
             if proposal is None:
                 raise KeyError(proposal_id)
-            if proposal.status == SchemaProposalStatus.APPLIED and proposal.applied_ontology_version_id:
+            if proposal.applied_ontology_version_id:
                 applied_version = await session.get(
                     OntologyVersion, proposal.applied_ontology_version_id
                 )
@@ -237,13 +279,8 @@ class OntologyLifecycle:
             if proposal.status != SchemaProposalStatus.APPROVED:
                 raise ValueError("Only an APPROVED proposal can be applied")
 
-            # 2. Kiểm tra tính duy nhất của mã phiên bản mới
-            if await session.scalar(
-                select(OntologyVersion).where(OntologyVersion.version == new_version_code)
-            ):
-                raise ValueError(f"Ontology version already exists: {new_version_code}")
-
-            # 3. Khóa phiên bản đang ACTIVE để làm gốc kế thừa
+            if not proposal.source_ingestion_id:
+                raise ValueError("Ingestion proposal must have a source job")
             active = await session.scalar(
                 select(OntologyVersion)
                 .where(OntologyVersion.status == OntologyVersionStatus.ACTIVE)
@@ -252,30 +289,95 @@ class OntologyLifecycle:
             if active is None:
                 raise RuntimeError("No active ontology version")
 
-            # 4. Sao chép toàn bộ cấu trúc ontology hiện tại sang phiên bản mới
-            target, maps = await self._clone_version(
-                session, active.id, new_version_code, applied_by
-            )
-
-            # 5. Áp dụng các thay đổi từ proposal vào phiên bản mới
+            target = await session.scalar(select(OntologyVersion).where(
+                OntologyVersion.created_by == f"ingestion:{proposal.source_ingestion_id}",
+                OntologyVersion.status == OntologyVersionStatus.DRAFT,
+            ).with_for_update())
+            maps = {}
+            if target is None:
+                target, maps = await self._clone_version(
+                    session, active.id, f"draft-{uuid.uuid4().hex}",
+                    f"ingestion:{proposal.source_ingestion_id}",
+                )
+            elif target.parent_version_id != active.id:
+                raise RuntimeError("Active ontology changed; recreate the draft from its new base")
             await self._apply_change(session, proposal, target.id, maps)
-
-            # 6. Biên dịch lại toàn bộ snapshots của phiên bản mới
-            await self._compiler.compile_all(session, target.id)
-
-            # 7. Lưu trữ phiên bản cũ (ARCHIVED) và kích hoạt phiên bản mới (ACTIVE)
-            active.status = OntologyVersionStatus.ARCHIVED
             await session.flush()
-
-            target.status = OntologyVersionStatus.ACTIVE
-            target.activated_at = datetime.now(UTC)
-            proposal.status = SchemaProposalStatus.APPLIED
+            await self._compiler.compile_all(session, target.id)
             proposal.applied_ontology_version_id = target.id
             await session.flush()
+        return target
 
-        # 8. Làm mới bộ nhớ đệm cache
+    async def ingestion_schema_changes(self, ingestion_id: str) -> list[dict[str, Any]]:
+        async with self._session_factory() as session:
+            rows = list((await session.scalars(select(OntologySchemaProposal).where(
+                OntologySchemaProposal.source_ingestion_id == ingestion_id
+            ).order_by(OntologySchemaProposal.created_at))).all())
+            return [{
+                "proposalId": str(row.id), "type": row.proposal_type.value,
+                "technicalName": row.technical_name,
+                "status": row.status.value,
+                "draftVersionId": str(row.applied_ontology_version_id) if row.applied_ontology_version_id else None,
+                "scopeKeys": row.affected_scope_keys,
+            } for row in rows]
+
+    async def is_ingestion_draft(self, ingestion_id: str, version_id: str) -> bool:
+        async with self._session_factory() as session:
+            row = await session.get(OntologyVersion, uuid.UUID(version_id))
+            return bool(row and row.status == OntologyVersionStatus.DRAFT
+                        and row.created_by == f"ingestion:{ingestion_id}")
+
+    async def activate_ingestion_draft(self, ingestion_id: str) -> OntologyVersion | None:
+        """Publish one compiled draft only after final commit approval."""
+        async with self._session_factory() as session, session.begin():
+            target = await session.scalar(select(OntologyVersion).where(
+                OntologyVersion.created_by == f"ingestion:{ingestion_id}"
+            ).with_for_update())
+            if target is None:
+                return None
+            if target.status == OntologyVersionStatus.ACTIVE:
+                return target
+            if target.status != OntologyVersionStatus.DRAFT:
+                raise RuntimeError("Ingestion ontology draft is unavailable")
+            active = await session.scalar(select(OntologyVersion).where(
+                OntologyVersion.status == OntologyVersionStatus.ACTIVE
+            ).with_for_update())
+            if active is None or target.parent_version_id != active.id:
+                raise RuntimeError("Active ontology changed; preview must be rebuilt")
+            code = _next_version_code(active.version)
+            while await session.scalar(select(OntologyVersion.id).where(OntologyVersion.version == code)):
+                code = _next_version_code(code)
+            target.version = code
+            active.status = OntologyVersionStatus.ARCHIVED
+            await session.flush()
+            target.status = OntologyVersionStatus.ACTIVE
+            target.activated_at = datetime.now(UTC)
+            proposals = list((await session.scalars(select(OntologySchemaProposal).where(
+                OntologySchemaProposal.source_ingestion_id == ingestion_id,
+                OntologySchemaProposal.applied_ontology_version_id == target.id,
+            ))).all())
+            for proposal in proposals:
+                proposal.status = SchemaProposalStatus.APPLIED
         await self._cache.refresh()
         return target
+
+    async def active_version_id(self) -> str:
+        async with self._session_factory() as session:
+            version_id = await session.scalar(select(OntologyVersion.id).where(
+                OntologyVersion.status == OntologyVersionStatus.ACTIVE
+            ))
+        if version_id is None:
+            raise RuntimeError("No active ontology version")
+        return str(version_id)
+
+    async def discard_ingestion_draft(self, ingestion_id: str) -> None:
+        async with self._session_factory() as session, session.begin():
+            draft = await session.scalar(select(OntologyVersion).where(
+                OntologyVersion.created_by == f"ingestion:{ingestion_id}",
+                OntologyVersion.status == OntologyVersionStatus.DRAFT,
+            ).with_for_update())
+            if draft is not None:
+                draft.status = OntologyVersionStatus.ARCHIVED
 
     async def get_proposal(self, proposal_id: str) -> OntologySchemaProposal | None:
         """Tra cứu đề xuất schema theo ID từ PostgreSQL.
@@ -745,6 +847,47 @@ class OntologyLifecycle:
         if scope is None:
             raise KeyError(f"Unknown ontology scope: {key}")
         return scope
+
+def _validate_proposal_payload(
+    proposal_type: SchemaProposalType, payload: dict[str, Any], affected_scopes: list[str]
+) -> None:
+    """Fail before persistence for the malformed proposals seen in ingestion logs."""
+    if not affected_scopes or any(not str(key).strip() for key in affected_scopes):
+        raise ValueError("affected_scope_keys must contain at least one scope")
+    technical_name = str(payload.get("technicalName", "")).strip()
+    if proposal_type not in {SchemaProposalType.MODIFY_SCOPE, SchemaProposalType.NEW_SCOPE} and not technical_name:
+        raise ValueError("payload.technicalName is required")
+    if technical_name and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,99}", technical_name):
+        raise ValueError("technicalName must be a valid identifier")
+    if proposal_type == SchemaProposalType.NEW_PROPERTY:
+        if not str(payload.get("entityType", "")).strip():
+            raise ValueError("NEW_PROPERTY requires payload.entityType")
+        if payload.get("dataType") not in {item.value for item in OntologyPropertyDataType}:
+            raise ValueError("NEW_PROPERTY requires a supported payload.dataType")
+    required = {
+        SchemaProposalType.NEW_RELATIONSHIP: ("sourceEntityType", "targetEntityType"),
+        SchemaProposalType.NEW_SCOPE: ("scopeKey", "description"),
+        SchemaProposalType.MODIFY_SCOPE: ("scopeKey",),
+        SchemaProposalType.NEW_ALIAS: ("alias", "targetType", "targetTechnicalName"),
+        SchemaProposalType.MODIFY_PROPERTY: ("entityType",),
+    }.get(proposal_type, ())
+    missing = [key for key in required if not str(payload.get(key, "")).strip()]
+    if missing:
+        raise ValueError(f"{proposal_type.value} requires {', '.join(missing)}")
+    if proposal_type == SchemaProposalType.NEW_ENTITY_TYPE:
+        strategy = payload.get("identityStrategy")
+        if not isinstance(strategy, dict) or not (strategy.get("required") or strategy.get("sourceScoped")):
+            raise ValueError("NEW_ENTITY_TYPE requires identityStrategy.required or sourceScoped")
+    if proposal_type == SchemaProposalType.NEW_RELATIONSHIP and payload.get("cardinality", "MANY_TO_MANY") not in {item.value for item in RelationshipCardinality}:
+        raise ValueError("NEW_RELATIONSHIP requires a supported cardinality")
+
+
+def _next_version_code(version: str) -> str:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version.strip())
+    if not match:
+        raise ValueError(f"Cannot allocate a semantic version from {version!r}")
+    major, minor, patch = (int(value) for value in match.groups())
+    return f"v{major}.{minor}.{patch + 1}"
 
 
 def _digest(value: Any) -> str:

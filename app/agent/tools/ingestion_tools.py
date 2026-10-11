@@ -58,8 +58,8 @@ SchemaProposalTypeLiteral = Literal[
 
 async def begin_ingestion(
     artifact_name: str,
+    document_key: str,
     tool_context: ToolContext,
-    document_key: str | None = None,
     scope_hint: str | None = None,
 ) -> dict[str, Any]:
     """Khởi tạo mới hoặc tái sử dụng phiên ingestion còn tồn tại trong tiến trình hiện tại (RAM).
@@ -505,6 +505,12 @@ async def finalize_ingestion(
         container = await get_service_container()
         workspace = await operations.finalize(container.repository, ingestion_id)
         result = _finalize_result_payload(workspace)
+        if workspace.job.status == IngestionJobStatus.READY:
+            result = await operations.build_preview(
+                container.repository, container.graph_store, ingestion_id,
+                await container.ontology_lifecycle.ingestion_schema_changes(ingestion_id),
+                await container.ontology_lifecycle.active_version_id(),
+            )
         # 3. Lưu checkpoint trạng thái
         _store_checkpoint(tool_context, result)
 
@@ -542,66 +548,65 @@ async def fill_ingestion(
     Returns:
         dict[str, Any]: Tóm tắt kết quả ghi đồ thị vào Neo4j (nodes, edges, facts, readbackVerified).
     """
-    # 1. Chuẩn bị request trace
-    req = {"ingestion_id": ingestion_id}
+    del tool_context
+    return _tool_error(
+        "commit_approval", "APPROVAL_REQUIRED",
+        "Use the human-confirmed commit_ingestion tool with the preview digest",
+    )
+
+
+async def get_ingestion_preview(
+    ingestion_id: str, tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Read the immutable, source-backed change report before approval."""
+    del tool_context
     try:
-        # 2. Lấy thông tin workspace và tổng hợp payload chuẩn bị ghi (FILL)
         container = await get_service_container()
-        workspace = await operations.required_workspace(
-            container.repository, ingestion_id
-        )
-        fragments = [
-            item.graph_fragment for item in workspace.batches if item.graph_fragment
-        ]
+        return await container.repository.get_preview(ingestion_id)
+    except Exception as exc:  # noqa: BLE001
+        return _tool_exception("preview", ingestion_id, exc)
 
-        fill_prep = {
-            "entities_count": sum(len(f.get("nodes", [])) for f in fragments),
-            "entities": [
-                {
-                    "className": n.get("className"),
-                    "identity": n.get("identity"),
-                    "tempId": n.get("tempId"),
-                }
-                for f in fragments
-                for n in f.get("nodes", [])
-            ],
-            "facts_count": sum(
-                len(n.get("properties", []))
-                for f in fragments
-                for n in f.get("nodes", [])
-            ),
-            "relations_count": sum(len(f.get("edges", [])) for f in fragments),
-            "relations": [
-                {
-                    "edgeName": e.get("edgeName"),
-                    "sourceTempId": e.get("sourceTempId"),
-                    "targetTempId": e.get("targetTempId"),
-                    "properties": e.get("properties", {}),
-                }
-                for f in fragments
-                for e in f.get("edges", [])
-            ],
-            "chunks_count": len(workspace.chunks),
-        }
 
-        # 3. Ghi vào Neo4j và đối soát readback
-        result = await operations.fill(
-            container.repository, container.graph_store, ingestion_id
+async def commit_ingestion(
+    ingestion_id: str, report_digest: str, tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Publish only the report confirmed by the human in ADK."""
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+    if confirmation is None or not confirmation.confirmed:
+        return _tool_error("commit_approval", "APPROVAL_REQUIRED", "Human tool confirmation is required")
+    try:
+        container = await get_service_container()
+        workspace = await container.repository.get_workspace(ingestion_id)
+        if workspace is None:
+            raise KeyError(ingestion_id)
+        if workspace.job.status == IngestionJobStatus.AWAITING_COMMIT_APPROVAL:
+            await container.repository.record_commit_approval(
+                ingestion_id, report_digest,
+                user_id=tool_context.user_id,
+                session_id=tool_context.session.id,
+                function_call_id=tool_context.function_call_id,
+            )
+        result = await operations.commit(
+            container.repository, container.graph_store, ingestion_id,
+            report_digest, container.ontology_lifecycle,
         )
-        # 4. Lưu checkpoint và ghi log chi tiết
         _store_checkpoint(tool_context, result)
-        merged_payload = {
-            **result,
-            "fillPreparation": fill_prep,
-        }
-        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=merged_payload, request=req)
+        log_ingestion_event("COMMIT_INGESTION", payload=result,
+                            request={"ingestion_id": ingestion_id, "report_digest": report_digest})
         return result
-    except Exception as exc:  # noqa: BLE001 - ADK tool boundary must return structured errors
-        # 5. Bắt lỗi và trả về phản hồi lỗi
-        result = _tool_exception("fill", ingestion_id, exc)
-        _store_checkpoint(tool_context, result)
-        log_ingestion_event("FILL_COMMIT_TO_NEO4J", payload=result, request=req)
-        return result
+    except Exception as exc:  # noqa: BLE001
+        return _tool_exception("commit", ingestion_id, exc)
+
+
+async def abort_ingestion(ingestion_id: str) -> dict[str, Any]:
+    """Discard an uncommitted ingestion draft without publishing its graph."""
+    try:
+        container = await get_service_container()
+        workspace = await container.repository.abort(ingestion_id)
+        await container.ontology_lifecycle.discard_ingestion_draft(ingestion_id)
+        return operations.status_payload(workspace)
+    except Exception as exc:  # noqa: BLE001
+        return _tool_exception("abort", ingestion_id, exc)
 
 
 async def get_ingestion_status(
@@ -624,6 +629,15 @@ async def get_ingestion_status(
             container.repository, ingestion_id
         )
         result = operations.status_payload(workspace)
+        conflicts = await container.repository.list_fact_conflicts(ingestion_id)
+        result["pendingConflictCount"] = sum(
+            item["decision"] == "PENDING" for item in conflicts
+        )
+        proposals = await container.ontology_lifecycle.ingestion_schema_changes(ingestion_id)
+        result["pendingProposalCount"] = sum(
+            item["status"] == "PROPOSED" for item in proposals
+        )
+        result["reportDigest"] = workspace.job.summary.get("reportDigest")
         # 2. Lưu checkpoint trạng thái
         _store_checkpoint(tool_context, result)
         return result
@@ -632,6 +646,38 @@ async def get_ingestion_status(
         result = _tool_exception("status", ingestion_id, exc)
         _store_checkpoint(tool_context, result)
         return result
+
+
+async def list_ingestion_conflicts(
+    ingestion_id: str, tool_context: ToolContext
+) -> dict[str, Any]:
+    """Return each source-backed conflict awaiting a human decision."""
+    del tool_context
+    try:
+        container = await get_service_container()
+        conflicts = await container.repository.list_fact_conflicts(ingestion_id)
+        return {"success": True, "ingestionId": ingestion_id, "conflicts": conflicts}
+    except Exception as exc:  # noqa: BLE001
+        return _tool_exception("conflict_list", ingestion_id, exc)
+
+
+async def review_ingestion_conflict(
+    conflict_id: str,
+    decision: Literal["CONFIRM", "REJECT", "OTHER"],
+    tool_context: ToolContext,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Record one human choice: confirm new fact, reject it, or leave a note."""
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+    if confirmation is None or not confirmation.confirmed:
+        return _tool_error("conflict_review", "APPROVAL_REQUIRED", "Human confirmation is required")
+    try:
+        container = await get_service_container()
+        conflict = await container.repository.review_fact_conflict(conflict_id, decision, note)
+        preview = await container.repository.get_preview(str(conflict["ingestionId"]))
+        return {"success": True, "conflict": conflict, "reportDigest": preview["reportDigest"]}
+    except Exception as exc:  # noqa: BLE001
+        return _tool_exception("conflict_review", None, exc)
 
 
 async def create_schema_proposal(
@@ -780,8 +826,8 @@ async def get_schema_proposal(
 async def review_schema_proposal(
     proposal_id: str,
     approved: bool,
-    reviewed_by: str,
     tool_context: ToolContext,
+    reviewed_by: str | None = None,
 ) -> dict[str, Any]:
     """Ghi nhận quyết định phê duyệt hoặc từ chối đề xuất lược đồ vào PostgreSQL.
 
@@ -794,6 +840,9 @@ async def review_schema_proposal(
     Returns:
         dict[str, Any]: Kết quả cập nhật trạng thái đề xuất (APPROVED hoặc REJECTED).
     """
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+    if confirmation is None or not confirmation.confirmed:
+        return _tool_error("schema_proposal_review", "APPROVAL_REQUIRED", "Human confirmation is required")
     # 1. Xác định proposal_id hiệu lực từ tham số hoặc context state
     effective_proposal_id = (
         str(proposal_id).strip()
@@ -803,13 +852,13 @@ async def review_schema_proposal(
     req = {
         "proposal_id": effective_proposal_id,
         "approved": approved,
-        "reviewed_by": reviewed_by,
+        "reviewed_by": "human-confirmed",
     }
     try:
         # 2. Cập nhật quyết định phê duyệt vào database
         container = await get_service_container()
         proposal = await container.ontology_lifecycle.review_proposal(
-            effective_proposal_id, approved=approved, reviewed_by=reviewed_by
+            effective_proposal_id, approved=approved, reviewed_by="human-confirmed"
         )
         tool_context.state["pending_schema_proposal_id"] = str(proposal.id)
         # 3. Nếu từ chối, cập nhật trạng thái batch trong RAM sang reject
@@ -851,11 +900,9 @@ async def review_schema_proposal(
 
 async def apply_schema_proposal(
     proposal_id: str,
-    new_version_code: str,
-    applied_by: str,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Áp dụng đề xuất đã APPROVED bằng cách biên dịch và kích hoạt phiên bản ontology mới trong PostgreSQL.
+    """Compile an approved proposal into the job's inactive ontology draft.
 
     Args:
         proposal_id (str): Mã định danh đề xuất đã được duyệt.
@@ -874,21 +921,20 @@ async def apply_schema_proposal(
     )
     req = {
         "proposal_id": effective_proposal_id,
-        "new_version_code": new_version_code,
-        "applied_by": applied_by,
+        "draft_only": True,
     }
     try:
         # 2. Biên dịch và kích hoạt phiên bản ontology mới trong DB
         container = await get_service_container()
         version = await container.ontology_lifecycle.apply_proposal(
             effective_proposal_id,
-            new_version_code=new_version_code,
-            applied_by=applied_by,
+            new_version_code=None,
+            applied_by="human-confirmed",
         )
         # 3. Trả về kết quả apply thành công
         result = {
             "success": True,
-            "stage": "schema_proposal_applied",
+            "stage": "schema_draft_prepared",
             "proposalId": effective_proposal_id,
             "ontologyVersionId": str(version.id),
             "ontologyVersion": version.version,
@@ -934,13 +980,13 @@ async def rebase_ingestion(
             _store_checkpoint(tool_context, guarded)
             log_ingestion_event("REBASE_INGESTION", payload=guarded, request=req)
             return guarded
-        # 3. Kiểm tra xem ontology mục tiêu có đang ACTIVE hay không
+        # 3. A job may rebase to its own approved DRAFT or current ACTIVE version.
         active = await container.ontology_cache.active_version()
-        if target_ontology_version_id != active.version_id:
+        if target_ontology_version_id != active.version_id and not await container.ontology_lifecycle.is_ingestion_draft(ingestion_id, target_ontology_version_id):
             return _tool_error(
                 "ontology_rebase",
-                "TARGET_ONTOLOGY_NOT_ACTIVE",
-                "A job can only be explicitly rebased to the current ACTIVE ontology version.",
+                "TARGET_ONTOLOGY_NOT_ALLOWED",
+                "Rebase only to the current ACTIVE version or this job's DRAFT.",
             )
         # 4. Lập chỉ mục hash schema của các scopes mục tiêu
         catalog = await container.ontology_cache.list_scopes(target_ontology_version_id)
@@ -1066,8 +1112,12 @@ INGESTION_TOOLS = (
     get_ingestion_batch,
     submit_ingestion_batch,
     finalize_ingestion,
-    fill_ingestion,
+    get_ingestion_preview,
+    commit_ingestion,
+    abort_ingestion,
     get_ingestion_status,
+    list_ingestion_conflicts,
+    review_ingestion_conflict,
     list_ontology_scopes,
     load_ontology_scopes,
     create_schema_proposal,
@@ -1088,7 +1138,11 @@ INGESTION_ROOT_TOOLS = (
     apply_schema_proposal,
     rebase_ingestion,
     finalize_ingestion,
-    fill_ingestion,
+    get_ingestion_preview,
+    commit_ingestion,
+    abort_ingestion,
+    list_ingestion_conflicts,
+    review_ingestion_conflict,
 )
 
 INGESTION_BATCH_TOOLS = (
@@ -1107,7 +1161,8 @@ def get_ingestion_tools() -> list:
         list: Danh sách các callable tools.
     """
     # 1. Trả về danh sách callable tools từ tuple INGESTION_TOOLS
-    return list(INGESTION_TOOLS)
+    from app.agent.skills.ingestion.tools import get_tools
+    return get_tools()
 
 
 def get_ingestion_root_tools() -> list:

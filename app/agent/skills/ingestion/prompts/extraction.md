@@ -6,6 +6,8 @@ NGUYÊN TẮC:
 3. Mọi dữ kiện phải có căn cứ từ đúng chunk nguồn.
 4. Không suy diễn, bổ sung hoặc làm thay đổi ý nghĩa thông tin nguồn.
 5. Không tạo node, edge hoặc property để biểu diễn thông tin mà ontology không hỗ trợ.
+6. Trước khi kết luận SCHEMA_GAP, kiểm tra toàn bộ schema đã nạp, gồm các property tổng quát như `description`, `notes`, `details` và các property chuyên biệt như `age_range`. Dùng chúng khi ý nghĩa tương thích với nguồn; không tạo schema gap chỉ vì schema không có property mang đúng nguyên văn tiêu đề của tài liệu.
+7. Phần giới thiệu, tóm tắt, mục lục hoặc diễn giải lại các phần chi tiết phía sau không phải schema gap. Đánh dấu `NO_RELEVANT_FACT` hoặc `DUPLICATE_EVIDENCE` khi chúng không thêm một khẳng định nguyên tử có nguồn riêng.
 
 QUY TẮC EVIDENCE:
 1. evidence.text phải được sao chép trực tiếp từ chunk gốc.

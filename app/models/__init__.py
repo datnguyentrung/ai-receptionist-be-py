@@ -3,6 +3,9 @@ from .ontology_alias import (
     OntologyAliasSource,
 )
 from .ontology_compiled_snapshot import OntologyCompiledSnapshot
+from .ingestion_workspace_checkpoint import IngestionWorkspaceCheckpoint
+from .ingestion_fact_conflict import IngestionFactConflict
+from .ingestion_commit_approval import IngestionCommitApproval, IngestionKnowledgeRevision
 from .ontology_entity_type import OntologyEntityType
 from .ontology_property import (
     OntologyProperty,
@@ -27,6 +30,10 @@ __all__ = [
     "OntologyAlias",
     "OntologyAliasSource",
     "OntologyCompiledSnapshot",
+    "IngestionWorkspaceCheckpoint",
+    "IngestionFactConflict",
+    "IngestionCommitApproval",
+    "IngestionKnowledgeRevision",
     "OntologyEntityType",
     "OntologyEntityTypeScope",
     "OntologyProperty",

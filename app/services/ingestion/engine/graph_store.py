@@ -44,6 +44,7 @@ from typing import Any, cast
 from neo4j import AsyncDriver
 
 from app.services.graphrag.embeddings import GeminiEmbeddingProvider
+from app.services.ingestion.engine.assertions import temporal_interval
 from app.services.ingestion.engine.repository import Workspace
 
 CHUNK_VECTOR_INDEX = "taekwondo_chunk_embedding"
@@ -162,34 +163,149 @@ class Neo4jIngestionStore:
                 await (await session.run(cast(Any, statement))).consume()
 
     async def fill(self, workspace: Workspace) -> dict[str, Any]:
-        """
-        Ghi chính thức đồ thị tri thức, chunks, facts, embeddings và provenance vào Neo4j trong một giao dịch nguyên tử.
+        """Retired write path; only an approved, checkpointed commit can publish."""
+        del workspace
+        raise PermissionError("Use the human-confirmed commit_ingestion workflow")
 
-        Args:
-            workspace: Đối tượng Workspace chứa dữ liệu đã sẵn sàng ghi.
-
-        Returns:
-            dict[str, Any]: Kết quả xác nhận số lượng nút, cạnh, facts và chunks đã ghi vào Neo4j.
-        """
-        # 1. Thu thập tất cả graph fragment từ các batch
-        fragments = [
-            item.graph_fragment for item in workspace.batches if item.graph_fragment
-        ]
-        # 2. Hợp nhất các fragment thành tập nodes và edges hoàn chỉnh
+    async def preview_payload(self, workspace: Workspace) -> dict[str, Any]:
+        """Normalize assertions without writing Neo4j or requesting embeddings."""
+        fragments = [item.graph_fragment for item in workspace.batches if item.graph_fragment]
         nodes, edges = _merge_fragments(fragments)
-        # 3. Tạo payload GraphRAG kèm vector embeddings
-        payload = await _build_graphrag_payload(
-            workspace,
-            nodes,
-            edges,
-            self._embedding_provider,
-        )
-        # 4. Thực thi ghi dữ liệu và đối soát trong session Neo4j
+        return await _build_graphrag_payload(workspace, nodes, edges, None)
+
+    async def prepare_version(self, workspace: Workspace) -> dict[str, Any]:
+        """Write a source version hidden from public retrieval until publication."""
+        fragments = [item.graph_fragment for item in workspace.batches if item.graph_fragment]
+        nodes, edges = _merge_fragments(fragments)
+        payload = await _build_graphrag_payload(workspace, nodes, edges, self._embedding_provider)
         async with self._driver.session(database=self._database) as session:
-            return await session.execute_write(self._write_and_verify, payload)
+            return await session.execute_write(self._write_and_verify, payload, False)
+
+    async def version_status(self, version_id: str) -> str | None:
+        rows = await self._data(
+            "MATCH (v:TaekwondoSourceVersion {versionId: $version_id}) RETURN v.status AS status",
+            version_id=version_id,
+        )
+        return rows[0]["status"] if rows else None
+
+    async def current_assertions(self, subject_keys: list[str]) -> list[dict[str, Any]]:
+        if not subject_keys:
+            return []
+        return await self._data(
+            """
+            MATCH (v:TaekwondoSourceVersion)-[:ASSERTS_FACT]->
+                  (f:TaekwondoKnowledgeFact)-[:SUBJECT]->(subject:TaekwondoKnowledgeEntity)
+            WHERE subject.stableKey IN $subject_keys
+              AND (v.status = 'COMMITTED' OR
+                (v.status = 'SUPERSEDED' AND EXISTS {
+                  MATCH (newFact:TaekwondoKnowledgeFact)-[review:CONFLICTS_WITH]->(f)
+                  MATCH (:TaekwondoSourceVersion {versionId: newFact.versionId, status: 'COMMITTED'})
+                  WHERE review.decision = 'REJECT'
+                }))
+              AND NOT EXISTS {
+                MATCH (f)-[r:CONFLICTS_WITH]->(:TaekwondoKnowledgeFact)
+                WHERE r.decision = 'REJECT'
+              }
+              AND NOT EXISTS {
+                MATCH (:TaekwondoKnowledgeFact)-[r:CONFLICTS_WITH]->(f)
+                WHERE r.decision = 'CONFIRM'
+              }
+            OPTIONAL MATCH (f)-[:SUPPORTED_BY]->(chunk:TaekwondoChunk)
+            RETURN f.factId AS factId, f.factType AS factType, f.predicate AS predicate,
+                   f.valueJson AS valueJson, f.validFrom AS validFrom, f.validTo AS validTo,
+                   subject.stableKey AS subjectKey, v.versionId AS versionId,
+                   v.documentName AS documentName,
+                   collect(DISTINCT chunk.sourceAnchor) AS sourceAnchors
+            """,
+            subject_keys=subject_keys,
+        )
+
+    async def current_entity_keys(self, stable_keys: list[str]) -> set[str]:
+        if not stable_keys:
+            return set()
+        rows = await self._data(
+            """
+            MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})-[:ASSERTS_ENTITY]->(e:TaekwondoKnowledgeEntity)
+            WHERE e.stableKey IN $stable_keys
+            RETURN DISTINCT e.stableKey AS stableKey
+            """, stable_keys=stable_keys,
+        )
+        return {row["stableKey"] for row in rows}
+
+    async def current_relation_keys(self, edges: list[dict[str, Any]]) -> set[tuple[str, str, str, str]]:
+        if not edges:
+            return set()
+        rows = await self._data(
+            """
+            UNWIND $edges AS edge
+            MATCH (s:TaekwondoKnowledgeEntity {stableKey: edge.sourceKey})-
+                  [r:TAEKWONDO_RELATION {relationType: edge.edgeName}]->
+                  (t:TaekwondoKnowledgeEntity {stableKey: edge.targetKey})
+            MATCH (:TaekwondoSourceVersion {versionId: r.versionId, status: 'COMMITTED'})
+            WHERE r.propertiesJson = edge.propertiesJson
+            RETURN DISTINCT edge.sourceKey AS sourceKey, edge.targetKey AS targetKey,
+                   edge.edgeName AS edgeName, edge.propertiesJson AS propertiesJson
+            """, edges=edges,
+        )
+        return {(row["sourceKey"], row["targetKey"], row["edgeName"], row["propertiesJson"])
+                for row in rows}
+
+    async def publish_version(
+        self, version_id: str, previous_version_id: str | None,
+        conflicts: list[dict[str, Any]], supports: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically expose new assertions and retire only the prior *current* version."""
+        async with self._driver.session(database=self._database) as session:
+            return await session.execute_write(
+                self._publish_tx, version_id, previous_version_id, conflicts, supports
+            )
 
     @staticmethod
-    async def _write_and_verify(tx: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _publish_tx(
+        tx: Any, version_id: str, previous_version_id: str | None,
+        conflicts: list[dict[str, Any]], supports: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        record = await (await tx.run(
+            """
+            MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
+            WHERE v.status IN ['PREPARED', 'COMMITTED']
+            SET v.status = 'COMMITTED', v.committedAt = coalesce(v.committedAt, datetime())
+            RETURN v.versionId AS versionId
+            """, version_id=version_id,
+        )).single()
+        if record is None:
+            raise RuntimeError("Prepared source version is missing")
+        if previous_version_id and previous_version_id != version_id:
+            await (await tx.run(
+                """
+                MATCH (old:TaekwondoSourceVersion {versionId: $previous_version_id})
+                WHERE old.status IN ['COMMITTED', 'SUPERSEDED']
+                SET old.status = 'SUPERSEDED', old.supersededAt = coalesce(old.supersededAt, datetime())
+                """, previous_version_id=previous_version_id,
+            )).consume()
+        if conflicts:
+            await (await tx.run(
+                """
+                UNWIND $conflicts AS item
+                MATCH (newFact:TaekwondoKnowledgeFact {factId: item.newFactId})
+                MATCH (oldFact:TaekwondoKnowledgeFact {factId: item.oldFactId})
+                MERGE (newFact)-[review:CONFLICTS_WITH {conflictId: item.conflictId}]->(oldFact)
+                SET review.decision = item.decision, review.note = item.note
+                """, conflicts=conflicts,
+            )).consume()
+        if supports:
+            await (await tx.run(
+                """
+                UNWIND $supports AS item
+                MATCH (newFact:TaekwondoKnowledgeFact {factId: item.newFactId})
+                MATCH (oldFact:TaekwondoKnowledgeFact {factId: item.oldFactId})
+                MERGE (newFact)-[:SUPPORTS_SAME_ASSERTION]->(oldFact)
+                """, supports=supports,
+            )).consume()
+        return {"commitStatus": "COMMITTED", "versionId": version_id}
+
+    @staticmethod
+    async def _write_and_verify(tx: Any, payload: dict[str, Any], publish: bool = True) -> dict[str, Any]:
         """
         Thực thi các câu lệnh Cypher ghi dữ liệu và kiểm tra đối soát số lượng bản ghi thực tế trong Neo4j.
 
@@ -209,6 +325,7 @@ class Neo4jIngestionStore:
                 """
                 MERGE (v:TaekwondoSourceVersion {versionId: $version_id})
                 SET v.documentId = $document_id,
+                    v.documentKey = $document_key,
                     v.documentName = $document_name,
                     v.ontologyVersionId = $ontology_version_id,
                     v.status = 'WRITTEN', v.updatedAt = datetime()
@@ -217,6 +334,7 @@ class Neo4jIngestionStore:
                     payload,
                     "version_id",
                     "document_id",
+                    "document_key",
                     "document_name",
                     "ontology_version_id",
                 ),
@@ -285,11 +403,11 @@ class Neo4jIngestionStore:
                 UNWIND $nodes AS node
                 MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
                 MERGE (n:TaekwondoKnowledgeEntity {stableKey: node.stableKey})
-                ON CREATE SET n.createdAt = datetime()
+                ON CREATE SET n.createdAt = datetime(),
+                    n.propertiesJson = '{}',
+                    n.searchText = node.searchText
                 SET n.entityType = node.className,
                     n.identityJson = node.identityJson,
-                    n.propertiesJson = node.propertiesJson,
-                    n.searchText = node.searchText,
                     n.updatedAt = datetime()
                 MERGE (v)-[:ASSERTS_ENTITY {tempId: node.tempId}]->(n)
                 """,
@@ -355,6 +473,10 @@ class Neo4jIngestionStore:
                         f.statement = fact.statement,
                         f.predicate = fact.predicate,
                         f.valueJson = fact.valueJson,
+                        f.chunkIds = fact.evidenceChunkIds,
+                        f.subjectKey = fact.subjectKey,
+                        f.validFrom = fact.validFrom,
+                        f.validTo = fact.validTo,
                         f.confidence = fact.confidence,
                         f.embedding = fact.embedding,
                         f.embeddingModel = $embedding_model,
@@ -416,10 +538,12 @@ class Neo4jIngestionStore:
                 OPTIONAL MATCH (v)-[:HAS_CHUNK]->(c:TaekwondoChunk)
                 WITH v, nodes, edges, count(DISTINCT c) AS chunks
                 OPTIONAL MATCH (v)-[:ASSERTS_FACT]->(f:TaekwondoKnowledgeFact)
-                SET v.status = 'COMMITTED', v.committedAt = datetime()
+                SET v.status = $final_status,
+                    v.committedAt = CASE WHEN $final_status = 'COMMITTED' THEN datetime() ELSE v.committedAt END
                 RETURN nodes, edges, chunks, count(DISTINCT f) AS facts
                 """,
                 version_id=payload["version_id"],
+                final_status="COMMITTED" if publish else "PREPARED",
             )
         ).single()
         actual = {
@@ -438,7 +562,7 @@ class Neo4jIngestionStore:
             raise RuntimeError(
                 f"Neo4j read-back mismatch: expected {expected}, got {actual}"
             )
-        return {"commitStatus": "COMMITTED", **actual, "readbackVerified": True}
+        return {"commitStatus": "COMMITTED" if publish else "PREPARED", **actual, "readbackVerified": True}
 
     async def search_chunk_vector(
         self, embedding: list[float], limit: int
@@ -594,6 +718,10 @@ class Neo4jIngestionStore:
             MATCH (seed:TaekwondoKnowledgeEntity)
             WHERE seed.stableKey IN $stable_keys
             MATCH path=(seed)-[:TAEKWONDO_RELATION*0..2]-(entity:TaekwondoKnowledgeEntity)
+            WHERE all(relation IN relationships(path) WHERE
+              EXISTS {
+                MATCH (:TaekwondoSourceVersion {versionId: relation.versionId, status: 'COMMITTED'})
+              })
             MATCH (entity)-[:MENTIONED_IN]->(chunk:TaekwondoChunk)
             MATCH (version:TaekwondoSourceVersion {
               versionId: chunk.versionId, status: 'COMMITTED'
@@ -672,8 +800,18 @@ class Neo4jIngestionStore:
         Returns:
             dict[str, Any]: Thống kê số lượng nút và quan hệ đã bị gỡ bỏ.
         """
-        async with self._driver.session(database=self._database) as session:
-            return await session.execute_write(self._deactivate_tx, version_id, status)
+        if status not in {"SUPERSEDED", "DELETED", "ROLLED_BACK"}:
+            raise ValueError("Unsupported source version status")
+        rows = await self._data(
+            """
+            MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
+            SET v.status = $status, v.updatedAt = datetime()
+            RETURN v.versionId AS versionId
+            """,
+            version_id=version_id, status=status,
+        )
+        return {"versionId": version_id, "status": status, "found": bool(rows),
+                "removedNodes": 0, "removedRelationships": 0}
 
     async def committed_summary(self, version_id: str) -> dict[str, Any] | None:
         """
@@ -841,7 +979,7 @@ async def _build_graphrag_payload(
     workspace: Workspace,
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
-    embedding_provider: GeminiEmbeddingProvider,
+    embedding_provider: GeminiEmbeddingProvider | None,
 ) -> dict[str, Any]:
     """
     Xây dựng payload dữ liệu hoàn chỉnh bao gồm chunks, nodes, edges, facts và vector embeddings.
@@ -880,11 +1018,12 @@ async def _build_graphrag_payload(
         for item in workspace.chunks
     ]
     # Tạo embedding cho tất cả các chunk
-    chunk_vectors = await embedding_provider.embed_documents(
-        [str(item["text"]) for item in chunks]
-    )
-    for chunk, vector in zip(chunks, chunk_vectors, strict=True):
-        chunk["embedding"] = vector
+    if embedding_provider is not None:
+        chunk_vectors = await embedding_provider.embed_documents(
+            [str(item["text"]) for item in chunks]
+        )
+        for chunk, vector in zip(chunks, chunk_vectors, strict=True):
+            chunk["embedding"] = vector
 
     normalized_nodes: list[dict[str, Any]] = []
     node_by_temp: dict[str, dict[str, Any]] = {}
@@ -913,7 +1052,7 @@ async def _build_graphrag_payload(
             "className": node["className"],
             "identityJson": _json(identity),
             "propertiesJson": _json(properties),
-            "searchText": _search_text(node["className"], identity, properties),
+            "searchText": _search_text(node["className"], identity, {}),
         }
         normalized_nodes.append(normalized)
         node_by_temp[node["tempId"]] = normalized
@@ -976,7 +1115,7 @@ async def _build_graphrag_payload(
         )
 
     # Tạo vector embedding cho tất cả các fact
-    if facts:
+    if facts and embedding_provider is not None:
         fact_vectors = await embedding_provider.embed_documents(
             [str(item["statement"]) for item in facts]
         )
@@ -990,11 +1129,12 @@ async def _build_graphrag_payload(
     return {
         "version_id": version_id,
         "document_id": document_id,
+        "document_key": workspace.document.document_key,
         "document_name": getattr(workspace.document, "name", ""),
         "ontology_version_id": str(
             getattr(workspace.version, "ontology_version_id", "")
         ),
-        "embedding_model": embedding_provider.model,
+        "embedding_model": embedding_provider.model if embedding_provider is not None else "",
         "chunks": ordered_chunks,
         "chunk_links": [
             {"from": left["chunkId"], "to": right["chunkId"]}
@@ -1122,12 +1262,15 @@ def _fact(
             }
         ).encode("utf-8")
     ).hexdigest()
+    valid_from, valid_to = temporal_interval(predicate, value, evidence)
     return {
         "factId": fact_id,
         "factType": fact_type,
         "statement": statement,
         "predicate": predicate,
         "valueJson": _json(value),
+        "validFrom": valid_from,
+        "validTo": valid_to,
         "subjectKey": subject_key,
         "objectKey": object_key,
         "evidenceChunkIds": sorted(
