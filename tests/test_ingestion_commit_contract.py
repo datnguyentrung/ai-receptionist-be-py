@@ -140,6 +140,7 @@ def test_preview_is_read_only_and_commit_requires_matching_approval() -> None:
         result = await operations.commit(repo, graph, ingestion_id, digest)
         assert result["readbackVerified"] is True
         assert graph.writes == 1
+        assert (await repo.get_workspace(ingestion_id)).job.error_message is None
         assert await repo.knowledge_revision() == 1
         assert (await operations.commit(repo, graph, ingestion_id, digest))["idempotent"] is True
         assert await repo.knowledge_revision() == 1

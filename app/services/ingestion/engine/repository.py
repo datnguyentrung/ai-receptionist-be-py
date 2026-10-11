@@ -585,6 +585,8 @@ class IngestionRepository:
         now = datetime.now(timezone.utc).isoformat()
         workspace.job.status = IngestionJobStatus.COMMITTED
         workspace.job.stage = "committed"
+        workspace.job.error_stage = None
+        workspace.job.error_message = None
         workspace.job.summary = {**workspace.job.summary, **summary, "committedAt": now, "commitPhase": "COMMITTED"}
         workspace = self._replace_version_status(
             workspace, SourceVersionStatus.COMMITTED
@@ -617,6 +619,18 @@ class IngestionRepository:
         }
         await self._save(workspace)
         return await self.get_preview(ingestion_id)
+
+    async def record_runtime_metadata(
+        self, ingestion_id: str, *, model_assignments: dict[str, str], contract_hash: str
+    ) -> Workspace:
+        """Persist the execution configuration that produced the staged data."""
+        workspace = self._required(ingestion_id)
+        workspace.job.summary = {
+            **workspace.job.summary,
+            "modelAssignments": model_assignments,
+            "contractHash": contract_hash,
+        }
+        return await self._save(workspace)
 
     async def get_preview(self, ingestion_id: str) -> dict[str, Any]:
         workspace = self._required(ingestion_id)

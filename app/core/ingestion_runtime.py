@@ -8,7 +8,9 @@ Mô-đun này cung cấp:
 """
 
 import asyncio
+import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -33,6 +35,20 @@ from app.services.ontology.ontology_compiler import OntologyCompiler
 from app.services.ontology.ontology_lifecycle import OntologyLifecycle
 
 logger = logging.getLogger(__name__)
+
+
+def ingestion_model_assignments() -> dict[str, str]:
+    """Read the role-specific model configuration for a new ingestion job."""
+    defaults = {
+        "extract": "gemini-3.5-flash-lite",
+        "repair": "gemini-3.5-flash-lite",
+        "routing": "gemini-3.1-flash-lite",
+        "evidence": "gemini-3.1-flash-lite",
+    }
+    return {
+        role: os.getenv(f"GOOGLE_ADK_INGESTION_{role.upper()}_MODEL", default)
+        for role, default in defaults.items()
+    }
 
 
 @dataclass
@@ -204,12 +220,12 @@ async def build_service_container() -> ServiceContainer:
         embedding_provider=embedding_provider,
         repository=repository,
         ontology_cache=ontology_cache,
-        model_id=settings.GOOGLE_ADK_MODEL,
+        model_id=json.dumps(ingestion_model_assignments(), sort_keys=True),
         ontology_lifecycle=ontology_lifecycle,
         max_file_size=settings.INGESTION_MAX_FILE_SIZE_BYTES,
         chunk_size_chars=settings.INGESTION_CHUNK_SIZE_CHARS,
         batch_size=settings.INGESTION_BATCH_SIZE,
-        skill_digest="v1",
+        skill_digest="ingestion-contract-v2",
         ready=True,
     )
 

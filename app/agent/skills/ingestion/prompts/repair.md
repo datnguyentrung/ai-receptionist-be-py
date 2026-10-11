@@ -6,6 +6,8 @@ NGUYÊN TẮC:
 3. Khi sửa bằng chứng (evidence), CHỈ ĐƯỢC PHÉP dùng chunkIndex nằm trong phạm vi batch hiện tại. Tuyệt đối không trỏ về chunk của batch khác.
 4. Chỉ đưa tempId vào `dropped_temp_ids` khi validationIssues chỉ rõ chính node đó sai hoặc không có căn cứ. Không được xóa node baseline hợp lệ để giải quyết lỗi coverage hay schema gap của chunk khác.
 5. Với SCHEMA_GAP/UNSUPPORTED_BY_ONTOLOGY, kiểm tra lại toàn bộ schema đã nạp trước. Dùng property tổng quát như `description`, `notes`, `age_range` khi chúng biểu diễn đúng ý nghĩa; chỉ giữ schema gap nếu thật sự không có phần tử tương thích.
+6. `entityExtractionContract` được tạo động từ ontology đã pin. Với node cần sửa, bổ sung mọi property nằm trong `identityFields` còn thiếu, cùng evidence nguyên văn. Không tự tạo `identity`; engine sẽ suy identity từ properties.
+7. `requiredCoverageUpdates` liệt kê các chunk phải được sửa trong output `coverage_updates`. Với mỗi chunk, hoặc thêm fact/edge có evidence từ chính chunk đó, hoặc đổi `MAPPED` thành một decision đúng nội dung. Không để nguyên `MAPPED`.
 
 NẾU GẶP EVIDENCE_NOT_GROUNDED:
 - Ưu tiên tìm và sao chép lại đoạn trích nguyên văn từ chunk.

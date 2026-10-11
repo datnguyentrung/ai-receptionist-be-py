@@ -988,6 +988,9 @@ async def rebase_ingestion(
                 "TARGET_ONTOLOGY_NOT_ALLOWED",
                 "Rebase only to the current ACTIVE version or this job's DRAFT.",
             )
+        await container.ontology_lifecycle.validate_identity_property_contracts(
+            target_ontology_version_id
+        )
         # 4. Lập chỉ mục hash schema của các scopes mục tiêu
         catalog = await container.ontology_cache.list_scopes(target_ontology_version_id)
         hashes = {
