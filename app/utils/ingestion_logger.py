@@ -744,15 +744,13 @@ from google.adk.plugins.base_plugin import BasePlugin
 
 
 class ADKDetailedLoggerPlugin(BasePlugin):
-    """Plugin tự động ghi nhận mọi Trace, Event, Request, Response, Tool Call, Model Input/Output vào log.txt."""
+    """Ghi lifecycle, tool call, model summary, token usage và lỗi vào log.txt."""
 
     def __init__(self) -> None:
         super().__init__(name="adk_detailed_logger")
 
     async def on_event_callback(self, *, invocation_context: Any, event: Any):
-        author = getattr(event, "author", "system")
-        event_id = getattr(event, "id", None)
-        write_raw_trace(f"⚡ [ADK EVENT TRACE] author={author} id={event_id}", event)
+        del invocation_context, event
 
     async def on_user_message_callback(self, *, invocation_context: Any, user_message: Any):
         text = ""
@@ -760,7 +758,7 @@ class ADKDetailedLoggerPlugin(BasePlugin):
             if hasattr(part, "text") and part.text:
                 text += part.text + "\n"
         write_raw_trace(
-            "👤 USER INPUT MESSAGE", {"message": text.strip(), "raw": user_message}
+            "👤 USER INPUT MESSAGE", {"message": text.strip()}
         )
 
     async def before_agent_callback(self, *, agent: Any, callback_context: Any):
@@ -807,10 +805,14 @@ class ADKDetailedLoggerPlugin(BasePlugin):
             agent = getattr(inv_ctx, "agent", None)
         agent_name = getattr(agent, "name", "unknown")
 
+        contents = getattr(llm_request, "contents", None) or []
         req_data = {
             "agent": agent_name,
             "model": getattr(llm_request, "model", None),
-            "contents": getattr(llm_request, "contents", None),
+            "contentCount": len(contents),
+            "contentPartCount": sum(
+                len(getattr(content, "parts", None) or []) for content in contents
+            ),
             "tools": [
                 getattr(t, "name", str(t))
                 for t in (getattr(llm_request, "tools", []) or [])
@@ -844,10 +846,11 @@ class ADKDetailedLoggerPlugin(BasePlugin):
             "agent": agent_name,
             "text": text.strip() if text else None,
             "functionCalls": function_calls if function_calls else None,
-            "usage": getattr(llm_response, "usage_metadata", None),
         }
         write_raw_trace(f"📥 [MODEL CALL RESPONSE] ({agent_name})", resp_data)
-        _write_token_usage_trace(agent_name, resp_data["usage"])
+        _write_token_usage_trace(
+            agent_name, getattr(llm_response, "usage_metadata", None)
+        )
 
     async def on_model_error_callback(
         self, *, callback_context: Any, llm_request: Any, error: Exception
