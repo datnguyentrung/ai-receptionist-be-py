@@ -23,3 +23,5 @@ insightface_data/
 .adk/
 docs/log.txt
 pyright-report.json
+.pytest_tmp/
+.pytest_cache/

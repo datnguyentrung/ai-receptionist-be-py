@@ -1,6 +1,7 @@
 """LLM extraction contracts (Semantic Layer without business identity)."""
 
-from pydantic import Field
+from typing import Any
+from pydantic import Field, model_validator
 
 from app.schemas.ingestion.base import IngestionModel
 from app.schemas.ingestion.coverage import ChunkCoverage
@@ -96,25 +97,56 @@ class SemanticGraphPatchFragment(IngestionModel):
 
 
 class SemanticGraphRepairDelta(IngestionModel):
-    """Mảnh dữ liệu delta bổ sung/sửa đổi khi sửa chữa batch (Repair Batch).
+    """Mảnh dữ liệu sửa chữa (Repair Delta) được trả về bởi LLM trong phase repair.
 
-    Được sử dụng khi LLM thực hiện sửa đổi cục bộ mà không cần gửi lại toàn bộ baseline.
+    Cấu trúc này ép buộc LLM chỉ trả về delta:
+    - repaired_nodes: Chỉ chứa các node cần sửa thuộc tính hoặc bổ sung mới.
+    - repaired_edges: Chỉ chứa các quan hệ mới cần bổ sung hoặc sửa đổi.
+    - dropped_temp_ids: Liệt kê các tempId cần loại bỏ nếu không hợp lệ hoặc không sửa được.
+    - coverage_updates: Cập nhật độ bao phủ cho các chunk bị lỗi.
     """
 
     baseline_fingerprint: str = Field(
         min_length=1,
         description="SHA-256 fingerprint của protected baseline mà delta này sửa chữa.",
     )
+    repaired_nodes: list[SemanticGraphNode] = Field(
+        default_factory=list,
+        description="CHỈ chứa các node cần sửa lỗi thuộc tính hoặc thêm mới. KHÔNG đưa lại các node baseline đã hợp lệ.",
+    )
+    repaired_edges: list[SemanticGraphEdge] = Field(
+        default_factory=list,
+        description="CHỈ chứa các quan hệ cần sửa hoặc thêm mới.",
+    )
+    dropped_temp_ids: list[str] = Field(
+        default_factory=list,
+        description="Danh sách tempId của các node/edge không thể sửa và cần loại bỏ.",
+    )
+    coverage_updates: list[ChunkCoverage] = Field(
+        default_factory=list,
+        description="Cập nhật độ bao phủ cho các chunk bị lỗi.",
+    )
 
-    nodes: list[SemanticGraphNode] = Field(
-        default_factory=list,
-        description="Danh sách các node mới cần bổ sung hoặc cập nhật thuộc tính.",
-    )
-    edges: list[SemanticGraphEdge] = Field(
-        default_factory=list,
-        description="Danh sách các quan hệ mới cần bổ sung.",
-    )
-    coverage: list[ChunkCoverage] = Field(
-        default_factory=list,
-        description="Danh sách cập nhật lại độ bao phủ (coverage) cho các chunk bị lỗi.",
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_legacy_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "nodes" in data and "repaired_nodes" not in data:
+                data["repaired_nodes"] = data.pop("nodes")
+            if "edges" in data and "repaired_edges" not in data:
+                data["repaired_edges"] = data.pop("edges")
+            if "coverage" in data and "coverage_updates" not in data:
+                data["coverage_updates"] = data.pop("coverage")
+        return data
+
+    @property
+    def nodes(self) -> list[SemanticGraphNode]:
+        return self.repaired_nodes
+
+    @property
+    def edges(self) -> list[SemanticGraphEdge]:
+        return self.repaired_edges
+
+    @property
+    def coverage(self) -> list[ChunkCoverage]:
+        return self.coverage_updates

@@ -49,6 +49,7 @@ class RepairGuard:
         previous_canonical_fragment: GraphPatchFragment,
         new_canonical_fragment: GraphPatchFragment,
         previous_validation_issues: list[dict] | None = None,
+        dropped_temp_ids: list[str] | set[str] | None = None,
     ) -> list[ValidationIssue]:
         """
         So sánh fragment mới được nộp lại với fragment baseline trước đó để phát hiện việc xóa dữ liệu hợp lệ.
@@ -57,28 +58,41 @@ class RepairGuard:
             previous_canonical_fragment: Fragment chuẩn hóa ở lần thử trước (baseline).
             new_canonical_fragment: Fragment chuẩn hóa mới vừa được sửa chữa.
             previous_validation_issues: Danh sách các lỗi xác thực ở lần thử trước.
+            dropped_temp_ids: Tập hợp các temp_id được chủ đích loại bỏ qua repair delta.
 
         Returns:
-            list[ValidationIssue]: Danh sách các lỗi nếu phát hiện tri thức hợp lệ bị xóa bỏ.
+            list[ValidationIssue]: Danh sách các lỗi nếu phát hiện tri thức hợp lệ bị xóa bỏ ngoài ý muốn.
         """
-        # 1. Tập hợp các vị trí lỗi ở lần chạy trước
+        # 1. Tập hợp các vị trí lỗi ở lần chạy trước và danh sách dropped_temp_ids
         issue_locations = {
             str(item.get("location") or "")
             for item in (previous_validation_issues or [])
         }
+        dropped_set = set(dropped_temp_ids or [])
         issues: list[ValidationIssue] = []
 
-        # 2. Lập chỉ mục các nút cũ và mới theo stable key
+        # 2. Lập chỉ mục các nút cũ và mới theo stable key và temp_id
         old_nodes = {
             cls._node_key(node): (index, node)
             for index, node in enumerate(previous_canonical_fragment.nodes)
         }
         new_nodes = {cls._node_key(node): node for node in new_canonical_fragment.nodes}
+        new_nodes_by_tempid = {
+            node.temp_id: node for node in new_canonical_fragment.nodes
+        }
 
         # 3. Kiểm tra từng nút cũ xem có bị xóa khi nó không phải nguyên nhân gây lỗi không
         for stable_key, (node_index, old_node) in old_nodes.items():
+            # Nếu nút nằm trong danh sách chủ đích loại bỏ (dropped_temp_ids) -> Hợp lệ, bỏ qua
+            if old_node.temp_id in dropped_set:
+                continue
+
             node_location = f"nodes.{node_index}"
-            if stable_key not in new_nodes:
+            matching_new_node = new_nodes.get(stable_key) or new_nodes_by_tempid.get(
+                old_node.temp_id
+            )
+
+            if matching_new_node is None:
                 # Nếu nút bị xóa nhưng không nằm trong danh sách lỗi trước đó -> Báo lỗi REPAIR_DROPPED_VALID_NODE
                 if not cls._location_was_invalid(node_location, issue_locations):
                     issues.append(
@@ -96,7 +110,7 @@ class RepairGuard:
 
             # 4. Kiểm tra các thuộc tính (properties) của nút
             new_properties = {
-                item.property_name: item for item in new_nodes[stable_key].properties
+                item.property_name: item for item in matching_new_node.properties
             }
             for property_index, old_fact in enumerate(old_node.properties):
                 if old_fact.property_name in new_properties:
@@ -119,6 +133,13 @@ class RepairGuard:
         # 5. Kiểm tra các mối quan hệ (edges) cũ xem có bị xóa ngoài ý muốn không
         new_edges = {cls._edge_key(edge) for edge in new_canonical_fragment.edges}
         for edge_index, old_edge in enumerate(previous_canonical_fragment.edges):
+            # Nếu một trong hai đầu nút của edge nằm trong danh sách drop chủ đích -> Bỏ qua
+            if (
+                old_edge.source_temp_id in dropped_set
+                or old_edge.target_temp_id in dropped_set
+            ):
+                continue
+
             edge_location = f"edges.{edge_index}"
             if cls._edge_key(
                 old_edge
@@ -139,9 +160,10 @@ class RepairGuard:
 
         # 6. Ghi log tổng kết sự khác biệt và số lượng vi phạm
         logger.info(
-            "REPAIR_DIFF previousNodes=%s newNodes=%s rejectedRemovals=%s",
+            "REPAIR_DIFF previousNodes=%s newNodes=%s droppedRequested=%s rejectedRemovals=%s",
             len(previous_canonical_fragment.nodes),
             len(new_canonical_fragment.nodes),
+            len(dropped_set),
             len(issues),
         )
         return issues
