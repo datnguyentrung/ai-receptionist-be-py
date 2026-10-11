@@ -81,6 +81,7 @@ from app.services.ingestion.schema.ontology import (
     validate_coverage_integrity,
 )
 from app.services.ingestion.schema.repair_guard import RepairGuard
+from app.services.ontology.schema_context import SchemaContextService
 from app.utils import (
     stable_entity_key,
     staged_entity_index,
@@ -1029,15 +1030,15 @@ async def list_scopes(
 ) -> dict[str, Any]:
     ontology = await ontology_cache.active_version()
     version_id = ontology_version_id or ontology.version_id
-    scopes = await ontology_cache.list_scopes(version_id)
+    context = await SchemaContextService(ontology_cache).list_scopes(version_id)
     return {
         "success": True,
         "stage": "scope_catalog_loaded",
-        "ontologyVersionId": version_id,
+        "ontologyVersionId": context["ontologyVersionId"],
         "ontologyVersion": ontology.version
         if version_id == ontology.version_id
         else None,
-        "scopes": [item.model_dump(by_alias=True, mode="json") for item in scopes],
+        "scopes": context["scopes"],
     }
 
 
@@ -1057,14 +1058,19 @@ async def load_scope(
     scope_keys: list[str],
     ontology_version_id: str,
 ) -> dict[str, Any]:
-    projection = await ontology_cache.get_many(scope_keys, ontology_version_id)
+    context = await SchemaContextService(ontology_cache).load_context(
+        scope_keys, ontology_version_id
+    )
     return {
         "success": True,
         "stage": "schema_loaded",
         "terminal": False,
         "ingestionId": None,
         "nextAction": "submit_batch",
-        "scope": projection.model_dump(by_alias=True, mode="json"),
+        "scope": context["schema"],
+        "ontologyVersionId": context["ontologyVersionId"],
+        "scopeKeys": context["scopeKeys"],
+        "schemaDigest": context["schemaDigest"],
     }
 
 
