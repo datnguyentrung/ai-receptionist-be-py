@@ -8,7 +8,10 @@ from google.adk.plugins.save_files_as_artifacts_plugin import (
 from app.agent.domains.ingestion.context_filter import (
     compact_ingestion_context as _compact_ingestion_context,
 )
-from app.agent.plugins import ToolAutoCorrectPlugin
+from app.agent.plugins import (
+    SystemInstructionDiagnosticsPlugin,
+    ToolAutoCorrectPlugin,
+)
 from app.agent.routing.agent import create_root_agent
 from app.utils.ingestion_logger import (
     ADKDetailedLoggerPlugin,
@@ -27,6 +30,7 @@ app = App(
     root_agent=root_agent,
     plugins=[
         ToolAutoCorrectPlugin(),
+        SystemInstructionDiagnosticsPlugin(),
         ADKDetailedLoggerPlugin(),
         SaveFilesAsArtifactsPlugin(),
     ],
