@@ -21,7 +21,8 @@ insightface_data/
 
 # ADK local sessions and artifacts
 .adk/
-docs/log.txt
+logs/**
+docs/log*.txt
 pyright-report.json
 .pytest_tmp/
 .pytest_cache/

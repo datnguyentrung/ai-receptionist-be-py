@@ -9,7 +9,7 @@ from typing import Any
 
 from app.core.rate_limiter import global_rate_limiter
 
-LOG_FILE = Path(__file__).resolve().parents[2] / "docs" / "log.txt"
+LOG_FILE = Path(__file__).resolve().parents[2] / "logs" / "log.txt"
 
 
 def reset_log_file() -> None:
@@ -400,14 +400,24 @@ def _format_merge_result(merge_data: dict[str, Any]) -> list[str]:
     # Chi tiết các quan hệ sau gộp (Edges)
     edges_map = merge_data.get("edges", {})
     if edges_map:
-        lines.append(f"     • Chi tiết quan hệ sau gộp ({len(edges_map)} quan hệ duy nhất):")
+        lines.append(
+            f"     • Chi tiết quan hệ sau gộp ({len(edges_map)} quan hệ duy nhất):"
+        )
         for (ename, src, tgt), elist in edges_map.items():
-            b_list = sorted({e.get("batchIndex") for e in elist if e.get("batchIndex") is not None})
-            b_info = f" (từ Batch #{b_list[0]})" if len(b_list) == 1 else f" (gộp từ Batches {b_list})"
+            b_list = sorted(
+                {e.get("batchIndex") for e in elist if e.get("batchIndex") is not None}
+            )
+            b_info = (
+                f" (từ Batch #{b_list[0]})"
+                if len(b_list) == 1
+                else f" (gộp từ Batches {b_list})"
+            )
             lines.append(f"       - [{ename}]: {src} -> {tgt}{b_info}")
             for e in elist:
                 if e.get("properties"):
-                    lines.append(f"         Properties: {_json_str(e.get('properties'))}")
+                    lines.append(
+                        f"         Properties: {_json_str(e.get('properties'))}"
+                    )
                     break
 
     return lines
@@ -420,8 +430,12 @@ def _format_cumulative_graph(cum_graph: dict[str, Any]) -> list[str]:
     nodes = cum_graph.get("nodes", [])
     edges = cum_graph.get("edges", [])
 
-    lines.append(f"     • Tiến độ đã gom: {len(batches)} batches thành công (Batches: {batches})")
-    lines.append(f"     • Tổng thực thể tích lũy: {len(nodes)} nodes | Tổng quan hệ tích lũy: {len(edges)} edges")
+    lines.append(
+        f"     • Tiến độ đã gom: {len(batches)} batches thành công (Batches: {batches})"
+    )
+    lines.append(
+        f"     • Tổng thực thể tích lũy: {len(nodes)} nodes | Tổng quan hệ tích lũy: {len(edges)} edges"
+    )
 
     if nodes:
         lines.append(f"     • Danh sách Nodes đã trích xuất & tích lũy ({len(nodes)}):")
@@ -432,7 +446,10 @@ def _format_cumulative_graph(cum_graph: dict[str, Any]) -> list[str]:
             lines.append(f"       - [{c_name}] tempId={t_id}, identity={ident}")
             props = n.get("properties", [])
             if props:
-                prop_strs = [f"{p.get('propertyName')}={_json_str(p.get('value'))}" for p in props]
+                prop_strs = [
+                    f"{p.get('propertyName')}={_json_str(p.get('value'))}"
+                    for p in props
+                ]
                 lines.append(f"         Thuộc tính: {'; '.join(prop_strs)}")
 
     if edges:
@@ -459,9 +476,7 @@ def _format_fill_result(fill_prep: dict[str, Any], result: dict[str, Any]) -> li
             f"         * [{e.get('className')}] identity={_json_str(e.get('identity'))} (tempId={e.get('tempId')})"
         )
     if len(entities) > 15:
-        lines.append(
-            f"         ... và {len(entities) - 15} entities khác"
-        )
+        lines.append(f"         ... và {len(entities) - 15} entities khác")
 
     lines.append(f"       - facts = {fill_prep.get('facts_count', 0)}")
     lines.append(f"       - relations = {fill_prep.get('relations_count', 0)}")
@@ -488,8 +503,12 @@ def _format_fill_result(fill_prep: dict[str, Any], result: dict[str, Any]) -> li
 
     if result.get("readbackVerified") and (entities or relations):
         lines.append("     ✅ ĐÃ FILL VÀO NEO4J THÀNH CÔNG:")
-        lines.append(f"       - Đã lưu {result.get('nodes', len(entities))} nodes thực thể")
-        lines.append(f"       - Đã lưu {result.get('edges', len(relations))} edges quan hệ")
+        lines.append(
+            f"       - Đã lưu {result.get('nodes', len(entities))} nodes thực thể"
+        )
+        lines.append(
+            f"       - Đã lưu {result.get('edges', len(relations))} edges quan hệ"
+        )
 
     return lines
 
@@ -755,14 +774,14 @@ class ADKDetailedLoggerPlugin(BasePlugin):
     async def on_event_callback(self, *, invocation_context: Any, event: Any):
         del invocation_context, event
 
-    async def on_user_message_callback(self, *, invocation_context: Any, user_message: Any):
+    async def on_user_message_callback(
+        self, *, invocation_context: Any, user_message: Any
+    ):
         text = ""
         for part in getattr(user_message, "parts", []):
             if hasattr(part, "text") and part.text:
                 text += part.text + "\n"
-        write_raw_trace(
-            "👤 USER INPUT MESSAGE", {"message": text.strip()}
-        )
+        write_raw_trace("👤 USER INPUT MESSAGE", {"message": text.strip()})
 
     async def before_agent_callback(self, *, agent: Any, callback_context: Any):
         agent_name = getattr(agent, "name", "unknown_agent")
@@ -775,13 +794,17 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         agent_name = getattr(agent, "name", "unknown_agent")
         write_raw_trace(f"🏁 [AGENT FINISH] {agent_name}")
 
-    async def before_tool_callback(self, *, tool: Any, tool_args: Any, tool_context: Any):
+    async def before_tool_callback(
+        self, *, tool: Any, tool_args: Any, tool_context: Any
+    ):
         tool_name = getattr(tool, "name", str(tool))
         write_raw_trace(
             f"🛠️ [TOOL REQUEST] {tool_name}", {"tool": tool_name, "arguments": tool_args}
         )
 
-    async def after_tool_callback(self, *, tool: Any, tool_args: Any, tool_context: Any, result: Any):
+    async def after_tool_callback(
+        self, *, tool: Any, tool_args: Any, tool_context: Any, result: Any
+    ):
         tool_name = getattr(tool, "name", str(tool))
         write_raw_trace(
             f"📦 [TOOL RESPONSE] {tool_name}", {"tool": tool_name, "result": result}
@@ -832,18 +855,18 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         content = getattr(llm_response, "content", None)
         text = ""
         function_calls = []
-        if content and hasattr(content, "parts"):
-            for part in content.parts:
-                if hasattr(part, "text") and part.text:
-                    text += part.text + "\n"
-                if hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    function_calls.append(
-                        {
-                            "name": getattr(fc, "name", None),
-                            "args": getattr(fc, "args", None),
-                        }
-                    )
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            if hasattr(part, "text") and part.text:
+                text += part.text + "\n"
+            if hasattr(part, "function_call") and part.function_call:
+                fc = part.function_call
+                function_calls.append(
+                    {
+                        "name": getattr(fc, "name", None),
+                        "args": getattr(fc, "args", None),
+                    }
+                )
 
         resp_data = {
             "agent": agent_name,
@@ -864,7 +887,9 @@ class ADKDetailedLoggerPlugin(BasePlugin):
             return None
 
         inv_ctx = getattr(callback_context, "_invocation_context", None)
-        agent = getattr(callback_context, "agent", None) or getattr(inv_ctx, "agent", None)
+        agent = getattr(callback_context, "agent", None) or getattr(
+            inv_ctx, "agent", None
+        )
         agent_name = getattr(agent, "name", "root_agent")
         delay = _retry_delay_seconds(error_text)
         write_raw_trace(
@@ -881,7 +906,9 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         for attempt in range(1, 4):
             await asyncio.sleep(delay)
             try:
-                async for response in llm.generate_content_async(llm_request, stream=False):
+                async for response in llm.generate_content_async(
+                    llm_request, stream=False
+                ):
                     write_raw_trace(
                         f"✅ [RATE LIMIT RECOVERED] {agent_name}",
                         {"attempt": attempt},
@@ -891,7 +918,9 @@ class ADKDetailedLoggerPlugin(BasePlugin):
                 error_text = str(retry_error)
                 if not _is_rate_limit(error_text):
                     return None
-                delay = _retry_delay_seconds(error_text, fallback=min(delay * 1.5, 15.0))
+                delay = _retry_delay_seconds(
+                    error_text, fallback=min(delay * 1.5, 15.0)
+                )
                 write_raw_trace(
                     f"⏳ [RATE LIMIT RETRY #{attempt}] {agent_name}",
                     {"retryDelay": delay, "error": error_text},
@@ -899,14 +928,18 @@ class ADKDetailedLoggerPlugin(BasePlugin):
 
         return None
 
-    async def on_tool_error_callback(self, *, tool: Any, tool_args: Any, tool_context: Any, error: Any):
+    async def on_tool_error_callback(
+        self, *, tool: Any, tool_args: Any, tool_context: Any, error: Any
+    ):
         tool_name = getattr(tool, "name", str(tool))
         write_raw_trace(
             f"❌ [TOOL ERROR] {tool_name}",
             {"tool": tool_name, "error": str(error), "arguments": tool_args},
         )
 
-    async def on_agent_error_callback(self, *, agent: Any, callback_context: Any, error: Any):
+    async def on_agent_error_callback(
+        self, *, agent: Any, callback_context: Any, error: Any
+    ):
         agent_name = getattr(agent, "name", "unknown_agent")
         write_raw_trace(
             f"❌ [AGENT ERROR] {agent_name}", {"agent": agent_name, "error": str(error)}
@@ -960,7 +993,11 @@ def _format_token_usage(usage: Any) -> list[str]:
 
     def value(*names: str) -> Any:
         for name in names:
-            candidate = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            candidate = (
+                usage.get(name)
+                if isinstance(usage, dict)
+                else getattr(usage, name, None)
+            )
             if candidate is not None:
                 return candidate
         return 0
