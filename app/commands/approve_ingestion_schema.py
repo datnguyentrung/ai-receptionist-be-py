@@ -4,23 +4,25 @@ import argparse
 import asyncio
 import json
 import uuid
-from types import SimpleNamespace
 
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.tools import ToolContext
+from google.adk.tools.tool_confirmation import ToolConfirmation
 
 from app.agent.tools.ingestion_tools import apply_schema_proposal, rebase_ingestion, review_schema_proposal
 from app.core.ingestion_runtime import shutdown_service_container
 
 
 def _confirmed_context() -> ToolContext:
-    context = ToolContext(InvocationContext(
-        session_service=InMemorySessionService(),
-        invocation_id=str(uuid.uuid4()),
-        session=Session(id=str(uuid.uuid4()), appName="ingestion_cli", userId="human", state={}),
-    ))
-    context._tool_confirmation = SimpleNamespace(confirmed=True)  # ADK confirmation supplied by the caller.
+    context = ToolContext(
+        InvocationContext(
+            session_service=InMemorySessionService(),
+            invocation_id=str(uuid.uuid4()),
+            session=Session(id=str(uuid.uuid4()), app_name="ingestion_cli", user_id="human", state={}),
+        ),
+        tool_confirmation=ToolConfirmation(confirmed=True),
+    )
     return context
 
 

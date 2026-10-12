@@ -43,7 +43,7 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.enums import IngestionJobStatus, SourceVersionStatus

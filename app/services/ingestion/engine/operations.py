@@ -50,7 +50,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable
 
@@ -272,7 +271,7 @@ async def repair_batch(
         node.temp_id
         for index, node in enumerate(baseline.nodes)
         if node.temp_id in requested_drops
-        and RepairGuard._location_was_invalid(f"nodes.{index}", invalid_locations)
+        and RepairGuard.location_was_invalid(f"nodes.{index}", invalid_locations)
     ]
     merged = _merge_repair_fragment(
         baseline,
@@ -1661,19 +1660,6 @@ def error_payload(
 # ============================================================================
 # 7. NHÓM TIỆN ÍCH NỘI BỘ (INTERNAL HELPERS)
 # ============================================================================
-
-
-# ----------------------------------------------------------------------------
-# Tên hàm: _document_key
-# Chức năng:
-#   - Tạo khóa định danh tài liệu chuẩn hóa dạng kebab-case từ tên tệp tin.
-# Input:
-#   - filename (str): Tên tệp tin gốc.
-# Output:
-#   - str: Khóa định danh tài liệu chuẩn hóa.
-# ----------------------------------------------------------------------------
-def _document_key(filename: str) -> str:
-    return normalize_document_key(filename)
 
 
 def normalize_document_key(value: str) -> str:

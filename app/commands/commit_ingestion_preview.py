@@ -4,11 +4,11 @@ import argparse
 import asyncio
 import json
 import uuid
-from types import SimpleNamespace
 
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.sessions import InMemorySessionService, Session
 from google.adk.tools import ToolContext
+from google.adk.tools.tool_confirmation import ToolConfirmation
 
 from app.agent.tools.ingestion_tools import commit_ingestion
 from app.core.ingestion_runtime import shutdown_service_container
@@ -19,10 +19,10 @@ async def _run(ingestion_id: str, report_digest: str) -> None:
         InvocationContext(
             session_service=InMemorySessionService(),
             invocation_id=str(uuid.uuid4()),
-            session=Session(id=str(uuid.uuid4()), appName="ingestion_cli", userId="human", state={}),
+            session=Session(id=str(uuid.uuid4()), app_name="ingestion_cli", user_id="human", state={}),
         ),
         function_call_id=str(uuid.uuid4()),
-        tool_confirmation=SimpleNamespace(confirmed=True),
+        tool_confirmation=ToolConfirmation(confirmed=True),
     )
     try:
         print(json.dumps(

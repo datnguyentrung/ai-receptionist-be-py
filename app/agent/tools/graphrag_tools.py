@@ -1,7 +1,5 @@
 """ADK tools for source-grounded Taekwondo GraphRAG retrieval."""
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any, cast
 

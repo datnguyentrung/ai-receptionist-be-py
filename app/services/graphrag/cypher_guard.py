@@ -6,8 +6,6 @@ Nguyên tắc phòng vệ theo lớp:
   - Lớp 2 (Neo4j Driver): Thực thi với RoutingControl.READ.
 """
 
-from __future__ import annotations
-
 import re
 from typing import Any
 
@@ -100,4 +98,4 @@ def normalize_neo4j_value(value: Any) -> Any:
     return value
 
 
-__all__ = ["validate_read_cypher", "normalize_neo4j_value"]
+__all__ = ["normalize_neo4j_value", "validate_read_cypher"]

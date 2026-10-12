@@ -113,8 +113,10 @@ def model_assignments() -> dict[str, str]:
     return ingestion_model_assignments()
 
 
-def _contract_from_scope(scope: dict[str, Any]) -> dict[str, Any] | None:
+def _contract_from_scope(scope: Any) -> dict[str, Any] | None:
     """Build a contract when the scope payload is a compiled ontology projection."""
+    if not isinstance(scope, dict):
+        return None
     try:
         return build_entity_extraction_contract(OntologyProjection.model_validate(scope))
     except Exception:  # Test doubles and legacy callers may expose only a scope summary.

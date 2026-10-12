@@ -1,0 +1,1 @@
+"""ADK shared components package."""

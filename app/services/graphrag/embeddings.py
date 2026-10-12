@@ -110,6 +110,7 @@ class GeminiEmbeddingProvider:
         # Chia nhỏ danh sách thành các batch để tránh vượt quá giới hạn payload của API
         for start in range(0, len(cleaned), self.batch_size):
             batch = cleaned[start : start + self.batch_size]
+            response = None
             for attempt in range(3):
                 delay = self._next_request_at - time.monotonic()
                 if delay > 0:
@@ -136,6 +137,8 @@ class GeminiEmbeddingProvider:
                     # embeddings are generated concurrently across processes.
                     self._next_request_at = time.monotonic() + 60
 
+            if response is None:
+                raise EmbeddingError("Không nhận được phản hồi embedding từ API.")
             embeddings = response.embeddings or []
             if len(embeddings) != len(batch):
                 raise EmbeddingError(

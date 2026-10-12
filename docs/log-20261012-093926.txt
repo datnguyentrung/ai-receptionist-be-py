@@ -1,0 +1,114 @@
+# Ingestion Real-time Logs (Started at 2026-10-12 09:38:17)
+
+[2026-10-12 09:38:24] === 👤 USER INPUT MESSAGE ===
+{
+  "message": "1 + 3 bằng mấy"
+}
+
+[2026-10-12 09:38:24] === 🤖 [AGENT START] root_agent ===
+{
+  "agent": "root_agent",
+  "model": {
+    "model": "gemini-3.5-flash-lite",
+    "base_url": null,
+    "speech_config": null,
+    "use_interactions_api": false,
+    "retry_options": {
+      "attempts": 5,
+      "initialDelay": 3.0,
+      "maxDelay": 30.0,
+      "expBase": null,
+      "jitter": null,
+      "httpStatusCodes": [
+        429,
+        503
+      ]
+    }
+  }
+}
+
+[2026-10-12 09:38:26] === 📤 [MODEL CALL REQUEST] (root_agent) ===
+{
+  "agent": "root_agent",
+  "model": "gemini-3.5-flash-lite",
+  "contentCount": 1,
+  "contentPartCount": 1,
+  "tools": []
+}
+
+[2026-10-12 09:38:27] === 📥 [MODEL CALL RESPONSE] (unknown) ===
+{
+  "agent": "unknown",
+  "text": null,
+  "functionCalls": [
+    {
+      "name": "transfer_to_agent",
+      "args": {
+        "agent_name": "CALCULATION_AGENT"
+      }
+    }
+  ]
+}
+
+[2026-10-12 09:38:27] === 📊 TOKEN USAGE (unknown) ===
+  📊 TOKEN USAGE BREAKDOWN:
+     • promptTokenCount:        4,058
+     • candidatesTokenCount:    24
+     • thoughtsTokenCount:      0
+     • cachedContentTokenCount: 0
+     • totalTokenCount:         4,082
+
+[2026-10-12 09:38:27] === 🛠️ [TOOL REQUEST] transfer_to_agent ===
+{
+  "tool": "transfer_to_agent",
+  "arguments": {
+    "agent_name": "CALCULATION_AGENT"
+  }
+}
+
+[2026-10-12 09:38:27] === 📦 [TOOL RESPONSE] transfer_to_agent ===
+{
+  "tool": "transfer_to_agent",
+  "result": null
+}
+
+[2026-10-12 09:38:27] === 🤖 [AGENT START] CALCULATION_AGENT ===
+{
+  "agent": "CALCULATION_AGENT",
+  "model": null
+}
+
+[2026-10-12 09:38:27] === 🤖 [AGENT START] calculation_tool_agent ===
+{
+  "agent": "calculation_tool_agent",
+  "model": {
+    "model": "gemini-3.5-flash-lite",
+    "base_url": null,
+    "speech_config": null,
+    "use_interactions_api": false,
+    "retry_options": {
+      "attempts": 5,
+      "initialDelay": 3.0,
+      "maxDelay": 30.0,
+      "expBase": null,
+      "jitter": null,
+      "httpStatusCodes": [
+        429,
+        503
+      ]
+    }
+  }
+}
+
+[2026-10-12 09:38:27] === ❌ [AGENT ERROR] calculation_tool_agent ===
+{
+  "agent": "calculation_tool_agent",
+  "error": "'Context variable not found: `user_message`.'"
+}
+
+[2026-10-12 09:38:27] === ❌ [AGENT ERROR] CALCULATION_AGENT ===
+{
+  "agent": "CALCULATION_AGENT",
+  "error": "'Context variable not found: `user_message`.'"
+}
+

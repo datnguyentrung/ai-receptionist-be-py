@@ -36,13 +36,13 @@ async def ingest(path: Path, ingestion_id: str | None = None) -> dict:
                 mime_type="text/markdown" if path.suffix.casefold() == ".md" else "text/plain",
             )
         )
-        if workspace.job.status.value == "COMMITTED":
+        if workspace.job.status == "COMMITTED":
             return operations.status_payload(workspace, idempotent=True)
         if workspace.job.summary.get("preview"):
             return await container.repository.get_preview(str(workspace.job.id))
         session_service = InMemorySessionService()
         session = Session(
-            id=str(uuid.uuid4()), appName="ingestion_cli", userId="ingestion_cli", state={}
+            id=str(uuid.uuid4()), app_name="ingestion_cli", user_id="ingestion_cli", state={}
         )
         context = ToolContext(InvocationContext(
             session_service=session_service, invocation_id=str(uuid.uuid4()),
@@ -58,7 +58,7 @@ async def ingest(path: Path, ingestion_id: str | None = None) -> dict:
                 return result
             workspace = await operations.required_workspace(container.repository, str(workspace.job.id))
         workspace = await operations.finalize(container.repository, str(workspace.job.id))
-        if workspace.job.status.value != "READY":
+        if workspace.job.status != "READY":
             return operations.status_payload(workspace)
         return await operations.build_preview(
             container.repository, container.graph_store, str(workspace.job.id),
