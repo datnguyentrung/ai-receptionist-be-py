@@ -1,7 +1,5 @@
 """Build the model-facing extraction contract from a pinned ontology projection."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 from typing import Any
@@ -21,7 +19,10 @@ def build_entity_extraction_contract(projection: OntologyProjection) -> dict[str
             }
         )
 
-    entities = []
+    def _tech_name_key(item: dict[str, Any]) -> str:
+        return str(item.get("technicalName", ""))
+
+    entities: list[dict[str, Any]] = []
     for item in projection.entity_types:
         technical_name = str(item["technicalName"])
         entities.append(
@@ -31,7 +32,8 @@ def build_entity_extraction_contract(projection: OntologyProjection) -> dict[str
                     (item.get("identityStrategy") or {}).get("required") or []
                 ),
                 "properties": sorted(
-                    properties.get(technical_name, []), key=lambda value: value["technicalName"]
+                    properties.get(technical_name, []),
+                    key=_tech_name_key,
                 ),
             }
         )
@@ -46,11 +48,16 @@ def build_entity_extraction_contract(projection: OntologyProjection) -> dict[str
     contract = {
         "ontologyVersionId": projection.version_id,
         "ontologyDigest": projection.digest,
-        "entities": sorted(entities, key=lambda value: value["technicalName"]),
-        "relationships": sorted(relationships, key=lambda value: value["technicalName"]),
+        "entities": sorted(entities, key=_tech_name_key),
+        "relationships": sorted(relationships, key=_tech_name_key),
     }
-    encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return {"contractHash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(), **contract}
+    encoded = json.dumps(
+        contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return {
+        "contractHash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        **contract,
+    }
 
 
 __all__ = ["build_entity_extraction_contract"]

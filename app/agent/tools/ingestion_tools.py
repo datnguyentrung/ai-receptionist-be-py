@@ -589,7 +589,7 @@ async def commit_ingestion(
                 ingestion_id, report_digest,
                 user_id=tool_context.user_id,
                 session_id=tool_context.session.id,
-                function_call_id=tool_context.function_call_id,
+                function_call_id=tool_context.function_call_id or "",
             )
         result = await operations.commit(
             container.repository, container.graph_store, ingestion_id,

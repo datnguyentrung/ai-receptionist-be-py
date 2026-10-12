@@ -252,7 +252,7 @@ class RepairGuard:
         return edge.edge_name, edge.source_temp_id, edge.target_temp_id
 
     @staticmethod
-    def _location_was_invalid(prefix: str, locations: set[str]) -> bool:
+    def location_was_invalid(prefix: str, locations: set[str]) -> bool:
         """
         Kiểm tra xem một đường dẫn vị trí có thuộc phạm vi của các vị trí lỗi trước đó hay không.
 
@@ -270,6 +270,8 @@ class RepairGuard:
             for location in locations
             if location
         )
+
+    _location_was_invalid = location_was_invalid
 
 
 __all__ = ["RepairGuard"]

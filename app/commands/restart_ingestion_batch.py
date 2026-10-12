@@ -15,7 +15,7 @@ async def _run(ingestion_id: str, batch_index: int, reason: str) -> None:
         print(
             {
                 "ingestionId": str(workspace.job.id),
-                "status": workspace.job.status.value,
+                "status": workspace.job.status,
                 "nextBatch": next(
                     (
                         batch.batch_index
