@@ -1,4 +1,4 @@
-"""Calculation tool agent definition."""
+"""Calculation Tool Agent definition."""
 
 from pathlib import Path
 
@@ -19,24 +19,25 @@ PROMPT_PATH = (
     / "calculation_agent_tool.md"
 )
 
+CALCULATION_TOOLS = [add, subtract, multiply, divide]
+
 
 def create_calculation_tool_agent() -> Agent:
-    """Khởi tạo Agent điều phối công cụ tính toán."""
+    """Khởi tạo Tool Agent cho domain calculation.
+
+    Agent này được gắn trực tiếp 4 function tools: add, subtract, multiply, divide.
+    Thực hiện gọi tool để tính toán kết quả thay vì trả lời người dùng.
+    """
     return Agent(
         name="calculation_tool_agent",
         model=create_model(),
         description=(
-            "Phân tích biểu thức và gọi công cụ cộng, trừ, "
-            "nhân, chia. Không trả lời trực tiếp."
+            "Phân tích biểu thức và trực tiếp gọi công cụ tính toán số học "
+            "(cộng, trừ, nhân, chia). Không trả lời trực tiếp người dùng."
         ),
         instruction=PROMPT_PATH.read_text(encoding="utf-8"),
-        tools=[
-            add,
-            subtract,
-            multiply,
-            divide,
-        ],
+        tools=CALCULATION_TOOLS,
     )
 
 
-__all__ = ["create_calculation_tool_agent"]
+__all__ = ["create_calculation_tool_agent", "CALCULATION_TOOLS"]
