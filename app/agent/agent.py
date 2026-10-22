@@ -37,8 +37,8 @@ app = App(
 )
 
 __all__ = [
+    "_compact_ingestion_context",
     "app",
     "create_root_agent",
     "root_agent",
-    "_compact_ingestion_context",
 ]
