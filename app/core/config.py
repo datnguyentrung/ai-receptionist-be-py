@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     RAG_DEFAULT_TOP_K: int = 10
     RAG_CANDIDATE_LIMIT: int = 20
     RAG_CONTEXT_MAX_CHARS: int = 24000
+    RAG_RETRIEVAL_TIMEOUT_SECONDS: float = 12.0
+    RAG_PATH_TIMEOUT_SECONDS: float = 5.0
 
     NEO4J_URI: str = ""
     NEO4J_USERNAME: str = ""
@@ -67,6 +69,10 @@ class Settings(BaseSettings):
     INGESTION_SEMANTIC_EVIDENCE_CANARY_PERCENT: int = 100
     INGESTION_SEMANTIC_EVIDENCE_MAX_CALLS_PER_BATCH: int = 1
     INGESTION_EVIDENCE_TARGETED_REPAIR_MAX_CALLS: int = 1
+
+    # Clef
+    CLOUDFLARE_AUTH_TOKEN: str = ""
+    CLOUDFLARE_ACCOUNT_ID: str = ""
 
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 

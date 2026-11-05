@@ -15,6 +15,8 @@ from app.services.graphrag.cypher_guard import (
 from app.services.graphrag.embeddings import cosine_similarity
 from app.services.graphrag.retrieval import (
     INSUFFICIENT_EVIDENCE,
+    EvidenceBundle,
+    GraphQaRequest,
     GraphRAGRetriever,
     _public_passage,
 )
@@ -197,14 +199,36 @@ async def retrieve_taekwondo_knowledge(
         min_cosine_score=settings.RAG_MIN_COSINE_SCORE,
         candidate_limit=settings.RAG_CANDIDATE_LIMIT,
         context_max_chars=settings.RAG_CONTEXT_MAX_CHARS,
+        default_top_k=settings.RAG_DEFAULT_TOP_K,
+        retrieval_timeout_seconds=settings.RAG_RETRIEVAL_TIMEOUT_SECONDS,
+        path_timeout_seconds=settings.RAG_PATH_TIMEOUT_SECONDS,
     )
     result = await retriever.retrieve(
-        question,
-        scope_key=scope_key,
-        top_k=top_k or settings.RAG_DEFAULT_TOP_K,
+        GraphQaRequest(question=question, scope_key=scope_key),
     )
-    tool_context.state["last_retrieval_trace"] = result.get("retrievalTrace", {})
-    return result
+    return result.model_dump(mode="json")
+
+
+async def retrieve_graph_qa_evidence(
+    request: GraphQaRequest,
+) -> EvidenceBundle:
+    """Retrieve one safe evidence bundle for the deterministic Graph QA adapter.
+
+    This is Python-only glue, not an ADK function tool. The Graph QA agent never
+    exposes the underlying vector, Cypher, schema, or hybrid paths to an LLM.
+    """
+    container = await get_service_container()
+    retriever = GraphRAGRetriever(
+        container.rag_graph_store,
+        container.embedding_provider,
+        min_cosine_score=settings.RAG_MIN_COSINE_SCORE,
+        candidate_limit=settings.RAG_CANDIDATE_LIMIT,
+        context_max_chars=settings.RAG_CONTEXT_MAX_CHARS,
+        default_top_k=settings.RAG_DEFAULT_TOP_K,
+        retrieval_timeout_seconds=settings.RAG_RETRIEVAL_TIMEOUT_SECONDS,
+        path_timeout_seconds=settings.RAG_PATH_TIMEOUT_SECONDS,
+    )
+    return await retriever.retrieve(request)
 
 
 async def hybrid_search(
@@ -232,9 +256,5 @@ async def retrieve_taekwondo_document_history(document_key: str) -> dict[str, An
 
 
 __all__ = [
-    "execute_read_cypher",
-    "hybrid_search",
-    "retrieve_taekwondo_document_history",
-    "retrieve_taekwondo_knowledge",
-    "vector_search",
+    "retrieve_graph_qa_evidence",
 ]

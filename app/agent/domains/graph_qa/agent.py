@@ -5,13 +5,13 @@ from google.adk.agents import SequentialAgent
 from app.agent.domains.graph_qa.format_agent import (
     create_graph_qa_format_agent,
 )
-from app.agent.domains.graph_qa.tool_agent import (
-    create_graph_qa_tool_agent,
+from app.agent.domains.graph_qa.retrieval_agent import (
+    GraphQaRetrievalAdapter,
 )
 
 
 def create_graph_qa_agent() -> SequentialAgent:
-    """Khởi tạo domain GRAPH_QA_AGENT tuần tự gồm tool agent và format agent."""
+    """Run deterministic hybrid retrieval, then format its grounded evidence."""
     return SequentialAgent(
         name="GRAPH_QA_AGENT",
         description=(
@@ -19,7 +19,7 @@ def create_graph_qa_agent() -> SequentialAgent:
             "điều lệ và quy định võ đường thông qua truy xuất Knowledge Graph và định dạng câu trả lời."
         ),
         sub_agents=[
-            create_graph_qa_tool_agent(),
+            GraphQaRetrievalAdapter(),
             create_graph_qa_format_agent(),
         ],
     )

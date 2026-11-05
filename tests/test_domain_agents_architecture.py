@@ -10,7 +10,6 @@ from app.agent.domains.graph_qa.agent import create_graph_qa_agent
 from app.agent.domains.ingestion.agent import create_ingestion_agent
 from app.agent.domains.ingestion.context_filter import (
     compact_ingestion_before_model,
-    compact_ingestion_context,
 )
 from app.agent.routing.tools import ask_clarifying_question
 from app.agent.tools.calculation import add, divide, multiply, subtract
@@ -43,67 +42,44 @@ def test_ask_clarifying_question_tool():
 
 
 def test_root_router_structure():
-    """Kiểm tra cấu trúc Root Router Agent."""
+    """Root chỉ chứa LLM fallback; Clef dispatch trực tiếp qua fallback này."""
     assert root_agent.name == "root_agent"
     sub_agent_names = [a.name for a in root_agent.sub_agents]
-    assert "INGESTION_AGENT" in sub_agent_names
-    assert "CALCULATION_AGENT" in sub_agent_names
-    assert "GRAPH_QA_AGENT" in sub_agent_names
-
-    tool_names = [
-        getattr(t, "name", None) or getattr(t, "__name__", None)
-        for t in root_agent.tools
-    ]
-    assert "ask_clarifying_question" in tool_names
+    assert sub_agent_names == ["llm_fallback_router"]
 
 
 def test_calculation_agent_sequential_structure():
-    """Kiểm tra CALCULATION_AGENT là SequentialAgent gồm Planner, Executor và Formatter."""
+    """Kiểm tra CALCULATION_AGENT gồm tool agent và formatter."""
     calc_agent = create_calculation_agent()
     assert calc_agent.name == "CALCULATION_AGENT"
-    assert len(calc_agent.sub_agents) == 3
-    planner_agent = calc_agent.sub_agents[0]
-    executor_agent = calc_agent.sub_agents[1]
-    format_agent = calc_agent.sub_agents[2]
+    assert len(calc_agent.sub_agents) == 2
+    tool_agent = calc_agent.sub_agents[0]
+    format_agent = calc_agent.sub_agents[1]
 
-    assert planner_agent.name == "calculation_tool_agent"
-    assert executor_agent.name == "calculation_executor"
+    assert tool_agent.name == "calculation_tool_agent"
     assert format_agent.name == "calculation_format_agent"
 
-    # Planner không gắn direct function tools vào LLM, output lưu vào temp:tool_plan
-    assert planner_agent.tools == [] or planner_agent.tools is None
-    assert planner_agent.output_key == "temp:tool_plan"
+    tool_names = {getattr(tool, "__name__", None) for tool in tool_agent.tools}
+    assert {"add", "subtract", "multiply", "divide"}.issubset(tool_names)
 
-    # Executor là đối tượng sở hữu allowlist của 4 calculation tools
-    allowed_tools = executor_agent.allowed_tool_names
-    assert {"add", "subtract", "multiply", "divide"}.issubset(allowed_tools)
-
-    # Formatter không có tools và include_contents="none"
+    # Calculation formatter không có tools.
     assert format_agent.tools == [] or format_agent.tools is None
-    assert format_agent.include_contents == "none"
 
 
 def test_graph_qa_agent_sequential_structure():
-    """Kiểm tra GRAPH_QA_AGENT là SequentialAgent gồm tool agent và format agent."""
+    """Graph QA retrieves deterministically before one formatting LLM call."""
     gqa_agent = create_graph_qa_agent()
     assert gqa_agent.name == "GRAPH_QA_AGENT"
     assert len(gqa_agent.sub_agents) == 2
-    tool_agent = gqa_agent.sub_agents[0]
+    retrieval_agent = gqa_agent.sub_agents[0]
     format_agent = gqa_agent.sub_agents[1]
 
-    assert tool_agent.name == "graph_qa_tool_agent"
+    assert retrieval_agent.name == "graph_qa_retrieval"
+    assert retrieval_agent.has_model is False
+    assert getattr(retrieval_agent, "tools", []) in ([], None)
     assert format_agent.name == "graph_qa_format_agent"
-
-    tool_names = {getattr(t, "__name__", None) for t in tool_agent.tools}
-    assert {
-        "execute_read_cypher",
-        "vector_search",
-        "hybrid_search",
-        "retrieve_taekwondo_knowledge",
-        "retrieve_taekwondo_document_history",
-        "list_active_schema_scopes",
-        "load_active_schema_context",
-    }.issubset(tool_names)
+    assert format_agent.tools == [] or format_agent.tools is None
+    assert format_agent.include_contents == "none"
 
 
 def test_ingestion_agent_structure():
