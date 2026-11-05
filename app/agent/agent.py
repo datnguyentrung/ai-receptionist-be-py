@@ -12,19 +12,25 @@ from app.agent.plugins import (
     SystemInstructionDiagnosticsPlugin,
     ToolAutoCorrectPlugin,
 )
-from app.agent.routing.agent import create_root_agent
+from app.agent.routing.hybrid_root_agent import HybridRootAgent
+from app.agent.routing.routing_agent import create_llm_fallback_agent
 from app.utils.ingestion_logger import (
     ADKDetailedLoggerPlugin,
     reset_log_file,
 )
 
-# Khởi tạo Root Router đa domain
-root_agent = create_root_agent()
+# Root Agent cũ trở thành LLM fallback.
+llm_fallback_agent = create_llm_fallback_agent()
 
-# Reset file log đúng 1 lần khi server ADK khởi động (adk web / adk run)
+# Root Agent mới được ADK Web sử dụng.
+root_agent = HybridRootAgent(
+    name="root_agent",
+    description="Hybrid Clef + LLM Router",
+    sub_agents=[llm_fallback_agent],
+)
+
 reset_log_file()
 
-# Cấu hình ứng dụng ADK đa domain
 app = App(
     name="taekwondo_assistant",
     root_agent=root_agent,
@@ -39,6 +45,5 @@ app = App(
 __all__ = [
     "_compact_ingestion_context",
     "app",
-    "create_root_agent",
     "root_agent",
 ]
