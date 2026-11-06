@@ -10,10 +10,8 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-
 from sqlalchemy import text
 
-import app.models  # noqa: F401 - ensure all models are registered in metadata # pyright: ignore[reportUnusedImport]
 from app.api import api_router
 from app.core.config import settings
 from app.db.base import Base
@@ -141,7 +139,9 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-app.add_exception_handler(FaceEmbeddingException, cast(Any, face_embedding_exception_handler))
+app.add_exception_handler(
+    FaceEmbeddingException, cast(Any, face_embedding_exception_handler)
+)
 app.add_exception_handler(
     RequestValidationError,
     cast(Any, face_embedding_validation_exception_handler),
