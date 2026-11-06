@@ -23,7 +23,8 @@ google-adk==2.10.0
 
 # Face Recognition & Computer Vision
 insightface~=0.7.3
-onnxruntime~=1.21.1
+# CUDA 12.8 + cuDNN 9; install CUDA dependencies in the Conda environment.
+onnxruntime-gpu~=1.21.1
 numpy~=1.26.4
 opencv-python-headless~=4.10.0.84
 
