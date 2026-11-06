@@ -1,3 +1,4 @@
+import asyncio
 import faulthandler
 import io
 import logging
@@ -22,6 +23,8 @@ from app.exceptions.exception_handler import (
     internal_exception_handler,
 )
 from app.exceptions.face_embedding_exception import FaceEmbeddingException
+from app.schemas.mqtt_relay import MqttRelay
+from app.services.broker import create_broker
 from app.utils.insightface_utils import initialize_face_app, is_face_app_initialized
 
 if isinstance(sys.stdout, io.TextIOWrapper):
@@ -56,6 +59,36 @@ def configure_logging() -> None:
 
 configure_logging()
 logger = logging.getLogger(__name__)
+DATABASE_INITIALIZATION_ATTEMPTS = 3
+
+
+async def initialize_database() -> None:
+    """Initialize the PostgreSQL schema, retrying transient pooler disconnects."""
+
+    for attempt in range(1, DATABASE_INITIALIZATION_ATTEMPTS + 1):
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE SCHEMA IF NOT EXISTS ontology;"))
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database schema 'ontology' and tables initialized successfully")
+            return
+        except Exception as exc:
+            await engine.dispose()
+            if attempt == DATABASE_INITIALIZATION_ATTEMPTS:
+                logger.exception(
+                    "Database initialization failed after %s attempt(s)", attempt
+                )
+                return
+
+            delay_seconds = float(attempt)
+            logger.warning(
+                "Database initialization attempt %s/%s failed (%s); retrying in %.0fs",
+                attempt,
+                DATABASE_INITIALIZATION_ATTEMPTS,
+                type(exc).__name__,
+                delay_seconds,
+            )
+            await asyncio.sleep(delay_seconds)
 
 
 @asynccontextmanager
@@ -65,13 +98,29 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("InsightFace model initialization failed")
 
+    await initialize_database()
+
     try:
-        async with engine.begin() as conn:
-            await conn.execute(text("CREATE SCHEMA IF NOT EXISTS ontology;"))
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database schema 'ontology' and tables initialized successfully")
+        configure_logging()
+
+        broker = create_broker(settings)
+        relay = MqttRelay(settings)
+        await broker.start()
+
+        logger.info(
+            "[Broker] MQTT TCP listening on %s:%s",
+            settings.MQTT_TCP_HOST,
+            settings.MQTT_TCP_PORT,
+        )
+        logger.info(
+            "[Broker] MQTT WebSocket listening on %s:%s",
+            settings.MQTT_WS_HOST,
+            settings.MQTT_WS_PORT,
+        )
+        await relay.start()
+        await asyncio.Event().wait()
     except Exception:
-        logger.exception("Database initialization failed during startup")
+        logger.exception("")
 
     yield
 

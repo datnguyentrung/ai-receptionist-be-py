@@ -1,4 +1,5 @@
 import logging
+import ssl
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -12,6 +13,15 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _supabase_ssl_context() -> ssl.SSLContext:
+    """Match JDBC's ``sslmode=require`` for the Supabase connection pooler."""
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
 engine: AsyncEngine = create_async_engine(
     settings.async_database_url,
     echo=settings.DB_ECHO,
@@ -19,6 +29,7 @@ engine: AsyncEngine = create_async_engine(
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_pre_ping=True,
+    connect_args={"ssl": _supabase_ssl_context()},
 )
 
 AsyncSessionLocal = async_sessionmaker(

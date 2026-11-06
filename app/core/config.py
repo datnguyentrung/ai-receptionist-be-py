@@ -74,6 +74,17 @@ class Settings(BaseSettings):
     CLOUDFLARE_AUTH_TOKEN: str = ""
     CLOUDFLARE_ACCOUNT_ID: str = ""
 
+    # MQTT
+    MQTT_TCP_HOST: str
+    MQTT_TCP_PORT: int
+    MQTT_WS_HOST: str
+    MQTT_WS_PORT: int
+    MQTT_INTERNAL_HOST: str
+    MQTT_INTERNAL_PORT: int
+    ESP32_INPUT_TOPIC: str
+    MOBILE_OUTPUT_TOPIC: str
+    MQTT_QOS: int
+
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
     @property
@@ -116,6 +127,10 @@ class Settings(BaseSettings):
             for value in self.ADK_ALLOWED_ORIGINS.split(",")
             if value.strip()
         ]
+
+    @property
+    def internal_broker_url(self) -> str:
+        return f"mqtt://{self.MQTT_INTERNAL_HOST}:{self.MQTT_INTERNAL_PORT}"
 
 
 settings = Settings()
