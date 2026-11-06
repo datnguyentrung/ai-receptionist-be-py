@@ -58,10 +58,10 @@ class DeterministicToolExecutor(BaseAgent):
         super().__init__(
             name=name,
             description=description,
-            input_plan_key=input_plan_key,
-            output_context_key=output_context_key,
             **kwargs,
         )
+        object.__setattr__(self, "input_plan_key", input_plan_key)
+        object.__setattr__(self, "output_context_key", output_context_key)
         self._tools_map = {}
         if tools:
             for t in tools:

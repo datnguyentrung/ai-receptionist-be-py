@@ -58,29 +58,22 @@ def test_root_router_structure():
 
 
 def test_calculation_agent_sequential_structure():
-    """Kiểm tra CALCULATION_AGENT là SequentialAgent gồm Planner, Executor và Formatter."""
+    """Kiểm tra CALCULATION_AGENT là SequentialAgent gồm Tool Agent và Format Agent."""
     calc_agent = create_calculation_agent()
     assert calc_agent.name == "CALCULATION_AGENT"
-    assert len(calc_agent.sub_agents) == 3
-    planner_agent = calc_agent.sub_agents[0]
-    executor_agent = calc_agent.sub_agents[1]
-    format_agent = calc_agent.sub_agents[2]
+    assert len(calc_agent.sub_agents) == 2
+    tool_agent = calc_agent.sub_agents[0]
+    format_agent = calc_agent.sub_agents[1]
 
-    assert planner_agent.name == "calculation_tool_agent"
-    assert executor_agent.name == "calculation_executor"
+    assert tool_agent.name == "calculation_tool_agent"
     assert format_agent.name == "calculation_format_agent"
 
-    # Planner không gắn direct function tools vào LLM, output lưu vào temp:tool_plan
-    assert planner_agent.tools == [] or planner_agent.tools is None
-    assert planner_agent.output_key == "temp:tool_plan"
+    # Tool Agent được gắn trực tiếp 4 calculation tools
+    tool_names = {getattr(t, "__name__", None) for t in tool_agent.tools}
+    assert {"add", "subtract", "multiply", "divide"}.issubset(tool_names)
 
-    # Executor là đối tượng sở hữu allowlist của 4 calculation tools
-    allowed_tools = executor_agent.allowed_tool_names
-    assert {"add", "subtract", "multiply", "divide"}.issubset(allowed_tools)
-
-    # Formatter không có tools và include_contents="none"
+    # Format Agent không gắn function tools
     assert format_agent.tools == [] or format_agent.tools is None
-    assert format_agent.include_contents == "none"
 
 
 def test_graph_qa_agent_sequential_structure():

@@ -12,6 +12,8 @@ from app.agent.tools.calculation import (
     subtract,
 )
 
+from google.adk.agents.llm_agent import ToolUnion
+
 PROMPT_PATH = (
     Path(__file__).resolve().parents[2]
     / "prompts"
@@ -19,7 +21,7 @@ PROMPT_PATH = (
     / "calculation_agent_tool.md"
 )
 
-CALCULATION_TOOLS = [add, subtract, multiply, divide]
+CALCULATION_TOOLS: list[ToolUnion] = [add, subtract, multiply, divide]
 
 
 def create_calculation_tool_agent() -> Agent:
