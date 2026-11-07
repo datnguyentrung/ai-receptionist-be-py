@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def normalize_sensor_event(topic: str, payload: bytes) -> dict[str, Any] | None:
-    """Convert an ESP32 sensor message to the mobile event contract."""
+    """Convert one accepted ESP32 topic/payload into a motion event."""
     parts = topic.split("/")
     if len(parts) != 3 or parts[0] != "esp32" or not parts[1] or parts[2] != "sensor":
         logger.warning("[Relay] Ignoring unexpected topic: %s", topic)
@@ -28,10 +28,24 @@ def normalize_sensor_event(topic: str, payload: bytes) -> dict[str, Any] | None:
         else:
             data = {"value": parsed}
 
-    data["deviceId"] = parts[1]
+    data["sensorDeviceId"] = parts[1]
     return {
-        "type": "SENSOR_UPDATE",
+        "type": "PIR_MOTION",
         "eventId": str(uuid4()),
         "occurredAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "data": data,
+    }
+
+
+def build_check_in_open_event(
+    sensor_event: dict[str, Any], kiosk_device_id: str
+) -> dict[str, Any]:
+    """Create the kiosk command after routing and readiness checks pass."""
+    return {
+        "type": "CHECK_IN_OPEN",
+        "eventId": sensor_event["eventId"],
+        "occurredAt": sensor_event["occurredAt"],
+        "deviceId": kiosk_device_id,
+        "sensorDeviceId": sensor_event["data"]["sensorDeviceId"],
+        "reason": "PIR_MOTION",
     }

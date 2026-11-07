@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import faulthandler
 import io
 import logging
@@ -14,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api import api_router
+from app.clients.insightface_warmup_client import InsightFaceWarmupClient
+from app.clients.java_attendance_client import JavaAttendanceClient
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
@@ -33,6 +36,22 @@ if isinstance(sys.stderr, io.TextIOWrapper):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 if not faulthandler.is_enabled():
     faulthandler.enable(file=sys.stdout, all_threads=True)
+
+
+class _AbandonedWebSocketHandshakeFilter(logging.Filter):
+    """Hide probes that open TCP then disconnect before a WS request exists."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exception = record.exc_info[1] if record.exc_info else None
+        return not (
+            record.getMessage() == "opening handshake failed"
+            and exception is not None
+            and type(exception).__name__ == "InvalidMessage"
+            and "did not receive a valid HTTP request" in str(exception)
+        )
+
+
+_abandoned_websocket_handshake_filter = _AbandonedWebSocketHandshakeFilter()
 
 
 def configure_logging() -> None:
@@ -55,6 +74,10 @@ def configure_logging() -> None:
         uvicorn_logger = logging.getLogger(logger_name)
         uvicorn_logger.disabled = False
         uvicorn_logger.setLevel(logging.INFO)
+
+    websocket_logger = logging.getLogger("websockets.server")
+    if _abandoned_websocket_handshake_filter not in websocket_logger.filters:
+        websocket_logger.addFilter(_abandoned_websocket_handshake_filter)
 
 
 configure_logging()
@@ -100,12 +123,25 @@ async def lifespan(app: FastAPI):
 
     await initialize_database()
 
-    try:
-        configure_logging()
+    configure_logging()
+    broker = create_broker(settings)
+    warmup_client = InsightFaceWarmupClient(
+        settings.FOG_INTERNAL_BASE_URL,
+        settings.FOG_INTERNAL_SECRET,
+    )
+    relay = MqttRelay(settings, readiness_probe=warmup_client.check)
+    java_client = JavaAttendanceClient(
+        settings.JAVA_CLOUD_BASE_URL,
+        settings.JAVA_FOG_SECRET,
+        settings.JAVA_REQUEST_TIMEOUT_SECONDS,
+    )
+    app.state.java_attendance_client = java_client
+    broker_started = False
+    relay_started = False
 
-        broker = create_broker(settings)
-        relay = MqttRelay(settings)
+    try:
         await broker.start()
+        broker_started = True
 
         logger.info(
             "[Broker] MQTT TCP listening on %s:%s",
@@ -118,11 +154,24 @@ async def lifespan(app: FastAPI):
             settings.MQTT_WS_PORT,
         )
         await relay.start()
-        await asyncio.Event().wait()
+        relay_started = True
     except Exception:
-        logger.exception("")
+        # HTTP remains available for health checks and image processing even if
+        # the local broker cannot bind or the relay cannot connect.
+        logger.exception("MQTT runtime failed to start")
 
-    yield
+    try:
+        yield
+    finally:
+        if relay_started:
+            with contextlib.suppress(Exception):
+                await relay.stop()
+        if broker_started:
+            with contextlib.suppress(Exception):
+                await broker.shutdown()
+        await warmup_client.close()
+        await java_client.close()
+        await engine.dispose()
 
 
 app = FastAPI(

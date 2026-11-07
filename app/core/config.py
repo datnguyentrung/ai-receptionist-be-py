@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
@@ -84,6 +85,16 @@ class Settings(BaseSettings):
     ESP32_INPUT_TOPIC: str
     MOBILE_OUTPUT_TOPIC: str
     MQTT_QOS: int
+    SENSOR_KIOSK_MAP: str = "{}"
+    MOBILE_COMMAND_TOPIC_TEMPLATE: str = "taekwondo/kiosks/{deviceId}/commands"
+    MOTION_DEBOUNCE_SECONDS: float = 5.0
+
+    # Java Cloud face check-in integration
+    JAVA_CLOUD_BASE_URL: str = "http://127.0.0.1:8080"
+    JAVA_FOG_SECRET: str = ""
+    JAVA_REQUEST_TIMEOUT_SECONDS: float = 10.0
+    FOG_INTERNAL_BASE_URL: str = "http://127.0.0.1:8000"
+    FOG_INTERNAL_SECRET: str = ""
 
     model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
 
@@ -131,6 +142,28 @@ class Settings(BaseSettings):
     @property
     def internal_broker_url(self) -> str:
         return f"mqtt://{self.MQTT_INTERNAL_HOST}:{self.MQTT_INTERNAL_PORT}"
+
+    @property
+    def sensor_kiosk_map(self) -> dict[str, str]:
+        try:
+            value = json.loads(self.SENSOR_KIOSK_MAP)
+        except json.JSONDecodeError as exc:
+            raise ValueError("SENSOR_KIOSK_MAP must be a JSON object") from exc
+        if not isinstance(value, dict):
+            raise TypeError("SENSOR_KIOSK_MAP must be a JSON object")
+        mapping = {
+            str(sensor_id).strip(): str(kiosk_id).strip()
+            for sensor_id, kiosk_id in value.items()
+            if str(sensor_id).strip() and str(kiosk_id).strip()
+        }
+        return mapping
+
+    def mobile_command_topic(self, device_id: str) -> str:
+        if "{deviceId}" not in self.MOBILE_COMMAND_TOPIC_TEMPLATE:
+            raise ValueError(
+                "MOBILE_COMMAND_TOPIC_TEMPLATE must contain {deviceId}"
+            )
+        return self.MOBILE_COMMAND_TOPIC_TEMPLATE.format(deviceId=device_id)
 
 
 settings = Settings()

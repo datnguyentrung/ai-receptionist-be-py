@@ -2,11 +2,13 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
+from collections.abc import Awaitable, Callable
 
 from amqtt.client import ClientError, MQTTClient
 
 from app.core.config import Settings
-from app.mapper.event_mapper import normalize_sensor_event
+from app.mapper.event_mapper import build_check_in_open_event, normalize_sensor_event
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +16,17 @@ logger = logging.getLogger(__name__)
 class MqttRelay:
     """Subscribes only to ESP32 data and republishes normalized mobile events."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        readiness_probe: Callable[[], Awaitable[bool]],
+    ) -> None:
         self._settings = settings
+        self._readiness_probe = readiness_probe
         self._client: MQTTClient | None = None
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
+        self._last_trigger_at: dict[str, float] = {}
 
     async def start(self) -> None:
         await self._connect_and_subscribe()
@@ -73,21 +81,54 @@ class MqttRelay:
             if event is None:
                 return
 
+            sensor_device_id = str(event["data"]["sensorDeviceId"])
+            kiosk_device_id = self._settings.sensor_kiosk_map.get(sensor_device_id)
+            if kiosk_device_id is None:
+                logger.warning(
+                    "[Relay] No kiosk mapping for sensor deviceId=%s",
+                    sensor_device_id,
+                )
+                return
+
+            now = time.monotonic()
+            previous = self._last_trigger_at.get(sensor_device_id)
+            if previous is not None and (
+                now - previous < self._settings.MOTION_DEBOUNCE_SECONDS
+            ):
+                logger.info(
+                    "[Relay] Debounced sensor deviceId=%s", sensor_device_id
+                )
+                return
+
+            # This is the same readiness interface exposed by the warmup endpoint.
+            # The hot model is never re-created in the relay.
+            if not await self._readiness_probe():
+                logger.error(
+                    "[Relay] InsightFace is not ready; skipping sensor deviceId=%s",
+                    sensor_device_id,
+                )
+                return
+
+            self._last_trigger_at[sensor_device_id] = now
+            command = build_check_in_open_event(event, kiosk_device_id)
+
             if self._client is None:
                 raise ClientError("MQTT relay client is not connected")
             encoded_event = json.dumps(
-                event, ensure_ascii=False, separators=(",", ":")
+                command, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8")
+            output_topic = self._settings.mobile_command_topic(kiosk_device_id)
             await self._client.publish(
-                self._settings.MOBILE_OUTPUT_TOPIC,
+                output_topic,
                 encoded_event,
-                qos=self._settings.mqtt_qos,
+                qos=self._settings.MQTT_QOS,
                 retain=False,
             )
             logger.info(
-                "[Relay] published topic=%s eventId=%s",
-                self._settings.MOBILE_OUTPUT_TOPIC,
+                "[Relay] published topic=%s eventId=%s kioskDeviceId=%s",
+                output_topic,
                 event["eventId"],
+                kiosk_device_id,
             )
         except Exception:
             logger.exception("[Relay] Failed to process message on %s", topic)

@@ -40,6 +40,14 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 SERVER_PUBLIC_URL=
 GEMINI_API_KEY=
+SENSOR_KIOSK_MAP={"esp32-01":"kiosk-01"}
+MOBILE_COMMAND_TOPIC_TEMPLATE=taekwondo/kiosks/{deviceId}/commands
+MOTION_DEBOUNCE_SECONDS=5
+JAVA_CLOUD_BASE_URL=http://127.0.0.1:8080
+JAVA_FOG_SECRET=replace-with-the-same-secret-as-java
+JAVA_REQUEST_TIMEOUT_SECONDS=10
+FOG_INTERNAL_BASE_URL=http://127.0.0.1:8000
+FOG_INTERNAL_SECRET=replace-with-a-local-only-secret
 ```
 
 Removed environment variables:
@@ -110,6 +118,31 @@ Example:
 curl -X POST "http://localhost:8000/face-embeddings" \
   -F "file=@tests/dat.jpg;type=image/jpeg"
 ```
+
+### Fog face check-in scan
+
+The mobile kiosk first registers the `requestId` with Java Cloud. It then sends
+the opaque ticket and image to Fog; Fog validates the ticket with Java before
+reading or processing the image.
+
+```http
+POST /face-check-in-scans
+Content-Type: multipart/form-data
+
+file=<jpeg-or-png>
+requestId=<uuid>
+deviceId=<configured-kiosk-id>
+uploadTicket=<opaque-java-ticket>
+```
+
+Fog reports `IMAGE_RECEIVED`, `FACE_DETECTED`, and `EMBEDDING_READY`, then sends
+only the 512-value embedding to Java Cloud. The image never leaves Fog.
+
+On PIR motion, the MQTT relay calls `POST /internal/insightface/warmup` through
+the loopback HTTP adapter before publishing `CHECK_IN_OPEN`. The endpoint
+returns readiness for the model loaded during startup and does not create a
+second model instance. Configure the same `FOG_INTERNAL_SECRET` on the loopback
+client and endpoint.
 
 ## Health
 
