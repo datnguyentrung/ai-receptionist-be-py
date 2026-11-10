@@ -28,6 +28,8 @@ from app.exceptions.exception_handler import (
 from app.exceptions.face_embedding_exception import FaceEmbeddingException
 from app.schemas.mqtt_relay import MqttRelay
 from app.services.broker import create_broker
+from app.services.device_registry import DeviceRegistry
+from app.services.mqtt_registry_plugins import set_registry, set_relay_credential
 from app.utils.insightface_utils import initialize_face_app, is_face_app_initialized
 
 if isinstance(sys.stdout, io.TextIOWrapper):
@@ -124,18 +126,31 @@ async def lifespan(app: FastAPI):
     await initialize_database()
 
     configure_logging()
-    broker = create_broker(settings)
+    if settings.load_fog_gateway_credential():
+        logger.info("[Registry] Loaded local Fog Gateway credential")
+    else:
+        logger.warning("[Registry] No valid local Fog Gateway credential; registry sync is disabled")
     warmup_client = InsightFaceWarmupClient(
         settings.FOG_INTERNAL_BASE_URL,
         settings.FOG_INTERNAL_SECRET,
     )
-    relay = MqttRelay(settings, readiness_probe=warmup_client.check)
+    registry = DeviceRegistry(settings)
+    await registry.load()
+    set_registry(registry)
+    set_relay_credential(
+        settings.FOG_RELAY_USERNAME,
+        settings.ensure_relay_credential(),
+        (settings.ESP32_INPUT_TOPIC, settings.DEVICE_HEARTBEAT_TOPIC),
+    )
+    broker = create_broker(settings)
+    relay = MqttRelay(settings, readiness_probe=warmup_client.check, registry=registry)
     java_client = JavaAttendanceClient(
         settings.JAVA_CLOUD_BASE_URL,
         settings.JAVA_FOG_SECRET,
         settings.JAVA_REQUEST_TIMEOUT_SECONDS,
     )
     app.state.java_attendance_client = java_client
+    app.state.device_registry = registry
     broker_started = False
     relay_started = False
 
@@ -161,8 +176,24 @@ async def lifespan(app: FastAPI):
         logger.exception("MQTT runtime failed to start")
 
     try:
+        async def sync_registry() -> None:
+            while True:
+                try:
+                    synced = await registry.sync()
+                    if not synced:
+                        logger.warning("[Registry] Sync was not completed; retaining the local snapshot")
+                except Exception:
+                    # A malformed cloud response must not permanently stop the
+                    # heartbeat loop or take down local PIR routing.
+                    logger.exception("[Registry] Sync failed; retrying on the next interval")
+                await asyncio.sleep(settings.FOG_SYNC_INTERVAL_SECONDS)
+
+        sync_task = asyncio.create_task(sync_registry(), name="device-registry-sync")
         yield
     finally:
+        sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sync_task
         if relay_started:
             with contextlib.suppress(Exception):
                 await relay.stop()

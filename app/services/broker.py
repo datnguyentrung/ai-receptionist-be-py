@@ -17,9 +17,8 @@ def create_broker(settings: Settings) -> Broker:
             },
         },
         "plugins": {
-            "amqtt.plugins.authentication.AnonymousAuthPlugin": {
-                "allow_anonymous": True,
-            },
+            "app.services.mqtt_registry_plugins.RegistryAuthPlugin": {},
+            "app.services.mqtt_registry_plugins.RegistryTopicAclPlugin": {},
         },
     }
     return Broker(config)
