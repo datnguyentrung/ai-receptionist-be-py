@@ -1,1 +1,1 @@
-"""Operational commands for the application."""
+"""Operational commands for a fog gateway."""

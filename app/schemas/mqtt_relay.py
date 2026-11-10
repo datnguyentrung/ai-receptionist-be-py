@@ -8,21 +8,24 @@ from collections.abc import Awaitable, Callable
 from amqtt.client import ClientError, MQTTClient
 
 from app.core.config import Settings
+from app.services.device_registry import DeviceRegistry
 from app.mapper.event_mapper import build_check_in_open_event, normalize_sensor_event
 
 logger = logging.getLogger(__name__)
 
 
 class MqttRelay:
-    """Subscribes only to ESP32 data and republishes normalized mobile events."""
+    """Routes PIR data locally and batches device heartbeats for Java sync."""
 
     def __init__(
         self,
         settings: Settings,
         readiness_probe: Callable[[], Awaitable[bool]],
+        registry: DeviceRegistry | None = None,
     ) -> None:
         self._settings = settings
         self._readiness_probe = readiness_probe
+        self._registry = registry
         self._client: MQTTClient | None = None
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -41,13 +44,20 @@ class MqttRelay:
         await self._disconnect()
 
     async def _connect_and_subscribe(self) -> None:
-        self._client = MQTTClient()
-        await self._client.connect(self._settings.internal_broker_url)
+        self._client = MQTTClient(client_id=self._settings.FOG_RELAY_USERNAME)
+        await self._client.connect(self._settings.relay_broker_url)
         logger.info("[Relay] Connected to broker")
         await self._client.subscribe(
-            [(self._settings.ESP32_INPUT_TOPIC, self._settings.MQTT_QOS)]
+            [
+                (self._settings.ESP32_INPUT_TOPIC, self._settings.MQTT_QOS),
+                (self._settings.DEVICE_HEARTBEAT_TOPIC, self._settings.MQTT_QOS),
+            ]
         )
-        logger.info("[Relay] Subscribed: %s", self._settings.ESP32_INPUT_TOPIC)
+        logger.info(
+            "[Relay] Subscribed: %s, %s",
+            self._settings.ESP32_INPUT_TOPIC,
+            self._settings.DEVICE_HEARTBEAT_TOPIC,
+        )
 
     async def _consume(self) -> None:
         while not self._stopping.is_set():
@@ -74,6 +84,10 @@ class MqttRelay:
 
     async def _process_message(self, topic: str, payload: bytes) -> None:
         try:
+            if self._is_heartbeat_topic(topic):
+                self._record_heartbeat(topic, payload)
+                return
+
             raw_payload = payload.decode("utf-8", errors="replace")
             logger.info("[ESP32] topic=%s", topic)
             logger.info("[ESP32] payload=%s", raw_payload)
@@ -82,7 +96,11 @@ class MqttRelay:
                 return
 
             sensor_device_id = str(event["data"]["sensorDeviceId"])
-            kiosk_device_id = self._settings.sensor_kiosk_map.get(sensor_device_id)
+            kiosk_device_id = (
+                self._registry.kiosk_for_sensor(sensor_device_id)
+                if self._registry is not None
+                else self._settings.sensor_kiosk_map.get(sensor_device_id)
+            )
             if kiosk_device_id is None:
                 logger.warning(
                     "[Relay] No kiosk mapping for sensor deviceId=%s",
@@ -132,6 +150,34 @@ class MqttRelay:
             )
         except Exception:
             logger.exception("[Relay] Failed to process message on %s", topic)
+
+    def _is_heartbeat_topic(self, topic: str) -> bool:
+        parts = topic.split("/")
+        return len(parts) == 4 and parts[0] == "taekwondo" and parts[1] == "devices" and parts[3] == "heartbeat"
+
+    def _record_heartbeat(self, topic: str, payload: bytes) -> None:
+        """Trust the authenticated MQTT topic for identity, not the payload."""
+        if self._registry is None:
+            return
+        device_code = topic.split("/")[2]
+        try:
+            body = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        self._registry.record_heartbeat(
+            device_code,
+            {
+                "hardwareVersion": body.get("hardwareVersion"),
+                "firmwareVersion": body.get("firmwareVersion"),
+                "appliedConfigVersion": body.get("appliedConfigVersion"),
+                "health": body.get("health") or "HEALTHY",
+                "errorCode": body.get("errorCode"),
+                "state": json.dumps(body, separators=(",", ":")),
+            },
+        )
+        logger.info("[Relay] Queued heartbeat deviceCode=%s", device_code)
 
     async def _disconnect(self) -> None:
         client, self._client = self._client, None

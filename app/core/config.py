@@ -1,4 +1,5 @@
 import json
+import secrets
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
@@ -83,11 +84,19 @@ class Settings(BaseSettings):
     MQTT_INTERNAL_HOST: str
     MQTT_INTERNAL_PORT: int
     ESP32_INPUT_TOPIC: str
+    DEVICE_HEARTBEAT_TOPIC: str = "taekwondo/devices/+/heartbeat"
     MOBILE_OUTPUT_TOPIC: str
     MQTT_QOS: int
     SENSOR_KIOSK_MAP: str = "{}"
     MOBILE_COMMAND_TOPIC_TEMPLATE: str = "taekwondo/kiosks/{deviceId}/commands"
     MOTION_DEBOUNCE_SECONDS: float = 5.0
+    FOG_GATEWAY_DEVICE_CODE: str = ""
+    FOG_GATEWAY_DEVICE_SECRET: str = ""
+    FOG_GATEWAY_CREDENTIAL_PATH: str = ".fog/gateway-credential.json"
+    FOG_RELAY_USERNAME: str = "__fog_relay__"
+    FOG_RELAY_SECRET: str = ""
+    FOG_REGISTRY_CACHE_PATH: str = ".fog/device-registry.json"
+    FOG_SYNC_INTERVAL_SECONDS: float = 30.0
 
     # Java Cloud face check-in integration
     JAVA_CLOUD_BASE_URL: str = "http://127.0.0.1:8080"
@@ -164,6 +173,40 @@ class Settings(BaseSettings):
                 "MOBILE_COMMAND_TOPIC_TEMPLATE must contain {deviceId}"
             )
         return self.MOBILE_COMMAND_TOPIC_TEMPLATE.format(deviceId=device_id)
+
+    def ensure_relay_credential(self) -> str:
+        """Create a process-local credential used only by the embedded relay."""
+        if not self.FOG_RELAY_SECRET:
+            self.FOG_RELAY_SECRET = secrets.token_urlsafe(32)
+        return self.FOG_RELAY_SECRET
+
+    @property
+    def relay_broker_url(self) -> str:
+        return (
+            f"mqtt://{self.FOG_RELAY_USERNAME}:{self.FOG_RELAY_SECRET}"
+            f"@{self.MQTT_INTERNAL_HOST}:{self.MQTT_INTERNAL_PORT}"
+        )
+
+    def load_fog_gateway_credential(self) -> bool:
+        """Hydrate the enrolled Fog credential without putting its secret in .env."""
+        path = Path(self.FOG_GATEWAY_CREDENTIAL_PATH)
+        if not path.is_absolute():
+            path = BASE_DIR / path
+        if not path.exists():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            device_code = str(payload["deviceCode"]).strip()
+            secret = str(payload["secret"]).strip()
+            java_url = str(payload["javaUrl"]).strip()
+        except (OSError, KeyError, TypeError, json.JSONDecodeError, ValueError):
+            return False
+        if not device_code or not secret or not java_url:
+            return False
+        self.FOG_GATEWAY_DEVICE_CODE = device_code
+        self.FOG_GATEWAY_DEVICE_SECRET = secret
+        self.JAVA_CLOUD_BASE_URL = java_url
+        return True
 
 
 settings = Settings()
