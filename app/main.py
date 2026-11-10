@@ -27,7 +27,7 @@ from app.exceptions.exception_handler import (
 )
 from app.exceptions.face_embedding_exception import FaceEmbeddingException
 from app.schemas.mqtt_relay import MqttRelay
-from app.services.broker import create_broker
+from app.services.broker import create_broker, disconnect_device_sessions
 from app.services.device_registry import DeviceRegistry
 from app.services.mqtt_registry_plugins import set_registry, set_relay_credential
 from app.utils.insightface_utils import initialize_face_app, is_face_app_initialized
@@ -180,6 +180,7 @@ async def lifespan(app: FastAPI):
             while True:
                 try:
                     synced = await registry.sync()
+                    await disconnect_device_sessions(broker, registry.take_invalidated_device_codes())
                     if not synced:
                         logger.warning("[Registry] Sync was not completed; retaining the local snapshot")
                 except Exception:
