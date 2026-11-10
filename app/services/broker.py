@@ -22,3 +22,10 @@ def create_broker(settings: Settings) -> Broker:
         },
     }
     return Broker(config)
+
+
+async def disconnect_device_sessions(broker: Broker, device_codes: set[str]) -> None:
+    """aMQTT has no public per-client close API; isolate the pinned adapter here."""
+    for device_code in device_codes:
+        if device_code in broker.sessions:
+            await broker._cleanup_session(device_code)  # noqa: SLF001
