@@ -21,6 +21,7 @@ def create_graph_qa_format_agent() -> Agent:
         model=create_model(),
         description="Định dạng câu trả lời tri thức Taekwondo dựa trên bằng chứng đã truy xuất.",
         instruction=PROMPT_PATH.read_text(encoding="utf-8"),
+        include_contents="none",
     )
 
 

@@ -104,9 +104,7 @@ def test_graph_qa_tools_are_active_only(monkeypatch) -> None:
     assert context.state["graph_qa_schema_context"]["schemaDigest"] == "digest-1"
     graph_qa_tools = import_module("app.agent.skills.graph-qa.tools")
     schema_context_skill_tools = import_module("app.agent.skills.schema-context.tools")
-    assert "create_schema_proposal" not in {
-        tool.__name__ for tool in graph_qa_tools.get_tools()
-    }
+    assert graph_qa_tools.get_tools() == []
     assert "load_active_schema_context" in {
         tool.__name__ for tool in schema_context_skill_tools.get_tools()
     }

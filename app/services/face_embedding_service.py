@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import cv2
@@ -20,6 +21,7 @@ class FaceEmbeddingService:
         self,
         file: UploadFile | None,
         request_id: str | None = None,
+        on_face_detected: Callable[[], Awaitable[None]] | None = None,
     ) -> FaceEmbeddingResponse:
         started_at = time.perf_counter()
         if file is None:
@@ -141,6 +143,9 @@ class FaceEmbeddingService:
             raise FaceEmbeddingException(
                 FaceEmbeddingErrorCode.MULTIPLE_FACES_DETECTED
             )
+
+        if on_face_detected is not None:
+            await on_face_detected()
 
         step_start = time.perf_counter()
         embedding = getattr(faces[0], "embedding", None)
