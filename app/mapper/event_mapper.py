@@ -49,3 +49,19 @@ def build_check_in_open_event(
         "sensorDeviceId": sensor_event["data"]["sensorDeviceId"],
         "reason": "PIR_MOTION",
     }
+
+
+def build_check_in_close_event(
+    sensor_event: dict[str, Any],
+    kiosk_device_id: str,
+    reason: str = "PIR_MOTION_ENDED",
+) -> dict[str, Any]:
+    """Create the kiosk command that closes check-in for a sensor condition."""
+    return {
+        "type": "CHECK_IN_CLOSE",
+        "eventId": sensor_event["eventId"],
+        "occurredAt": sensor_event["occurredAt"],
+        "deviceId": kiosk_device_id,
+        "sensorDeviceId": sensor_event["data"]["sensorDeviceId"],
+        "reason": reason,
+    }

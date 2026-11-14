@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     SENSOR_KIOSK_MAP: str = "{}"
     MOBILE_COMMAND_TOPIC_TEMPLATE: str = "taekwondo/kiosks/{deviceId}/commands"
     MOTION_DEBOUNCE_SECONDS: float = 5.0
+    ESP32_HEARTBEAT_TIMEOUT_SECONDS: float = 90.0
     FOG_GATEWAY_DEVICE_CODE: str = ""
     FOG_GATEWAY_DEVICE_SECRET: str = ""
     FOG_GATEWAY_CREDENTIAL_PATH: str = ".fog/gateway-credential.json"

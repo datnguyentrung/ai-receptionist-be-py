@@ -4,12 +4,17 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from amqtt.client import ClientError, MQTTClient
 
 from app.core.config import Settings
 from app.services.device_registry import DeviceRegistry
-from app.mapper.event_mapper import build_check_in_open_event, normalize_sensor_event
+from app.mapper.event_mapper import (
+    build_check_in_close_event,
+    build_check_in_open_event,
+    normalize_sensor_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +33,21 @@ class MqttRelay:
         self._registry = registry
         self._client: MQTTClient | None = None
         self._task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._last_trigger_at: dict[str, float] = {}
+        self._last_sensor_seen_at: dict[str, float] = {}
+        self._heartbeat_timeout_seconds = float(
+            getattr(settings, "ESP32_HEARTBEAT_TIMEOUT_SECONDS", 90.0)
+        )
 
     async def start(self) -> None:
         await self._connect_and_subscribe()
         self._task = asyncio.create_task(self._consume(), name="mqtt-relay")
+        self._watchdog_task = asyncio.create_task(
+            self._watch_for_stale_sensor_heartbeats(),
+            name="mqtt-sensor-heartbeat-watchdog",
+        )
 
     async def stop(self) -> None:
         self._stopping.set()
@@ -41,6 +55,10 @@ class MqttRelay:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watchdog_task
         await self._disconnect()
 
     async def _connect_and_subscribe(self) -> None:
@@ -96,15 +114,31 @@ class MqttRelay:
                 return
 
             sensor_device_id = str(event["data"]["sensorDeviceId"])
-            kiosk_device_id = (
-                self._registry.kiosk_for_sensor(sensor_device_id)
-                if self._registry is not None
-                else self._settings.sensor_kiosk_map.get(sensor_device_id)
-            )
+            self._last_sensor_seen_at[sensor_device_id] = time.monotonic()
+            kiosk_device_id = self._kiosk_for_sensor(sensor_device_id)
             if kiosk_device_id is None:
                 logger.warning(
                     "[Relay] No kiosk mapping for sensor deviceId=%s",
                     sensor_device_id,
+                )
+                return
+
+            motion_detected = event["data"].get("motion")
+            if not isinstance(motion_detected, bool):
+                logger.warning(
+                    "[Relay] Ignoring sensor deviceId=%s without boolean motion state",
+                    sensor_device_id,
+                )
+                return
+
+            if not motion_detected:
+                # A completed motion cycle must allow the next LOW -> HIGH edge
+                # to reopen check-in immediately, without waiting for debounce.
+                self._last_trigger_at.pop(sensor_device_id, None)
+                self._last_sensor_seen_at.pop(sensor_device_id, None)
+                await self._publish_command(
+                    build_check_in_close_event(event, kiosk_device_id),
+                    kiosk_device_id,
                 )
                 return
 
@@ -129,27 +163,85 @@ class MqttRelay:
 
             self._last_trigger_at[sensor_device_id] = now
             command = build_check_in_open_event(event, kiosk_device_id)
-
-            if self._client is None:
-                raise ClientError("MQTT relay client is not connected")
-            encoded_event = json.dumps(
-                command, ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
-            output_topic = self._settings.mobile_command_topic(kiosk_device_id)
-            await self._client.publish(
-                output_topic,
-                encoded_event,
-                qos=self._settings.MQTT_QOS,
-                retain=False,
-            )
-            logger.info(
-                "[Relay] published topic=%s eventId=%s kioskDeviceId=%s",
-                output_topic,
-                event["eventId"],
-                kiosk_device_id,
-            )
+            await self._publish_command(command, kiosk_device_id)
         except Exception:
             logger.exception("[Relay] Failed to process message on %s", topic)
+
+    async def _watch_for_stale_sensor_heartbeats(self) -> None:
+        interval_seconds = min(5.0, max(1.0, self._heartbeat_timeout_seconds / 3))
+        while not self._stopping.is_set():
+            try:
+                await asyncio.sleep(interval_seconds)
+                await self._close_stale_sensor_check_ins()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[Relay] Sensor heartbeat watchdog failed")
+
+    async def _close_stale_sensor_check_ins(self) -> None:
+        now = time.monotonic()
+        stale_sensor_ids = [
+            sensor_device_id
+            for sensor_device_id, last_seen_at in self._last_sensor_seen_at.items()
+            if now - last_seen_at >= self._heartbeat_timeout_seconds
+        ]
+        for sensor_device_id in stale_sensor_ids:
+            kiosk_device_id = self._kiosk_for_sensor(sensor_device_id)
+            if kiosk_device_id is None:
+                self._last_sensor_seen_at.pop(sensor_device_id, None)
+                continue
+
+            sensor_event = {
+                "eventId": f"sensor-offline-{sensor_device_id}-{int(now * 1000)}",
+                "occurredAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "data": {"sensorDeviceId": sensor_device_id},
+            }
+            try:
+                await self._publish_command(
+                    build_check_in_close_event(
+                        sensor_event,
+                        kiosk_device_id,
+                        reason="SENSOR_OFFLINE",
+                    ),
+                    kiosk_device_id,
+                )
+            except Exception:
+                logger.exception(
+                    "[Relay] Failed to close check-in for offline sensor deviceId=%s",
+                    sensor_device_id,
+                )
+                continue
+
+            self._last_sensor_seen_at.pop(sensor_device_id, None)
+            self._last_trigger_at.pop(sensor_device_id, None)
+
+    def _kiosk_for_sensor(self, sensor_device_id: str) -> str | None:
+        if self._registry is not None:
+            return self._registry.kiosk_for_sensor(sensor_device_id)
+        return self._settings.sensor_kiosk_map.get(sensor_device_id)
+
+    async def _publish_command(
+        self, command: dict[str, object], kiosk_device_id: str
+    ) -> None:
+        if self._client is None:
+            raise ClientError("MQTT relay client is not connected")
+        encoded_event = json.dumps(
+            command, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        output_topic = self._settings.mobile_command_topic(kiosk_device_id)
+        await self._client.publish(
+            output_topic,
+            encoded_event,
+            qos=self._settings.MQTT_QOS,
+            retain=False,
+        )
+        logger.info(
+            "[Relay] published topic=%s type=%s eventId=%s kioskDeviceId=%s",
+            output_topic,
+            command["type"],
+            command["eventId"],
+            kiosk_device_id,
+        )
 
     def _is_heartbeat_topic(self, topic: str) -> bool:
         parts = topic.split("/")
@@ -157,9 +249,11 @@ class MqttRelay:
 
     def _record_heartbeat(self, topic: str, payload: bytes) -> None:
         """Trust the authenticated MQTT topic for identity, not the payload."""
+        device_code = topic.split("/")[2]
+        if self._kiosk_for_sensor(device_code) is not None:
+            self._last_sensor_seen_at[device_code] = time.monotonic()
         if self._registry is None:
             return
-        device_code = topic.split("/")[2]
         try:
             body = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
