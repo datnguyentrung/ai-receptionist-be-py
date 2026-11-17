@@ -12,7 +12,6 @@ from app.services.graphrag.cypher_guard import (
     normalize_neo4j_value,
     validate_read_cypher,
 )
-from app.services.graphrag.embeddings import cosine_similarity
 from app.services.graphrag.retrieval import (
     INSUFFICIENT_EVIDENCE,
     EvidenceBundle,
@@ -149,14 +148,10 @@ async def vector_search(
             }
         ]
 
-    # Rerank chunk hits bằng cosine_similarity
-    for hit in chunk_hits:
-        emb = hit.get("embedding") or []
-        hit["cosineScore"] = cosine_similarity(query_vector, emb)
-    chunk_hits.sort(key=lambda h: -float(h.get("cosineScore", 0.0)))
+    chunk_hits.sort(key=lambda hit: -float(hit.get("score", 0.0)))
     selected = chunk_hits[:effective_top_k]
 
-    top_score = float(selected[0]["cosineScore"]) if selected else 0.0
+    top_score = float(selected[0]["score"]) if selected else 0.0
     sufficient = bool(selected and top_score >= settings.RAG_MIN_COSINE_SCORE)
 
     result = {

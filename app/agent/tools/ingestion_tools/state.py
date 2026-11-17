@@ -35,14 +35,18 @@ def workspace_payload(
             "wait_for_schema_review",
         )
     elif pending.status == "REPAIR_REQUIRED":
-        stage, terminal, next_action = "repair_required", False, "repair_batch"
+        stage, terminal, next_action = (
+            "repair_required",
+            False,
+            "choose_ingestion_recovery",
+        )
     else:
         stage, terminal, next_action = "batching", False, "process_batch"
     payload: dict[str, Any] = {
         "success": workspace.job.status != IngestionJobStatus.FAILED,
         "stage": stage,
         "terminal": terminal,
-        "retryRequired": next_action == "repair_batch",
+        "retryRequired": next_action == "choose_ingestion_recovery",
         "nextAction": next_action,
         "ingestionId": str(workspace.job.id),
         "documentId": str(workspace.document.id),
@@ -62,6 +66,8 @@ def workspace_payload(
             "chunkIndexes": pending.chunk_indexes,
             "selectedScopeKeys": pending.scope_keys,
         }
+        if pending.status == "REPAIR_REQUIRED":
+            payload["recoveryOptions"] = operations.recovery_options(pending)
     return payload
 
 
@@ -135,7 +141,7 @@ def batch_result_payload(workspace: Workspace, batch_index: int) -> dict[str, An
         if schema_gap
         else "reselect_scopes"
         if scope_gap
-        else "repair_batch",
+        else "choose_ingestion_recovery",
         "ingestionId": str(workspace.job.id),
         "batchIndex": batch_index,
         "scopeKeys": batch.scope_keys,
@@ -147,6 +153,8 @@ def batch_result_payload(workspace: Workspace, batch_index: int) -> dict[str, An
     context = repair_context(batch)
     if context is not None:
         payload["repairContext"] = context
+    if batch.status == "REPAIR_REQUIRED":
+        payload["recoveryOptions"] = operations.recovery_options(batch)
     return payload
 
 

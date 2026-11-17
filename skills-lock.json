@@ -9,21 +9,24 @@
     },
     "find-skills": {
       "source": "vercel-labs/skills",
+      "commit": "57217cf86ba38148a57af9e90d14a4c049558330",
       "sourceType": "github",
       "skillPath": "skills/find-skills/SKILL.md",
-      "computedHash": ""
+      "computedHash": "7bc223e2aafbdbf6e50ea243ba6ef67fe432bb069ab439fea0390795dac0bf7f"
     },
     "google-agents-cli-adk-code": {
       "source": "google/agents-cli",
+      "commit": "6eedbdc2f44c388cbfc5f305eb83b9924cfefebb",
       "sourceType": "github",
       "skillPath": "skills/google-agents-cli-adk-code/SKILL.md",
-      "computedHash": "f3d564d2833ab42e7dc02c4a175bf63e1f5014e2873b6c7020009dbf13a8f134"
+      "computedHash": "5c3649c51cbe104837e06094f4ca93b8e619fa3eb43d7425f172f6f0b473ceda"
     },
     "google-agents-cli-scaffold": {
       "source": "google/agents-cli",
+      "commit": "6eedbdc2f44c388cbfc5f305eb83b9924cfefebb",
       "sourceType": "github",
       "skillPath": "skills/google-agents-cli-scaffold/SKILL.md",
-      "computedHash": "350aa1e29f7f4162d1a15ebbde2ae017d770563d090cdc90706a3e43d6687244"
+      "computedHash": "e253c7808eb519f7d23f0089107b9f63c0d3d612245256af14ab0a86260b18ef"
     },
     "google-agents-cli-workflow": {
       "source": "google/agents-cli",
@@ -40,9 +43,10 @@
     },
     "ponytail": {
       "source": "dietrichgebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
       "sourceType": "github",
       "skillPath": "skills/ponytail/SKILL.md",
-      "computedHash": ""
+      "computedHash": "56d72677aca02689ac89bd48734e8c19b40ab86716d1257eaf5f1238b43cda6b"
     },
     "senior-architect": {
       "source": "alirezarezvani/claude-skills",

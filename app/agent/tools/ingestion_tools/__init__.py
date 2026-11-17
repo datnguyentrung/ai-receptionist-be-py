@@ -32,12 +32,14 @@ from app.agent.tools.ingestion_tools.schema import (
 from app.agent.tools.ingestion_tools.shared import store_checkpoint, tool_exception
 from app.agent.tools.ingestion_tools.state import (
     batch_result_payload,
+    rebuild_batch_accumulator,
     repair_context,
     update_batch_accumulator,
 )
 from app.agent.tools.ingestion_tools.workflow import (
     abort_ingestion,
     begin_ingestion,
+    choose_ingestion_recovery,
     commit_ingestion,
     finalize_ingestion,
     get_ingestion_preview,
@@ -55,6 +57,7 @@ __all__ = [
     "apply_schema_proposal",
     "batch_result_payload",
     "begin_ingestion",
+    "choose_ingestion_recovery",
     "commit_ingestion",
     "create_schema_proposal",
     "delete_document",
@@ -72,6 +75,7 @@ __all__ = [
     "log_ingestion_event",
     "rebase_ingestion",
     "repair_context",
+    "rebuild_batch_accumulator",
     "repair_ingestion_batch",
     "review_ingestion_conflict",
     "review_schema_proposal",

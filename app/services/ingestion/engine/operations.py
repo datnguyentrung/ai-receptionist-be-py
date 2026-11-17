@@ -94,6 +94,34 @@ MAX_BATCH_VALIDATION_ATTEMPTS = max(
 logger = logging.getLogger(__name__)
 
 
+def recovery_options(batch: IngestionBatchData) -> list[dict[str, Any]]:
+    """Describe the user-selectable recovery paths for a repair-required batch."""
+    repair_unavailable_reason: str | None = None
+    if not batch.validated_baseline:
+        repair_unavailable_reason = "No protected baseline is available for repair."
+    elif batch.validation_attempts >= MAX_BATCH_VALIDATION_ATTEMPTS:
+        repair_unavailable_reason = "The repair retry limit has been reached."
+
+    return [
+        {
+            "strategy": "REPAIR",
+            "label": "Continue repair",
+            "description": "Repair only the reported validation issues using the saved baseline and scope.",
+            "available": repair_unavailable_reason is None,
+            "unavailableReason": repair_unavailable_reason,
+        },
+        {
+            "strategy": "REEXTRACT",
+            "label": "Re-extract from this batch",
+            "description": "Discard uncommitted work from this batch onward and extract it again.",
+            "available": True,
+            "unavailableReason": None,
+            "destructive": True,
+            "resetFromBatch": batch.batch_index,
+        },
+    ]
+
+
 # ============================================================================
 # 1. NHÓM CORE INGESTION LIFECYCLE (VÒNG ĐỜI NẠP TÀI LIỆU & KNOWLEDGE GRAPH)
 # ============================================================================
@@ -1586,14 +1614,18 @@ def status_payload(
             "wait_for_schema_review",
         )
     elif pending.status == "REPAIR_REQUIRED":
-        stage, terminal, next_action = "repair_required", False, "repair_batch"
+        stage, terminal, next_action = (
+            "repair_required",
+            False,
+            "choose_ingestion_recovery",
+        )
     else:
         stage, terminal, next_action = "batching", False, "process_batch"
     result: dict[str, Any] = {
         "success": workspace.job.status != IngestionJobStatus.FAILED,
         "stage": stage,
         "terminal": terminal,
-        "retryRequired": next_action == "repair_batch",
+        "retryRequired": next_action == "choose_ingestion_recovery",
         "nextAction": next_action,
         "ingestionId": str(workspace.job.id),
         "documentId": str(workspace.document.id),
@@ -1617,6 +1649,8 @@ def status_payload(
             "chunkIndexes": pending.chunk_indexes,
             "selectedScopeKeys": pending.scope_keys,
         }
+        if pending.status == "REPAIR_REQUIRED":
+            result["recoveryOptions"] = recovery_options(pending)
     if workspace.job.error_message:
         result["errors"] = [
             {
