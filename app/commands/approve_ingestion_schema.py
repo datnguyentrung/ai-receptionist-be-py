@@ -10,7 +10,11 @@ from google.adk.sessions import InMemorySessionService, Session
 from google.adk.tools import ToolContext
 from google.adk.tools.tool_confirmation import ToolConfirmation
 
-from app.agent.tools.ingestion_tools import apply_schema_proposal, rebase_ingestion, review_schema_proposal
+from app.agent.tools.ingestion_tools import (
+    apply_schema_proposal,
+    rebase_ingestion,
+    review_schema_proposal,
+)
 from app.core.ingestion_runtime import shutdown_service_container
 
 
@@ -34,7 +38,7 @@ async def _run(ingestion_id: str, proposal_ids: list[str]) -> None:
             for proposal_id in proposal_ids
         ]
         applied = [await apply_schema_proposal(proposal_id, context) for proposal_id in proposal_ids]
-        target_version_id = applied[-1]["ontologyVersionId"]
+        target_version_id = applied[-1]["targetOntologyVersionId"]
         rebase = await rebase_ingestion(ingestion_id, target_version_id, context)
         print(json.dumps({"reviews": reviews, "applied": applied, "rebase": rebase}, ensure_ascii=True))
     finally:

@@ -1,5 +1,6 @@
 """Ontology-schema proposal and ingestion rebase tools."""
 
+import uuid
 from typing import Any
 
 from google.adk.tools import ToolContext
@@ -38,7 +39,7 @@ async def create_schema_proposal(
             "INGESTION_ID_REQUIRED",
             "Provide ingestion_id or call begin_ingestion first",
         )
-    request = {
+    request: dict[str, Any] = {
         "ingestion_id": effective_ingestion_id,
         "batch_index": batch_index,
         "reason": reason,
@@ -239,8 +240,7 @@ async def apply_schema_proposal(
             "success": True,
             "stage": "schema_draft_prepared",
             "proposalId": effective_id,
-            "ontologyVersionId": str(version.id),
-            "ontologyVersion": version.version,
+            "targetOntologyVersionId": str(version.id),
             "nextAction": "rebase_ingestion",
         }
         log_ingestion_event(
@@ -256,6 +256,21 @@ async def apply_schema_proposal(
 async def rebase_ingestion(
     ingestion_id: str, target_ontology_version_id: str, tool_context: ToolContext
 ) -> dict[str, Any]:
+    try:
+        target_ontology_version_id = str(
+            uuid.UUID(str(target_ontology_version_id).strip())
+        )
+    except (AttributeError, TypeError, ValueError):
+        result = tool_exception(
+            "ontology_rebase",
+            ingestion_id,
+            ValueError(
+                "target_ontology_version_id must be a UUID; "
+                "use apply_schema_proposal.targetOntologyVersionId"
+            ),
+        )
+        store_checkpoint(tool_context, result)
+        return result
     request = {
         "ingestion_id": ingestion_id,
         "target_ontology_version_id": target_ontology_version_id,

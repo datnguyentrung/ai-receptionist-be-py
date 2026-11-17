@@ -13,7 +13,7 @@ def create_model() -> Gemini:
     return Gemini(
         model=os.getenv(
             "GOOGLE_ADK_MODEL",
-            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
         ),
         client_kwargs={
             "api_key": settings.GEMINI_API_KEY,

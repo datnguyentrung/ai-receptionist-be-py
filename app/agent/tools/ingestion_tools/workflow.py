@@ -132,10 +132,14 @@ async def _workspace_with_pending_proposals(
     result = workspace_payload(workspace, resumed=resumed, idempotent=resumed)
     if result["stage"] != "awaiting_schema_approval":
         return result
-    pending_proposals = []
-    for summary in await container.ontology_lifecycle.ingestion_schema_changes(
+    schema_changes = await container.ontology_lifecycle.ingestion_schema_changes(
         str(workspace.job.id)
-    ):
+    )
+    result = _schema_change_action(result, schema_changes)
+    if result["nextAction"] != "wait_for_schema_review":
+        return result
+    pending_proposals = []
+    for summary in schema_changes:
         if summary["status"] != "PROPOSED":
             continue
         proposal = await container.ontology_lifecycle.get_proposal(summary["proposalId"])
@@ -156,6 +160,70 @@ async def _workspace_with_pending_proposals(
         result["pendingSchemaProposals"] = pending_proposals
         if len(pending_proposals) == 1:
             result["pendingSchemaProposal"] = pending_proposals[0]
+    return result
+
+
+def _schema_change_action(
+    result: dict[str, Any], schema_changes: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Resolve stale schema-blocked state to the next actionable tool.
+
+    Once a proposal has been applied, the batch keeps its historical
+    SCHEMA_PROPOSAL_PENDING error until rebase resets it. Returning
+    ``wait_for_schema_review`` in that state traps the workflow because there
+    is no proposal left for the user to approve.
+    """
+    pending = [item for item in schema_changes if item["status"] == "PROPOSED"]
+    result["pendingProposalCount"] = len(pending)
+    if result.get("nextAction") != "wait_for_schema_review":
+        return result
+    if pending:
+        return result
+
+    applied_drafts = [
+        item
+        for item in schema_changes
+        if item["status"] in {"APPROVED", "APPLIED"} and item.get("draftVersionId")
+    ]
+    if applied_drafts:
+        target = applied_drafts[-1]
+        result.update(
+            {
+                "stage": "schema_rebase_required",
+                "nextAction": "rebase_ingestion",
+                "targetOntologyVersionId": target["draftVersionId"],
+                "schemaRecovery": {
+                    "code": "APPLIED_SCHEMA_NOT_REBASED",
+                    "proposalId": target["proposalId"],
+                    "message": (
+                        "The schema proposal was already applied; rebase the "
+                        "ingestion before processing its batches again."
+                    ),
+                },
+            }
+        )
+        return result
+
+    approved_without_draft = [
+        item for item in schema_changes if item["status"] == "APPROVED"
+    ]
+    if approved_without_draft:
+        target = approved_without_draft[-1]
+        result.update(
+            {
+                "stage": "schema_draft_required",
+                "nextAction": "apply_schema_proposal",
+                "proposalId": target["proposalId"],
+                "schemaRecovery": {
+                    "code": "APPROVED_SCHEMA_NOT_APPLIED",
+                    "proposalId": target["proposalId"],
+                    "message": (
+                        "The schema proposal was approved but has not been "
+                        "applied to the ingestion draft."
+                    ),
+                },
+            }
+        )
     return result
 
 
@@ -270,15 +338,13 @@ async def get_ingestion_status(
             container.repository, ingestion_id
         )
         result = operations.status_payload(workspace)
+        schema_changes = await container.ontology_lifecycle.ingestion_schema_changes(
+            ingestion_id
+        )
+        result = _schema_change_action(result, schema_changes)
         result["pendingConflictCount"] = sum(
             item["decision"] == "PENDING"
             for item in await container.repository.list_fact_conflicts(ingestion_id)
-        )
-        result["pendingProposalCount"] = sum(
-            item["status"] == "PROPOSED"
-            for item in await container.ontology_lifecycle.ingestion_schema_changes(
-                ingestion_id
-            )
         )
         result["reportDigest"] = workspace.job.summary.get("reportDigest")
         store_checkpoint(tool_context, result)
