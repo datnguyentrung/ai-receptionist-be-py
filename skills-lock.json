@@ -1,47 +1,54 @@
 {
-  "version": 1,
+  "version": 2,
   "skills": {
     "codebase-design": {
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/codebase-design/SKILL.md",
-      "computedHash": "fb1d8ab98ad151551eeade003e3ae55a46578a380fd9fc3ed4dbf9c2fbce0a9f"
+      "computedHash": "721a6a709001482b70d4ecd3a7880a84ec158170236b999b1f14a8a321e20059"
     },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
       "skillPath": "skills/find-skills/SKILL.md",
-      "computedHash": "b146008599c31057cef1c145774cea5d5afb30e8f43fa802e47a4b461419aaaf"
+      "computedHash": ""
     },
     "google-agents-cli-adk-code": {
       "source": "google/agents-cli",
       "sourceType": "github",
       "skillPath": "skills/google-agents-cli-adk-code/SKILL.md",
-      "computedHash": "c91ad91fcf03f554d112cd6015e628264a0ec16e490e967d30f02e20d3b534fc"
+      "computedHash": "f3d564d2833ab42e7dc02c4a175bf63e1f5014e2873b6c7020009dbf13a8f134"
     },
     "google-agents-cli-scaffold": {
       "source": "google/agents-cli",
       "sourceType": "github",
       "skillPath": "skills/google-agents-cli-scaffold/SKILL.md",
-      "computedHash": "eab981eee78dc9d1106e001e1315432f36599535ca3c4757159d3de5e67009d9"
+      "computedHash": "350aa1e29f7f4162d1a15ebbde2ae017d770563d090cdc90706a3e43d6687244"
+    },
+    "google-agents-cli-workflow": {
+      "source": "google/agents-cli",
+      "commit": "6eedbdc2f44c388cbfc5f305eb83b9924cfefebb",
+      "sourceType": "github",
+      "skillPath": "skills/google-agents-cli-workflow/SKILL.md",
+      "computedHash": "4dbe04ce77210a04de6c93bf989a7acd352aa808fa6238fbdd3962012b4e7683"
     },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
-      "computedHash": "f74b0bf1be26220dd615523fc1c0562567f9c463d9e9b255d4031345ffb37cd3"
+      "computedHash": "5334eba3370c6124922f8819447b42fabd8df8d11008a242083b8527589a8686"
     },
     "ponytail": {
       "source": "dietrichgebert/ponytail",
       "sourceType": "github",
       "skillPath": "skills/ponytail/SKILL.md",
-      "computedHash": "9e8d05cbbaf6dc38f0cffc924c09b3cbe76d94ba4ba0d09bde803da2f8c6b5a0"
+      "computedHash": ""
     },
     "senior-architect": {
       "source": "alirezarezvani/claude-skills",
       "sourceType": "github",
       "skillPath": "engineering-team/skills/senior-architect/SKILL.md",
-      "computedHash": "2b463626bf730b21872768447388c18a4387a7a307e00013b696c0f15e5659e3"
+      "computedHash": "0151a77a3e455d4b76bb2c2f17f4759075070c2df0b4f769873dc4723f9cd9b9"
     }
   }
 }

@@ -23,15 +23,20 @@ from app.agent.tools.ingestion_tools import (
     update_batch_accumulator,
 )
 from app.core.config import settings
-from app.core.ingestion_runtime import get_service_container, ingestion_model_assignments
+from app.core.ingestion_runtime import (
+    get_service_container,
+    ingestion_model_assignments,
+)
 from app.schemas.ingestion.base import IngestionModel
+from app.schemas.ingestion.ontology import OntologyProjection
 from app.schemas.ingestion.semantic_patch import (
     SemanticGraphPatchFragment,
     SemanticGraphRepairDelta,
 )
-from app.schemas.ingestion.ontology import OntologyProjection
 from app.services.ingestion.engine import operations
-from app.services.ingestion.schema.extraction_contract import build_entity_extraction_contract
+from app.services.ingestion.schema.extraction_contract import (
+    build_entity_extraction_contract,
+)
 from app.utils.ingestion_helpers import stable_entity_key
 
 
@@ -279,7 +284,7 @@ class BatchExecutionModule:
         self, model: BatchModel | None = None, *, prompt_max_bytes: int | None = None
     ) -> None:
         self._model = model or AdkBatchModel()
-        configured = os.getenv("INGESTION_BATCH_PROMPT_MAX_BYTES", "262144")
+        configured = os.getenv("INGESTION_BATCH_PROMPT_MAX_BYTES", "32768")
         self._prompt_max_bytes = (
             prompt_max_bytes
             if prompt_max_bytes is not None
@@ -332,6 +337,14 @@ class BatchExecutionModule:
                 )
                 return result
 
+            if prepared.batch.status == "BLOCKED_SCHEMA":
+                result = {
+                    **batch_result_payload(prepared.workspace, batch_index),
+                    "idempotent": True,
+                }
+                store_checkpoint(tool_context, result)
+                return result
+
             if prepared.batch.status == "REPAIR_REQUIRED":
                 scope_keys = self._normalize_scope_keys(
                     prepared.batch.scope_keys, prepared.catalog_keys
@@ -339,24 +352,23 @@ class BatchExecutionModule:
                 rep_ctx = repair_context(prepared.batch)
                 if rep_ctx is not None and bool(prepared.batch.validation_attempts < operations.MAX_BATCH_VALIDATION_ATTEMPTS):
                     strategy = "direct_repair"
+                    repair_scope = (
+                        await operations.load_scope(
+                            prepared.container.ontology_cache,
+                            scope_keys,
+                            prepared.version_id,
+                        )
+                    )["scope"]
                     repair_payload = {
                         "phase": "repair",
                         "ingestionId": ingestion_id,
                         "batchIndex": batch_index,
                         "scopeKeys": scope_keys,
-                        "scope": (
-                            await operations.load_scope(
-                                prepared.container.ontology_cache,
-                                scope_keys,
-                                prepared.version_id,
-                            )
-                        )["scope"],
+                        "entityExtractionContract": _contract_from_scope(repair_scope)
+                        or repair_scope,
                         "batch": prepared.payload["batch"],
                         **rep_ctx,
                     }
-                    repair_payload["entityExtractionContract"] = _contract_from_scope(
-                        repair_payload["scope"]
-                    )
                     repair_payload["modelAssignments"] = model_assignments()
                     repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
                         prepared.batch
@@ -510,6 +522,29 @@ class BatchExecutionModule:
                         prepared, scope_keys, extraction_output.extraction, tool_context
                     )
 
+            if result.get("stage") == "schema_gap_candidate":
+                workspace = await prepared.container.repository.block_batch_for_proposal(
+                    ingestion_id,
+                    batch_index,
+                    result["errors"],
+                )
+                result = {
+                    **result,
+                    "nextAction": "create_schema_proposal",
+                }
+                store_checkpoint(tool_context, result)
+                self._log_metrics(
+                    ingestion_id,
+                    batch_index,
+                    strategy,
+                    calls,
+                    prompt_bytes,
+                    requested_scope_keys,
+                    result.get("scopeKeys", scope_keys),
+                    result,
+                )
+                return result
+
             # Semantic Evidence Validation flow
             working_extraction = extraction_output.extraction
             if self._should_run_semantic_evidence(result, ingestion_id):
@@ -529,24 +564,23 @@ class BatchExecutionModule:
 
             if self._should_repair(result):
                 rep_context = result["repairContext"]
+                repair_scope = (
+                    await operations.load_scope(
+                        prepared.container.ontology_cache,
+                        scope_keys,
+                        prepared.version_id,
+                    )
+                )["scope"]
                 repair_payload = {
                     "phase": "repair",
                     "ingestionId": ingestion_id,
                     "batchIndex": batch_index,
                     "scopeKeys": scope_keys,
-                    "scope": (
-                        await operations.load_scope(
-                            prepared.container.ontology_cache,
-                            scope_keys,
-                            prepared.version_id,
-                        )
-                    )["scope"],
+                    "entityExtractionContract": _contract_from_scope(repair_scope)
+                    or repair_scope,
                     "batch": prepared.payload["batch"],
                     **rep_context,
                 }
-                repair_payload["entityExtractionContract"] = _contract_from_scope(
-                    repair_payload["scope"]
-                )
                 repair_payload["modelAssignments"] = model_assignments()
                 repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
                     prepared.batch
@@ -604,6 +638,15 @@ class BatchExecutionModule:
         workspace = await operations.required_workspace(
             container.repository, ingestion_id
         )
+        existing_batch = next(
+            (item for item in workspace.batches if item.batch_index == batch_index),
+            None,
+        )
+        if existing_batch is not None and existing_batch.status == "BLOCKED_SCHEMA":
+            return {
+                **batch_result_payload(workspace, batch_index),
+                "idempotent": True,
+            }
         guarded = operations.workflow_guard_payload(workspace, "load_scopes")
         if guarded is not None:
             store_checkpoint(tool_context, guarded)
@@ -710,10 +753,9 @@ class BatchExecutionModule:
             "phase": "extract",
             "ingestionId": str(prepared.workspace.job.id),
             "requiredScopeKeys": selected,
-            "scope": scope,
-            "entityExtractionContract": contract,
+            "entityExtractionContract": contract or scope,
             "modelAssignments": assignments,
-            **prepared.payload,
+            "batch": prepared.payload["batch"],
         }
 
     async def _reconcile_scope_keys(
