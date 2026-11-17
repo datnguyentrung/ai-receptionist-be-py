@@ -59,7 +59,7 @@ WORKFLOW_POLICY: dict[str, frozenset[str]] = {
     "COMMITTED": frozenset({"get_status", "commit"}),
     "ABORTED": frozenset({"get_status"}),
     # Giai đoạn xử lý thất bại
-    "FAILED": frozenset({"get_status"}),
+    "FAILED": frozenset({"get_status", "rebase_ingestion"}),
 }
 
 # Ánh xạ các trạng thái kết thúc (terminal states) và hành động tương ứng tiếp theo

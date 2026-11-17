@@ -130,6 +130,9 @@ async def _workspace_with_pending_proposals(
     container: Any, workspace: Any, *, resumed: bool = False
 ) -> dict[str, Any]:
     result = workspace_payload(workspace, resumed=resumed, idempotent=resumed)
+    result = _stale_baseline_action(result, workspace)
+    if result["nextAction"] == "rebase_ingestion":
+        return result
     if result["stage"] != "awaiting_schema_approval":
         return result
     schema_changes = await container.ontology_lifecycle.ingestion_schema_changes(
@@ -160,6 +163,55 @@ async def _workspace_with_pending_proposals(
         result["pendingSchemaProposals"] = pending_proposals
         if len(pending_proposals) == 1:
             result["pendingSchemaProposal"] = pending_proposals[0]
+    return result
+
+
+def _stale_baseline_action(
+    result: dict[str, Any], workspace: Any
+) -> dict[str, Any]:
+    """Require rebase when a batch baseline is pinned to an older ontology."""
+    stale_batches = []
+    current_version = str(workspace.job.ontology_version_id)
+    for batch in workspace.batches:
+        baseline = batch.validated_baseline
+        if not isinstance(baseline, dict):
+            continue
+        baseline_version = str(
+            baseline.get("ontologyVersion") or baseline.get("ontology_version") or ""
+        )
+        if baseline_version and baseline_version != current_version:
+            stale_batches.append(batch.batch_index)
+    if not stale_batches:
+        return result
+
+    result.update(
+        {
+            "success": False,
+            "stage": "schema_rebase_required",
+            "terminal": False,
+            "retryRequired": True,
+            "nextAction": "rebase_ingestion",
+            "targetOntologyVersionId": current_version,
+            "errors": [
+                {
+                    "code": "STALE_BASELINE_SCHEMA_VERSION",
+                    "message": (
+                        "Validated baseline belongs to an older ontology version; "
+                        "rebase before processing batches"
+                    ),
+                    "location": f"batch[{stale_batches[0]}]",
+                    "retryable": True,
+                }
+            ],
+            "schemaRecovery": {
+                "code": "STALE_BASELINE_SCHEMA_VERSION",
+                "batchIndexes": stale_batches,
+                "message": (
+                    "Rebase to the job ontology version to clear stale repair state."
+                ),
+            },
+        }
+    )
     return result
 
 
@@ -338,6 +390,7 @@ async def get_ingestion_status(
             container.repository, ingestion_id
         )
         result = operations.status_payload(workspace)
+        result = _stale_baseline_action(result, workspace)
         schema_changes = await container.ontology_lifecycle.ingestion_schema_changes(
             ingestion_id
         )

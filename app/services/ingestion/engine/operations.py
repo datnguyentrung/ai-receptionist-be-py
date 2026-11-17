@@ -437,8 +437,9 @@ def _merge_repair_fragment(
         ]
         merged_properties.extend(node.properties)
 
-        # Gộp evidence (bảo toàn chứng cứ từ cả baseline và delta)
-        merged_evidence = [*previous.evidence, *node.evidence]
+        # A repaired node may replace invalid node-level evidence. Preserve the
+        # baseline only when the repair delta does not provide replacement evidence.
+        merged_evidence = node.evidence or previous.evidence
 
         # Cập nhật thông tin node
         merged_node = previous.model_copy(
@@ -477,7 +478,7 @@ def _merge_repair_fragment(
             edges_map[edge_key] = previous_edge.model_copy(
                 update={
                     "properties": {**previous_edge.properties, **edge.properties},
-                    "evidence": [*previous_edge.evidence, *edge.evidence],
+                    "evidence": edge.evidence or previous_edge.evidence,
                 }
             )
 

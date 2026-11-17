@@ -7,7 +7,12 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from app.agent.tools.ingestion_tools import schema, workflow
+from app.models import SchemaProposalType
 from app.schemas.ingestion.proposal import SchemaProposalInput
+from app.services.ingestion.engine.workflow_policy import evaluate_workflow
+from app.services.ontology.ontology_lifecycle import (
+    SchemaObjectAlreadyExistsError,
+)
 
 
 def test_new_entity_declares_every_identity_property() -> None:
@@ -119,6 +124,43 @@ def test_proposed_schema_keeps_waiting_for_review() -> None:
     assert result["pendingProposalCount"] == 1
 
 
+def test_stale_baseline_requests_rebase_before_batch_processing() -> None:
+    current_version = str(uuid.uuid4())
+    result = workflow._stale_baseline_action(
+        {
+            "success": False,
+            "stage": "explicit_extraction_failure",
+            "terminal": True,
+            "retryRequired": False,
+            "nextAction": "explicit_extraction_failure",
+        },
+        SimpleNamespace(
+            job=SimpleNamespace(ontology_version_id=current_version),
+            batches=[
+                SimpleNamespace(
+                    batch_index=0,
+                    validated_baseline={
+                        "ontologyVersion": str(uuid.uuid4()),
+                    },
+                )
+            ],
+        ),
+    )
+
+    assert result["stage"] == "schema_rebase_required"
+    assert result["terminal"] is False
+    assert result["nextAction"] == "rebase_ingestion"
+    assert result["targetOntologyVersionId"] == current_version
+    assert result["schemaRecovery"]["batchIndexes"] == [0]
+
+
+def test_failed_job_allows_rebase_recovery() -> None:
+    decision = evaluate_workflow("FAILED", "rebase_ingestion")
+
+    assert decision.allowed is True
+    assert decision.terminal is True
+
+
 @pytest.mark.anyio
 async def test_apply_schema_proposal_returns_single_uuid_contract(
     monkeypatch: pytest.MonkeyPatch,
@@ -148,6 +190,43 @@ async def test_apply_schema_proposal_returns_single_uuid_contract(
 
 
 @pytest.mark.anyio
+async def test_approved_proposal_returns_apply_next_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal_id = uuid.uuid4()
+    lifecycle = SimpleNamespace(
+        review_proposal=AsyncMock(
+            return_value=SimpleNamespace(
+                id=proposal_id,
+                status=SimpleNamespace(value="APPROVED"),
+                source_ingestion_id=None,
+                source_batch_index=None,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        schema,
+        "get_service_container",
+        AsyncMock(return_value=SimpleNamespace(ontology_lifecycle=lifecycle)),
+    )
+    monkeypatch.setattr(schema, "log_ingestion_event", lambda *args, **kwargs: None)
+    context = SimpleNamespace(
+        state={},
+        tool_confirmation=SimpleNamespace(confirmed=True),
+    )
+
+    result = await schema.review_schema_proposal(
+        str(proposal_id),
+        True,
+        context,
+    )
+
+    assert result["proposalStatus"] == "APPROVED"
+    assert result["terminal"] is False
+    assert result["nextAction"] == "apply_schema_proposal"
+
+
+@pytest.mark.anyio
 async def test_rebase_ingestion_rejects_version_code_before_service_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -166,3 +245,79 @@ async def test_rebase_ingestion_rejects_version_code_before_service_call(
     assert result["nextAction"] == "report_tool_failure"
     assert "target_ontology_version_id must be a UUID" in result["errors"][0]["message"]
     get_container.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_create_schema_proposal_recovers_when_schema_object_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingestion_id = str(uuid.uuid4())
+    version_id = uuid.uuid4()
+    lifecycle = SimpleNamespace(
+        create_proposal=AsyncMock(
+            side_effect=SchemaObjectAlreadyExistsError(
+                SchemaProposalType.NEW_ENTITY_TYPE,
+                "requirement",
+            )
+        )
+    )
+    repository = SimpleNamespace(block_batch_for_proposal=AsyncMock())
+    monkeypatch.setattr(
+        schema,
+        "get_service_container",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                ontology_lifecycle=lifecycle,
+                repository=repository,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        schema.operations,
+        "required_workspace",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                job=SimpleNamespace(ontology_version_id=version_id),
+                version=SimpleNamespace(id=uuid.uuid4()),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        schema.operations,
+        "workflow_guard_payload",
+        lambda *_args, **_kwargs: None,
+    )
+    blocked_workspace = SimpleNamespace(
+        job=SimpleNamespace(ontology_version_id=version_id)
+    )
+    repository.block_batch_for_proposal.return_value = blocked_workspace
+    monkeypatch.setattr(schema, "log_ingestion_event", lambda *args, **kwargs: None)
+    context = SimpleNamespace(state={})
+
+    result = await schema.create_schema_proposal(
+        batch_index=0,
+        reason="schema gap",
+        affected_scope_keys=["training"],
+        proposal={
+            "proposalType": "NEW_ENTITY_TYPE",
+            "technicalName": "requirement",
+            "payload": {
+                "identityStrategy": {
+                    "sourceScoped": True,
+                    "required": ["name"],
+                },
+                "properties": [
+                    {"technicalName": "name", "dataType": "STRING"}
+                ],
+            },
+        },
+        tool_context=context,
+        ingestion_id=ingestion_id,
+    )
+
+    assert result["success"] is False
+    assert result["terminal"] is False
+    assert result["nextAction"] == "rebase_ingestion"
+    assert result["targetOntologyVersionId"] == str(version_id)
+    assert result["errors"][0]["code"] == "SCHEMA_OBJECT_ALREADY_EXISTS"
+    repository.block_batch_for_proposal.assert_awaited_once()

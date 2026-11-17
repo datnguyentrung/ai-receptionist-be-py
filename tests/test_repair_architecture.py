@@ -235,6 +235,93 @@ def test_merge_repair_fragment_property_overwrite_and_no_scalar_conflict():
     assert len(conflicts) == 0
 
 
+def test_merge_repair_fragment_replaces_invalid_node_evidence():
+    old_evidence = _dummy_evidence()
+    old_evidence.text = "9. Thi thử"
+    new_evidence = _dummy_evidence(26)
+    new_evidence.text = (
+        "9.1. Thời điểm tổ chức\n\n"
+        "Sheet ghi thi thử được tổ chức trước kỳ thi chính thức 1 tháng."
+    )
+    baseline = GraphPatchFragment(
+        ontology_version="v1",
+        nodes=[
+            GraphNode(
+                temp_id="assessment",
+                class_name="assessment_event",
+                identity={"name": "Thi thử"},
+                properties=[],
+                evidence=[old_evidence],
+            )
+        ],
+        edges=[],
+        coverage=[],
+        warnings=[],
+    )
+    delta = GraphPatchFragment(
+        ontology_version="v1",
+        nodes=[
+            GraphNode(
+                temp_id="assessment",
+                class_name="assessment_event",
+                identity={"name": "Thi thử"},
+                properties=[],
+                evidence=[new_evidence],
+            )
+        ],
+        edges=[],
+        coverage=[],
+        warnings=[],
+    )
+
+    merged = _merge_repair_fragment(baseline, delta, None, [])
+
+    assert merged is not None
+    assert merged.nodes[0].evidence == [new_evidence]
+
+
+def test_merge_repair_fragment_replaces_invalid_edge_evidence():
+    old_evidence = _dummy_evidence()
+    old_evidence.text = "9. Thi thử"
+    new_evidence = _dummy_evidence(26)
+    new_evidence.text = "Sheet ghi thi thử được tổ chức trước kỳ thi chính thức 1 tháng."
+    baseline = GraphPatchFragment(
+        ontology_version="v1",
+        nodes=[],
+        edges=[
+            GraphEdge(
+                edge_name="has_assessment",
+                source_temp_id="organization",
+                target_temp_id="assessment",
+                properties={},
+                evidence=[old_evidence],
+            )
+        ],
+        coverage=[],
+        warnings=[],
+    )
+    delta = GraphPatchFragment(
+        ontology_version="v1",
+        nodes=[],
+        edges=[
+            GraphEdge(
+                edge_name="has_assessment",
+                source_temp_id="organization",
+                target_temp_id="assessment",
+                properties={},
+                evidence=[new_evidence],
+            )
+        ],
+        coverage=[],
+        warnings=[],
+    )
+
+    merged = _merge_repair_fragment(baseline, delta, None, [])
+
+    assert merged is not None
+    assert merged.edges[0].evidence == [new_evidence]
+
+
 def test_merge_repair_fragment_removes_dropped_nodes_and_edges():
     """Verify _merge_repair_fragment removes nodes and associated edges listed in dropped_temp_ids."""
     ev = [_dummy_evidence()]

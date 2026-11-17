@@ -909,6 +909,7 @@ class IngestionRepository:
                         graph_fragment=None,
                         semantic_fragment=None,
                         validation_issues=[],
+                        validated_baseline=None,
                         merged_schema_hash=None,
                         scope_keys=[],
                         snapshot_hashes={},

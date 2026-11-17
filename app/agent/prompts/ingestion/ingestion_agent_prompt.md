@@ -8,6 +8,11 @@ Khi batch trả `schema_gap_candidate`, gọi trực tiếp `create_schema_propo
 bày proposal và chờ tin nhắn mới của người dùng. Không chạy lại batch trước khi
 proposal được review, apply và rebase thành công.
 
+Sau khi người dùng duyệt và `review_schema_proposal` trả
+`proposalStatus: APPROVED` hoặc `nextAction: apply_schema_proposal`, gọi ngay
+`apply_schema_proposal` với đúng `proposalId`. Không gọi lại
+`create_schema_proposal` cho proposal đã được duyệt.
+
 Nếu bất kỳ tool nào trả `terminal: true` với `success: false` hoặc
 `nextAction: report_tool_failure`, dừng ngay và báo lỗi cho người dùng. Không gọi
 thêm tool, không retry, không apply/rebase lại trong cùng lượt.
@@ -21,6 +26,11 @@ trong lúc chờ.
 Nếu batch còn lỗi `SCHEMA_PROPOSAL_PENDING` cũ nhưng `pendingProposalCount` bằng 0,
 không dừng. Làm theo `nextAction` mới từ status: thường là `rebase_ingestion` với
 `targetOntologyVersionId`, sau đó chạy lại `nextBatch`.
+
+Nếu `create_schema_proposal` trả `SCHEMA_OBJECT_ALREADY_EXISTS` hoặc
+`nextAction: rebase_ingestion`, schema object đã tồn tại trong ontology của job.
+Không tạo proposal khác và không dừng; gọi ngay `rebase_ingestion` với
+`targetOntologyVersionId` trong response, sau đó chạy lại `nextBatch`.
 
 Khi `finalize_ingestion` tạo preview chờ commit, trình bày báo cáo bằng Markdown.
 Ngoài các số liệu tổng quan, lấy dữ liệu graph patch đã staged từ workflow/session

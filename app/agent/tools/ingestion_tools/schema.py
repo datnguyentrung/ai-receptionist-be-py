@@ -18,6 +18,7 @@ from app.agent.tools.ingestion_tools.state import (
 from app.core.ingestion_runtime import get_service_container
 from app.schemas.ingestion.proposal import SchemaProposalInput
 from app.services.ingestion.engine import operations
+from app.services.ontology.ontology_lifecycle import SchemaObjectAlreadyExistsError
 from app.utils import log_ingestion_event
 
 _SCHEMA_PROPOSAL_ADAPTER = TypeAdapter(SchemaProposalInput)
@@ -114,6 +115,44 @@ async def create_schema_proposal(
         result = tool_error("schema_proposal", "INVALID_SCHEMA_PROPOSAL", str(exc))
         log_ingestion_event("CREATE_SCHEMA_PROPOSAL", payload=result, request=request)
         return result
+    except SchemaObjectAlreadyExistsError as exc:
+        errors = [
+            {
+                "code": "SCHEMA_OBJECT_ALREADY_EXISTS",
+                "message": str(exc),
+                "location": f"batch[{batch_index}]",
+                "retryable": True,
+            }
+        ]
+        workspace = await container.repository.block_batch_for_proposal(
+            effective_ingestion_id,
+            batch_index,
+            errors,
+        )
+        result = {
+            "success": False,
+            "stage": "schema_rebase_required",
+            "terminal": False,
+            "retryRequired": False,
+            "nextAction": "rebase_ingestion",
+            "ingestionId": effective_ingestion_id,
+            "batchIndex": batch_index,
+            "targetOntologyVersionId": str(workspace.job.ontology_version_id),
+            "errors": errors,
+            "schemaRecovery": {
+                "code": "SCHEMA_OBJECT_ALREADY_EXISTS",
+                "proposalType": exc.proposal_type.value,
+                "technicalName": exc.technical_name,
+                "entityType": exc.entity_type,
+                "message": (
+                    "The requested schema object already exists. Rebase the "
+                    "ingestion to reset stale batch state."
+                ),
+            },
+        }
+        store_checkpoint(tool_context, result)
+        log_ingestion_event("CREATE_SCHEMA_PROPOSAL", payload=result, request=request)
+        return result
     except Exception as exc:  # noqa: BLE001
         result = tool_exception("schema_proposal", effective_ingestion_id, exc)
         store_checkpoint(tool_context, result)
@@ -207,6 +246,8 @@ async def review_schema_proposal(
         result = {
             "success": True,
             "stage": "schema_proposal_reviewed",
+            "terminal": False,
+            "nextAction": "apply_schema_proposal" if approved else "await_user_input",
             "proposalId": str(proposal.id),
             "proposalStatus": proposal.status.value,
         }

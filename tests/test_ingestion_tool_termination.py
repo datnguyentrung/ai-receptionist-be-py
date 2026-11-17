@@ -93,6 +93,18 @@ def test_stale_schema_proposal_error_in_repair_context_does_not_stop_turn() -> N
     )
 
 
+def test_existing_schema_object_recovery_does_not_stop_turn() -> None:
+    assert not should_stop_after_tool_result(
+        {
+            "success": False,
+            "stage": "schema_rebase_required",
+            "terminal": False,
+            "nextAction": "rebase_ingestion",
+            "errors": [{"code": "SCHEMA_OBJECT_ALREADY_EXISTS"}],
+        }
+    )
+
+
 def test_non_terminal_tool_result_does_not_stop_turn() -> None:
     assert not should_stop_after_tool_result(
         {
