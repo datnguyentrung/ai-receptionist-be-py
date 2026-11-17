@@ -29,11 +29,11 @@ from app.schemas import (
     SemanticGraphPatchFragment,
     ValidationIssue,
 )
-from app.utils.ingestion_helpers import stable_entity_key
 from app.services.ingestion.schema.identity_resolver import (
     IdentityResolutionError,
     OntologyIdentityResolver,
 )
+from app.utils.ingestion_helpers import stable_entity_key
 
 # ============================================================================
 # 1. NHÓM MÔ HÌNH DỮ LIỆU KẾT QUẢ (COMPILE RESULT MODELS)
@@ -108,12 +108,49 @@ class GraphPatchCompiler:
         # --------------------------------------------------------------------
         for node_index, node in enumerate(semantic_fragment.nodes):
             temp_id = node.temp_id if node.temp_id else f"node_{node_index}"
-            try:
-                # Phân giải định danh thực thể dựa trên thuộc tính và chiến lược identity của class
-                identity = resolver.resolve(
-                    class_name=node.class_name,
-                    properties=node.properties,
+            staged_entity = staged_entities.get(f"entity:{temp_id}")
+            if staged_entity is not None:
+                if staged_entity["className"] != node.class_name:
+                    issues.append(
+                        ValidationIssue(
+                            code="CANONICAL_REFERENCE_CLASS_MISMATCH",
+                            message=(
+                                f"Canonical reference {temp_id} is "
+                                f"{staged_entity['className']}, not {node.class_name}"
+                            ),
+                            location=f"nodes.{node_index}.className",
+                            retryable=True,
+                        )
+                    )
+                    continue
+                identity = dict(staged_entity.get("identity") or {})
+                if not identity:
+                    issues.append(
+                        ValidationIssue(
+                            code="CANONICAL_REFERENCE_IDENTITY_MISSING",
+                            message=f"Canonical reference {temp_id} has no identity",
+                            location=f"nodes.{node_index}.tempId",
+                            retryable=True,
+                        )
+                    )
+                    continue
+            elif _looks_like_stable_entity_key(temp_id):
+                issues.append(
+                    ValidationIssue(
+                        code="UNKNOWN_CANONICAL_REFERENCE",
+                        message=f"Unknown canonical reference: {temp_id}",
+                        location=f"nodes.{node_index}.tempId",
+                        retryable=True,
+                    )
                 )
+                continue
+            try:
+                if staged_entity is None:
+                    # Phân giải định danh mới từ property trong chunk hiện tại.
+                    identity = resolver.resolve(
+                        class_name=node.class_name,
+                        properties=node.properties,
+                    )
             except IdentityResolutionError as exc:
                 # Ghi nhận lỗi nếu loại thực thể không tồn tại trong ontology
                 if exc.unknown_class:
@@ -331,6 +368,10 @@ class GraphPatchCompiler:
                         return staged.get("stableKey", ref.removeprefix("entity:"))
 
         return None
+
+
+def _looks_like_stable_entity_key(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
 __all__ = ["GraphPatchCompileResult", "GraphPatchCompiler"]

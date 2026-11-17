@@ -438,6 +438,10 @@ class OntologyRegistry:
         # 3. Kiểm tra tính hợp lệ của từng Thực thể (Node) và các Thuộc tính (Properties)
         node_types: dict[str, str] = dict(external_node_types or {})
         for node_index, node in enumerate(fragment.nodes):
+            inherited_identity = (
+                node.temp_id in node_types
+                or f"entity:{node.temp_id}" in node_types
+            )
             node_types[node.temp_id] = node.class_name
             if node.class_name not in self.entity_types:
                 issues.append(
@@ -462,7 +466,7 @@ class OntologyRegistry:
                                 location=f"nodes.{node_index}.identity.{field}",
                             )
                         )
-                    elif field not in supplied_properties:
+                    elif not inherited_identity and field not in supplied_properties:
                         issues.append(
                             ValidationIssue(
                                 code="IDENTITY_SOURCE_PROPERTY_MISSING",
@@ -471,7 +475,7 @@ class OntologyRegistry:
                                 retryable=True,
                             )
                         )
-                    else:
+                    elif field in supplied_properties:
                         source_value = next(
                             fact.value for fact in node.properties
                             if fact.property_name == field

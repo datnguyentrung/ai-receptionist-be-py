@@ -38,6 +38,24 @@ from app.services.ingestion.schema.ontology import OntologyCache
 from app.services.ontology.ontology_compiler import OntologyCompiler
 
 
+class SchemaObjectAlreadyExistsError(ValueError):
+    """Recoverable duplicate detected against the ingestion ontology version."""
+
+    def __init__(
+        self,
+        proposal_type: SchemaProposalType,
+        technical_name: str,
+        *,
+        entity_type: str | None = None,
+        property_object: bool = False,
+    ) -> None:
+        self.proposal_type = proposal_type
+        self.technical_name = technical_name
+        self.entity_type = entity_type
+        label = "Schema property" if property_object else "Schema object"
+        super().__init__(f"{label} already exists: {technical_name}")
+
+
 class OntologyLifecycle:
     """Quản lý các chuyển trạng thái của đề xuất schema và xuất bản các phiên bản ontology hoàn chỉnh."""
 
@@ -160,7 +178,9 @@ class OntologyLifecycle:
                 if proposal_kind in model_and_column:
                     model, column = model_and_column[proposal_kind]
                     if await session.scalar(select(model.id).where(model.ontology_version_id == version_id, column == target_name)):
-                        raise ValueError(f"Schema object already exists: {target_name}")
+                        raise SchemaObjectAlreadyExistsError(
+                            proposal_kind, target_name
+                        )
                 else:
                     entity = await session.scalar(select(OntologyEntityType).where(
                         OntologyEntityType.ontology_version_id == version_id,
@@ -171,7 +191,12 @@ class OntologyLifecycle:
                         OntologyProperty.entity_type_id == entity.id,
                         OntologyProperty.technical_name == target_name,
                     )):
-                        raise ValueError(f"Schema property already exists: {target_name}")
+                        raise SchemaObjectAlreadyExistsError(
+                            proposal_kind,
+                            target_name,
+                            entity_type=payload["entityType"],
+                            property_object=True,
+                        )
 
             proposal = OntologySchemaProposal(
                 ontology_version_id=uuid.UUID(ontology_version_id),

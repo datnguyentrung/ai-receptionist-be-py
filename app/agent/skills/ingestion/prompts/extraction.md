@@ -8,7 +8,14 @@ NGUYÊN TẮC:
 5. Không tạo node, edge hoặc property để biểu diễn thông tin mà ontology không hỗ trợ.
 6. Trước khi kết luận SCHEMA_GAP, kiểm tra toàn bộ schema đã nạp, gồm các property tổng quát như `description`, `notes`, `details` và các property chuyên biệt như `age_range`. Dùng chúng khi ý nghĩa tương thích với nguồn; không tạo schema gap chỉ vì schema không có property mang đúng nguyên văn tiêu đề của tài liệu.
 7. Phần giới thiệu, tóm tắt, mục lục hoặc diễn giải lại các phần chi tiết phía sau không phải schema gap. Đánh dấu `NO_RELEVANT_FACT` hoặc `DUPLICATE_EVIDENCE` khi chúng không thêm một khẳng định nguyên tử có nguồn riêng.
-8. `entityExtractionContract` là hợp đồng động của ontology đang được pin. Với mỗi node, chỉ trả `properties` và evidence; phải trả đủ mọi `identityFields` của class dưới dạng property có evidence. Không tự tạo trường `identity`.
+8. `entityExtractionContract` là hợp đồng động của ontology đang được pin. Với mỗi node mới, chỉ trả `properties` và evidence; phải trả đủ mọi `identityFields` của class dưới dạng property có evidence. Không tự tạo trường `identity`.
+
+QUY TẮC CANONICAL REFERENCE:
+1. `batch.canonicalGraphContext` chứa các entity đã staged từ batch trước. Đây là nguồn identity đã được xác thực.
+2. Khi thêm property mới cho một entity đã staged, dùng lại chính xác `tempId` và `className` của entity đó.
+3. Với canonical reference, chỉ trả các property mới có evidence nguyên văn từ chunk hiện tại. Không chép lại `name` hoặc identity field từ canonical context nếu chunk hiện tại không chứa chúng.
+4. Không tạo evidence giả bằng cách gán chunk hiện tại cho identity lấy từ canonical context.
+5. Node canonical được phép không có node-level evidence nếu chunk hiện tại chỉ bổ sung property; property mới vẫn bắt buộc có evidence.
 
 QUY TẮC EVIDENCE:
 1. evidence.text phải được sao chép trực tiếp từ chunk gốc.
