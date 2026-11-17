@@ -27,22 +27,53 @@ Mỗi lần nạp có `document_key` là đường dẫn tương đối ổn đ�
 tài liệu khác tạo nguồn bổ sung; nạp lại cùng key và nội dung trả job cũ; nội
 dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdown và TXT UTF-8.
 
-1. Gọi `begin_ingestion`. Lấy `ingestionId`, `nextBatch`. Nếu job đã có preview,
+1. Gọi `begin_ingestion`. Lấy `ingestionId`, `nextBatch`. Nếu response có
+   `pendingSchemaProposal` hoặc `pendingSchemaProposals`, trình bày proposal và
+   yêu cầu người dùng duyệt ngay; không gọi `get_ingestion_status` hoặc
+   `get_schema_proposal` chỉ để đọc lại proposal đó. Nếu job đã có preview,
    đọc `get_ingestion_preview`; nếu đã `COMMITTED`, báo idempotent và dừng.
-2. Chạy `ingestion_batch_agent` cho đúng `nextBatch.batchIndex`. Sau mỗi batch,
+2. Chạy `ingestion_batch_agent` với `ingestion_id` và đúng `batch_index` từ
+   `nextBatch`. Sau mỗi batch,
    lấy `nextBatch` mới từ response hoặc `get_ingestion_status`; tiếp tục cho
    đến khi tất cả batch `STAGED`.
-3. Khi cần schema context, tải catalog và schema qua wrappers ingestion; chúng ghim
-   ontology DRAFT của job và lưu version, scope keys, digest vào state. Nếu batch
-   báo schema gap, kiểm tra scope hiện có trước. Nếu thật sự thiếu,
-   tạo proposal có bằng chứng. Dừng cho người dùng duyệt qua tool có ADK
-   confirmation. `apply_schema_proposal` chỉ tạo/cập nhật ontology DRAFT của
-   job. Gọi `rebase_ingestion` với draft ID và chạy đúng `nextBatch` trả về,
-   kể cả khi quay về batch 0. Không tự nhận là người duyệt.
-4. Gọi `finalize_ingestion`; nếu batch cần sửa thì sửa rồi finalize lại. Khi
-   thành công, đọc `get_ingestion_preview` và trình cho người dùng báo cáo
-   thay đổi, nguồn/trích dẫn, thời gian, schema và mâu thuẫn. Không gọi commit
-   trước khi người dùng thấy báo cáo.
+3. Xử lý trường hợp thiếu schema (chỉ chạy khi batch báo schema gap).
+
+   Trong phase xử lý batch, hệ thống đã tải và đối chiếu ontology catalog/schema
+   cần thiết từ ontology version đang được job sử dụng. Không tải lại schema context
+   hoặc chạy lại batch để kiểm tra cùng schema gap.
+
+   Nếu ontology hiện tại thực sự không có entity type, property hoặc relationship cần thiết:
+
+   1. Tạo schema proposal kèm bằng chứng trích từ tài liệu. Gửi một object
+      `proposal` khớp `proposalType`; không gửi `payload` tự do. Với
+      `NEW_PROPERTY`, dùng `payload.entityType` và một `payload.dataType` viết
+      hoa (`STRING`, `INTEGER`, `FLOAT`, `BOOLEAN`, `DATE`, `DATETIME`, `UUID`,
+      hoặc `JSON`). Với `NEW_ENTITY_TYPE`, dùng
+      `payload.identityStrategy.sourceScoped: true` hoặc
+      `payload.identityStrategy.required: ["property_name"]`. Mỗi property có
+      trong `identityStrategy.required` phải được khai báo đầy đủ trong
+      `payload.properties` với `technicalName` và `dataType`.
+   2. Sau khi tạo proposal, trả lời bằng văn bản để trình proposal và dừng lượt.
+      Không gọi `review_schema_proposal` trong cùng lượt tạo proposal. Chỉ gọi
+      tool review ở lượt sau khi có tin nhắn mới của người dùng đồng ý hoặc từ
+      chối; ADK confirmation vẫn là lớp xác nhận cuối.
+   3. Sau khi người dùng duyệt, gọi `apply_schema_proposal` để tạo hoặc cập nhật
+      ontology DRAFT riêng cho ingestion job. Không sửa ontology ACTIVE.
+   4. Gọi `rebase_ingestion` với draft ID.
+   5. Chạy lại đúng `nextBatch` mà rebase trả về; `nextBatch` có thể quay lại batch 0.
+
+   Model không được tự phê duyệt schema proposal.
+4. Khi tất cả batch đã được xử lý, gọi `finalize_ingestion`.
+
+   Nếu finalize hoặc validation của một batch trả về repair_required:
+   1. Gọi công cụ repair cho đúng batch với repairContext.
+   2. Chờ batch được validate và stage lại.
+   3. Gọi `finalize_ingestion` lại.
+
+   Chỉ khi finalize thành công mới gọi `get_ingestion_preview`.
+   Trình preview cho người dùng, gồm thay đổi, nguồn/trích dẫn, thời gian,
+   schema và mâu thuẫn. Không gọi `commit_ingestion` trước khi người dùng xem
+   và xác nhận báo cáo.
 5. Cho **mỗi** mâu thuẫn, dùng `review_ingestion_conflict` với đúng một lựa chọn
    `CONFIRM`, `REJECT`, `OTHER`. `OTHER` cần ghi chú và giữ chưa phân xử. Sau
    mỗi quyết định, đọc lại preview vì `reportDigest` thay đổi.

@@ -38,18 +38,23 @@ Các hàm helper tiện ích đã được tách sang module ngoài: `app.utils.
 """
 
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.enums import IngestionJobStatus, SourceVersionStatus
-from app.models import IngestionWorkspaceCheckpoint
-from app.models import IngestionFactConflict
-from app.models import IngestionCommitApproval, IngestionKnowledgeRevision
+from app.models import (
+    IngestionCommitApproval,
+    IngestionFactConflict,
+    IngestionKnowledgeRevision,
+    IngestionWorkspaceCheckpoint,
+)
 from app.schemas import (
     ActiveOntology,
     DocumentChunk,
@@ -69,6 +74,15 @@ from app.utils.ingestion_helpers import (
 )
 
 MAPPER_VERSION = "taekwondo-mapper-v2"
+
+
+def _json_object(value: BaseModel | Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Serialize a Pydantic fragment while preserving already-serialized input."""
+    if value is None:
+        return None
+    if isinstance(value, BaseModel):
+        return value.model_dump(by_alias=True, mode="json")
+    return dict(value)
 
 
 # ==============================================================================
@@ -355,17 +369,9 @@ class IngestionRepository:
         terminal = bool(issues) and attempts > max_attempts
 
         if not issues and fragment is not None:
-            baseline_dict = (
-                getattr(fragment, "model_dump")(by_alias=True, mode="json")
-                if hasattr(fragment, "model_dump")
-                else fragment
-            )
+            baseline_dict = _json_object(fragment)
         elif validated_baseline is not None:
-            baseline_dict = (
-                getattr(validated_baseline, "model_dump")(by_alias=True, mode="json")
-                if hasattr(validated_baseline, "model_dump")
-                else validated_baseline
-            )
+            baseline_dict = _json_object(validated_baseline)
         else:
             baseline_dict = batch.validated_baseline
 
@@ -374,12 +380,8 @@ class IngestionRepository:
             validation_attempts=attempts,
             validation_issues=issues,
             merged_schema_hash=merged_schema_hash,
-            semantic_fragment=getattr(semantic_fragment, "model_dump")(by_alias=True, mode="json")
-            if hasattr(semantic_fragment, "model_dump")
-            else semantic_fragment,
-            graph_fragment=getattr(fragment, "model_dump")(by_alias=True, mode="json")
-            if hasattr(fragment, "model_dump")
-            else fragment,
+            semantic_fragment=_json_object(semantic_fragment),
+            graph_fragment=_json_object(fragment),
             validated_baseline=baseline_dict,
             status="FAILED" if terminal else "REPAIR_REQUIRED" if issues else "STAGED",
             scope_keys=[item["scopeKey"] for item in scope_bindings],
@@ -437,7 +439,7 @@ class IngestionRepository:
         workspace = await self.get_workspace(ingestion_id)
         if workspace is None:
             raise KeyError(ingestion_id)
-        restarted = []
+        restarted: list[IngestionBatchData] = []
         for batch in workspace.batches:
             if batch.batch_index < batch_index:
                 restarted.append(batch)
@@ -456,7 +458,7 @@ class IngestionRepository:
                     validated_baseline=None,
                 )
             )
-        workspace = replace(workspace, batches=restarted)
+        workspace = replace(workspace, batches=tuple(restarted))
         workspace.job.status = IngestionJobStatus.BATCHING
         workspace.job.stage = "batching"
         workspace.job.error_stage = None

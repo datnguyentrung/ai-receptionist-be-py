@@ -672,6 +672,22 @@ class OntologyLifecycle:
             )
             session.add(entity)
             await session.flush()
+            session.add_all(
+                [
+                    OntologyProperty(
+                        ontology_version_id=version_id,
+                        entity_type_id=entity.id,
+                        technical_name=item["technicalName"],
+                        display_name=item.get("displayName", item["technicalName"]),
+                        description=item.get("description"),
+                        data_type=OntologyPropertyDataType(item["dataType"]),
+                        required=item.get("required", False),
+                        multi_value=item.get("multiValue", False),
+                        constraints=item.get("constraints", {}),
+                    )
+                    for item in payload.get("properties", [])
+                ]
+            )
             for key in payload.get("scopeKeys", proposal.affected_scope_keys):
                 scope = await self._scope_by_key(session, version_id, key)
                 session.add(
@@ -918,6 +934,15 @@ def _validate_proposal_payload(
         strategy = payload.get("identityStrategy")
         if not isinstance(strategy, dict) or not (strategy.get("required") or strategy.get("sourceScoped")):
             raise ValueError("NEW_ENTITY_TYPE requires identityStrategy.required or sourceScoped")
+        declared_properties = {
+            str(item.get("technicalName", "")).strip()
+            for item in payload.get("properties", [])
+            if isinstance(item, dict)
+        }
+        missing_identity_properties = set(strategy.get("required", [])) - declared_properties
+        if missing_identity_properties:
+            names = ", ".join(sorted(missing_identity_properties))
+            raise ValueError(f"NEW_ENTITY_TYPE must declare identity properties: {names}")
     if proposal_type == SchemaProposalType.NEW_RELATIONSHIP and payload.get("cardinality", "MANY_TO_MANY") not in {item.value for item in RelationshipCardinality}:
         raise ValueError("NEW_RELATIONSHIP requires a supported cardinality")
 

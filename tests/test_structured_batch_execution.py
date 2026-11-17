@@ -1,14 +1,10 @@
 """Regression tests for deterministic structured batch orchestration."""
 
 import asyncio
+import inspect
 from types import SimpleNamespace
-from typing import Any
 
-from app.agent.skills.ingestion import batch_execution
-from app.agent.skills.ingestion.batch_agent import (
-    IngestionBatchAgentTool,
-    create_ingestion_batch_agent,
-)
+from app.agent.skills.ingestion import batch_agent, batch_execution
 from app.agent.skills.ingestion.batch_execution import (
     BatchExecutionModule,
     BatchExtractionOutput,
@@ -128,29 +124,18 @@ def test_large_ambiguous_prompt_selects_then_extracts(monkeypatch) -> None:
     assert model.calls == ["select", "extract"]
 
 
-def test_public_tool_rejects_invalid_request_without_execution() -> None:
-    class NeverCalled(BatchExecutionModule):
-        async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
-            raise AssertionError("invalid requests must not reach the executor")
+def test_public_tool_uses_typed_arguments() -> None:
+    parameters = inspect.signature(batch_agent.ingestion_batch_agent).parameters
 
-    tool = IngestionBatchAgentTool(
-        create_ingestion_batch_agent(), executor=NeverCalled()
+    assert list(parameters) == ["ingestion_id", "batch_index", "tool_context"]
+
+
+def test_blocked_batch_guard_precedes_model_work() -> None:
+    source = inspect.getsource(BatchExecutionModule._prepare)
+
+    assert source.index('status == "BLOCKED_SCHEMA"') < source.index(
+        'workflow_guard_payload(workspace, "load_scopes")'
     )
-    result = asyncio.run(
-        tool.run_async(
-            args={"request": "not json"}, tool_context=SimpleNamespace(state={})
-        )
-    )
-
-    assert result["success"] is False
-    assert result["errors"][0]["code"] == "INVALID_BATCH_AGENT_REQUEST"
-
-
-def test_public_shell_and_internal_structured_agents_expose_no_tools() -> None:
-    agent = create_ingestion_batch_agent()
-    assert agent.mode == "chat"
-    assert agent.tools == []
-    assert agent.output_schema is BatchExtractionOutput
 
 
 def test_semantic_evidence_validator_handles_equivalent_verbatim_quote(
