@@ -22,16 +22,18 @@ from app.services.graphrag.retrieval import (
 )
 
 
-def _chunk(chunk_id: str = "c1") -> dict:
+def _chunk(
+    chunk_id: str = "c1", text: str = "Hệ thống có 6 cơ sở tại Hà Đông."
+) -> dict:
     return {
         "chunkId": chunk_id,
         "documentId": "doc1",
         "documentName": "intro.md",
         "versionId": "v1",
         "chunkIndex": 0,
-        "text": "Hệ thống có 6 cơ sở tại Hà Đông.",
+        "text": text,
         "scopeKey": "training",
-        "embedding": [0.1, 0.2, 0.3],
+        "score": 0.9,
         "section": "Cơ sở tập luyện",
     }
 
@@ -104,6 +106,36 @@ async def test_hybrid_retrieval_abstains_when_all_paths_have_no_evidence() -> No
     assert result.status is EvidenceStatus.INSUFFICIENT
     assert result.passages == []
     assert result.abstention_message
+
+
+@pytest.mark.anyio
+async def test_fact_vector_promotes_its_grounded_supporting_chunk() -> None:
+    retriever, store = _retriever()
+    lexical_chunk = _chunk("lexical", "Kết quả khớp từ khóa nhưng kém liên quan.")
+    fact_chunk = _chunk("fact-source", "Học phí lớp ngoài trời là 400.000 đồng.")
+    store.search_chunk_vector = AsyncMock(
+        return_value=[{**lexical_chunk, "score": 0.6}]
+    )
+    store.search_chunk_fulltext = AsyncMock(return_value=[lexical_chunk])
+    store.search_fact_vector = AsyncMock(
+        return_value=[
+            {
+                "factId": "fee-1",
+                "statement": "Học phí lớp ngoài trời là 400.000 đồng.",
+                "score": 0.95,
+                "chunkIds": ["fact-source"],
+                "conflictPeers": [],
+            }
+        ]
+    )
+    store.chunks_by_ids = AsyncMock(return_value=[fact_chunk])
+
+    result = await retriever.retrieve(GraphQaRequest(question="học ngoài trời bao nhiêu"))
+
+    assert result.status is EvidenceStatus.READY
+    assert result.passages[0].content == fact_chunk["text"]
+    assert result.facts[0].statement == "Học phí lớp ngoài trời là 400.000 đồng."
+    assert result.facts[0].citation_ids == ["v1:fact-source"]
 
 
 @pytest.mark.anyio

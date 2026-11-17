@@ -11,6 +11,7 @@ from app.agent.tools.ingestion_tools.shared import (
 )
 from app.agent.tools.ingestion_tools.state import (
     finalize_result_payload,
+    rebuild_batch_accumulator,
     workspace_payload,
 )
 from app.core.ingestion_runtime import get_service_container
@@ -406,6 +407,99 @@ async def get_ingestion_status(
         result = tool_exception("status", ingestion_id, exc)
         store_checkpoint(tool_context, result)
         return result
+
+
+async def choose_ingestion_recovery(
+    ingestion_id: str,
+    strategy: Literal["REPAIR", "REEXTRACT"],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Apply the user's recovery choice for the next repair-required batch."""
+    try:
+        container = await get_service_container()
+        workspace = await operations.required_workspace(
+            container.repository, ingestion_id
+        )
+        batch = next(
+            (item for item in workspace.batches if item.status != "STAGED"), None
+        )
+        if batch is None or batch.status != "REPAIR_REQUIRED":
+            return {
+                "success": False,
+                "stage": "ingestion_recovery",
+                "terminal": False,
+                "ingestionId": ingestion_id,
+                "nextAction": "get_ingestion_status",
+                "errors": [
+                    {
+                        "code": "RECOVERY_NOT_REQUIRED",
+                        "message": "The next batch is not awaiting repair.",
+                    }
+                ],
+            }
+
+        options = operations.recovery_options(batch)
+        option = next((item for item in options if item["strategy"] == strategy), None)
+        if option is None:
+            return {
+                "success": False,
+                "stage": "repair_required",
+                "terminal": False,
+                "ingestionId": ingestion_id,
+                "batchIndex": batch.batch_index,
+                "nextAction": "choose_ingestion_recovery",
+                "recoveryOptions": options,
+                "errors": [
+                    {
+                        "code": "INVALID_RECOVERY_STRATEGY",
+                        "message": "Choose either REPAIR or REEXTRACT.",
+                    }
+                ],
+            }
+        if not option["available"]:
+            return {
+                "success": False,
+                "stage": "repair_required",
+                "terminal": False,
+                "ingestionId": ingestion_id,
+                "batchIndex": batch.batch_index,
+                "nextAction": "choose_ingestion_recovery",
+                "recoveryOptions": options,
+                "errors": [
+                    {
+                        "code": "RECOVERY_STRATEGY_UNAVAILABLE",
+                        "message": option["unavailableReason"],
+                    }
+                ],
+            }
+
+        if strategy == "REEXTRACT":
+            workspace = await container.repository.restart_from_batch(
+                ingestion_id,
+                batch.batch_index,
+                "User requested re-extraction after validation failure.",
+            )
+            rebuild_batch_accumulator(tool_context, ingestion_id, workspace)
+            tool_context.state["ingestion_recovery"] = None
+            result = workspace_payload(workspace)
+        else:
+            tool_context.state["ingestion_recovery"] = {
+                "ingestionId": ingestion_id,
+                "batchIndex": batch.batch_index,
+                "strategy": strategy,
+            }
+            result = workspace_payload(workspace)
+            result["recoverySelected"] = strategy
+
+        store_checkpoint(tool_context, result)
+        log_ingestion_event(
+            "CHOOSE_INGESTION_RECOVERY",
+            payload=result,
+            request={"ingestion_id": ingestion_id, "strategy": strategy},
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        return tool_exception("ingestion_recovery", ingestion_id, exc)
 
 
 async def list_ingestion_conflicts(

@@ -78,7 +78,6 @@ class Neo4jGraphStore:
             node.pageStart AS pageStart,
             node.pageEnd AS pageEnd,
             node.sourceAnchor AS sourceAnchor,
-            node.embedding AS embedding,
             score
         """
         async with self._driver.session(database=self._database) as session:
@@ -109,7 +108,6 @@ class Neo4jGraphStore:
             node.pageStart AS pageStart,
             node.pageEnd AS pageEnd,
             node.sourceAnchor AS sourceAnchor,
-            node.embedding AS embedding,
             score
         """
         async with self._driver.session(database=self._database) as session:
@@ -202,8 +200,7 @@ class Neo4jGraphStore:
             c.section AS section,
             c.pageStart AS pageStart,
             c.pageEnd AS pageEnd,
-            c.sourceAnchor AS sourceAnchor,
-            c.embedding AS embedding
+            c.sourceAnchor AS sourceAnchor
         LIMIT $limit
         """
         async with self._driver.session(database=self._database) as session:
@@ -234,8 +231,7 @@ class Neo4jGraphStore:
             c.section AS section,
             c.pageStart AS pageStart,
             c.pageEnd AS pageEnd,
-            c.sourceAnchor AS sourceAnchor,
-            c.embedding AS embedding
+            c.sourceAnchor AS sourceAnchor
         """
         async with self._driver.session(database=self._database) as session:
             result = await session.run(query, chunk_ids=chunk_ids, include_historical=include_historical)

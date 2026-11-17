@@ -163,6 +163,10 @@ async def build_service_container() -> ServiceContainer:
             api_key=settings.GEMINI_API_KEY,
             model=settings.RAG_EMBEDDING_MODEL,
             dimension=settings.RAG_EMBEDDING_DIMENSION,
+            batch_size=settings.RAG_EMBEDDING_BATCH_SIZE,
+            min_request_interval_seconds=(
+                settings.RAG_EMBEDDING_MIN_REQUEST_INTERVAL_SECONDS
+            ),
         )
     except Exception as exc:
         await driver.close()

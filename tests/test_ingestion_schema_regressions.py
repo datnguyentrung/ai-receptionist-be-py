@@ -1,18 +1,139 @@
+import asyncio
 import inspect
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from google.adk.sessions.state import State
 from pydantic import TypeAdapter, ValidationError
 
-from app.agent.tools.ingestion_tools import schema, workflow
+from app.agent.tools.ingestion_tools import registry, schema, workflow
+from app.enums import IngestionJobStatus
 from app.models import SchemaProposalType
 from app.schemas.ingestion.proposal import SchemaProposalInput
+from app.services.ingestion.engine import operations
 from app.services.ingestion.engine.workflow_policy import evaluate_workflow
 from app.services.ontology.ontology_lifecycle import (
     SchemaObjectAlreadyExistsError,
 )
+
+
+def _repair_workspace(*, attempts: int, baseline: dict | None = None):
+    batch = SimpleNamespace(
+        batch_index=7,
+        status="REPAIR_REQUIRED",
+        chunk_indexes=[39],
+        scope_keys=["payment"],
+        validation_attempts=attempts,
+        validation_issues=[{"code": "EVIDENCE_NOT_GROUNDED"}],
+        validated_baseline=baseline,
+        graph_fragment={"nodes": []},
+        semantic_fragment={"nodes": []},
+        merged_schema_hash=None,
+        snapshot_hashes={},
+    )
+    return SimpleNamespace(
+        job=SimpleNamespace(
+            id="ingestion-1",
+            status=IngestionJobStatus.BATCHING,
+            summary={},
+            error_message=None,
+            error_stage=None,
+            ontology_version_id="ontology-1",
+        ),
+        document=SimpleNamespace(id="document-1"),
+        version=SimpleNamespace(id="version-1", ontology_version_id="ontology-1"),
+        chunks=(),
+        batches=(batch,),
+    )
+
+
+def test_repair_status_exposes_recovery_options_and_disables_exhausted_repair() -> None:
+    repairable = _repair_workspace(attempts=0, baseline={"nodes": []})
+    exhausted = _repair_workspace(
+        attempts=operations.MAX_BATCH_VALIDATION_ATTEMPTS, baseline={"nodes": []}
+    )
+    no_baseline = _repair_workspace(attempts=0)
+
+    repairable_payload = operations.status_payload(repairable)
+    exhausted_payload = operations.status_payload(exhausted)
+    no_baseline_payload = operations.status_payload(no_baseline)
+
+    assert repairable_payload["nextAction"] == "choose_ingestion_recovery"
+    assert [item["strategy"] for item in repairable_payload["recoveryOptions"]] == [
+        "REPAIR",
+        "REEXTRACT",
+    ]
+    assert repairable_payload["recoveryOptions"][0]["available"] is True
+    assert exhausted_payload["recoveryOptions"][0]["available"] is False
+    assert exhausted_payload["recoveryOptions"][1]["available"] is True
+    assert no_baseline_payload["recoveryOptions"][0]["available"] is False
+
+
+def test_reextract_selection_restarts_batch_and_rebuilds_session_state(monkeypatch) -> None:
+    workspace = _repair_workspace(attempts=operations.MAX_BATCH_VALIDATION_ATTEMPTS)
+    restarted = _repair_workspace(attempts=0)
+    restarted.batches[0].status = "PENDING"
+    repository = SimpleNamespace(restart_from_batch=AsyncMock(return_value=restarted))
+    container = SimpleNamespace(repository=repository)
+    context = SimpleNamespace(
+        state=State(
+            {
+            "ingestion_recovery": {"strategy": "REPAIR"},
+            "ingestion_batch_accumulator": {"ingestionId": "ingestion-1", "entities": {"old": {}}},
+            },
+            {},
+        )
+    )
+    monkeypatch.setattr(workflow, "get_service_container", AsyncMock(return_value=container))
+    monkeypatch.setattr(operations, "required_workspace", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(workflow, "workspace_payload", lambda _workspace: {"nextAction": "process_batch"})
+
+    result = asyncio.run(
+        workflow.choose_ingestion_recovery("ingestion-1", "REEXTRACT", context)
+    )
+
+    repository.restart_from_batch.assert_awaited_once_with(
+        "ingestion-1", 7, "User requested re-extraction after validation failure."
+    )
+    assert result["nextAction"] == "process_batch"
+    assert context.state["ingestion_recovery"] is None
+    assert context.state["ingestion_batch_accumulator"] == {
+        "ingestionId": "ingestion-1",
+        "batches": {},
+        "entities": {},
+    }
+
+
+def test_repair_selection_preserves_batch_and_records_session_strategy(monkeypatch) -> None:
+    workspace = _repair_workspace(attempts=0, baseline={"nodes": []})
+    repository = SimpleNamespace(restart_from_batch=AsyncMock())
+    container = SimpleNamespace(repository=repository)
+    context = SimpleNamespace(state={})
+    monkeypatch.setattr(workflow, "get_service_container", AsyncMock(return_value=container))
+    monkeypatch.setattr(operations, "required_workspace", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(workflow, "workspace_payload", lambda _workspace: {"stage": "repair_required"})
+
+    result = asyncio.run(
+        workflow.choose_ingestion_recovery("ingestion-1", "REPAIR", context)
+    )
+
+    repository.restart_from_batch.assert_not_awaited()
+    assert result["recoverySelected"] == "REPAIR"
+    assert context.state["ingestion_recovery"] == {
+        "ingestionId": "ingestion-1",
+        "batchIndex": 7,
+        "strategy": "REPAIR",
+    }
+
+
+def test_recovery_tool_is_registered_as_root_tool() -> None:
+    assert workflow.choose_ingestion_recovery in registry.INGESTION_ROOT_TOOLS
+    assert workflow.choose_ingestion_recovery in registry.INGESTION_TOOLS
+    skill = Path("app/agent/skills/ingestion/SKILL.md").read_text(encoding="utf-8")
+    assert "- choose_ingestion_recovery" in skill
 
 
 def test_new_entity_declares_every_identity_property() -> None:

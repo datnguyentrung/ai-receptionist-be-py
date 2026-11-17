@@ -30,8 +30,8 @@ class GeminiEmbeddingProvider:
         api_key: str,
         model: str = "gemini-embedding-001",
         dimension: int = 768,
-        batch_size: int = 16,
-        min_request_interval_seconds: float = 12.0,
+        batch_size: int = 32,
+        min_request_interval_seconds: float = 0.0,
     ) -> None:
         """Khởi tạo GeminiEmbeddingProvider.
 
@@ -39,7 +39,7 @@ class GeminiEmbeddingProvider:
             api_key: Khóa API của Google AI (Gemini).
             model: Tên model Gemini Embedding sử dụng (mặc định: "gemini-embedding-001").
             dimension: Số chiều của vector embedding kết quả (mặc định: 768).
-            batch_size: Số lượng đoạn văn bản được gửi đi trong mỗi batch (mặc định: 64).
+            batch_size: Số lượng đoạn văn bản được gửi đi trong mỗi batch (mặc định: 32).
 
         Ném ra:
             EmbeddingError: Nếu api_key bị trống hoặc không hợp lệ.

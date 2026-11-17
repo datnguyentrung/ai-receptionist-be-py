@@ -291,6 +291,14 @@ class BatchExecutionModule:
             else max(1, int(configured))
         )
 
+    @staticmethod
+    def _model_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
+        """Expose only citable chunk data to ingestion models."""
+        return [
+            {"chunkIndex": chunk.chunk_index, "text": chunk.text}
+            for chunk in chunks
+        ]
+
     async def execute(
         self, ingestion_id: str, batch_index: int, tool_context: Any
     ) -> dict[str, Any]:
@@ -346,6 +354,26 @@ class BatchExecutionModule:
                 return result
 
             if prepared.batch.status == "REPAIR_REQUIRED":
+                recovery = tool_context.state.get("ingestion_recovery")
+                if not (
+                    isinstance(recovery, dict)
+                    and recovery.get("ingestionId") == ingestion_id
+                    and recovery.get("batchIndex") == batch_index
+                    and recovery.get("strategy") == "REPAIR"
+                ):
+                    result = batch_result_payload(prepared.workspace, batch_index)
+                    result["nextAction"] = "choose_ingestion_recovery"
+                    self._log_metrics(
+                        ingestion_id,
+                        batch_index,
+                        "recovery_selection_required",
+                        calls,
+                        prompt_bytes,
+                        [],
+                        [],
+                        result,
+                    )
+                    return result
                 scope_keys = self._normalize_scope_keys(
                     prepared.batch.scope_keys, prepared.catalog_keys
                 )
@@ -373,14 +401,16 @@ class BatchExecutionModule:
                     repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
                         prepared.batch
                     )
-                    if repair_payload["entityExtractionContract"]:
+                    contract = repair_payload["entityExtractionContract"]
+                    if isinstance(contract, dict) and contract.get("contractHash"):
                         await prepared.container.repository.record_runtime_metadata(
                             ingestion_id,
                             model_assignments=repair_payload["modelAssignments"],
-                            contract_hash=repair_payload["entityExtractionContract"]["contractHash"],
+                            contract_hash=contract["contractHash"],
                         )
                     calls += 1
                     delta = await self._model.repair(repair_payload, tool_context)
+                    tool_context.state["ingestion_recovery"] = None
                     workspace = await operations.repair_batch(
                         prepared.container.repository,
                         prepared.container.ontology_cache,
@@ -403,6 +433,19 @@ class BatchExecutionModule:
                         result,
                     )
                     return result
+                result = batch_result_payload(prepared.workspace, batch_index)
+                result["nextAction"] = "choose_ingestion_recovery"
+                self._log_metrics(
+                    ingestion_id,
+                    batch_index,
+                    "recovery_unavailable",
+                    calls,
+                    prompt_bytes,
+                    [],
+                    [],
+                    result,
+                )
+                return result
 
             selected = self._normalize_scope_keys(
                 prepared.batch.scope_keys, prepared.catalog_keys
@@ -682,9 +725,7 @@ class BatchExecutionModule:
                 "batchIndex": batch.batch_index,
                 "scopeHint": workspace.job.scope_hint,
                 "selectedScopeKeys": batch.scope_keys,
-                "chunks": [
-                    item.model_dump(by_alias=True, mode="json") for item in chunks
-                ],
+                "chunks": self._model_chunks(chunks),
                 "canonicalGraphContext": canonical,
             },
             "scopeCatalog": catalog,

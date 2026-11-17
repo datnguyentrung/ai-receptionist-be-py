@@ -17,6 +17,7 @@ from app.agent.tools.ingestion_tools.schema import (
 from app.agent.tools.ingestion_tools.workflow import (
     abort_ingestion,
     begin_ingestion,
+    choose_ingestion_recovery,
     commit_ingestion,
     finalize_ingestion,
     get_ingestion_preview,
@@ -27,6 +28,7 @@ from app.agent.tools.ingestion_tools.workflow import (
 
 INGESTION_TOOLS = (
     begin_ingestion,
+    choose_ingestion_recovery,
     get_ingestion_batch,
     submit_ingestion_batch,
     finalize_ingestion,
@@ -47,6 +49,7 @@ INGESTION_TOOLS = (
 
 INGESTION_ROOT_TOOLS = (
     begin_ingestion,
+    choose_ingestion_recovery,
     get_ingestion_status,
     create_schema_proposal,
     get_schema_proposal,

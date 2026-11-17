@@ -9,13 +9,19 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
-from app.services.graphrag.embeddings import GeminiEmbeddingProvider, cosine_similarity
+from app.services.graphrag.embeddings import GeminiEmbeddingProvider
 from app.services.graphrag.graph_store import Neo4jGraphStore
 
 logger = logging.getLogger(__name__)
 INSUFFICIENT_EVIDENCE = (
     "Không có đủ bằng chứng trong kho tri thức để trả lời câu hỏi này."
 )
+_PATH_WEIGHTS = {
+    "chunkVector": 2.0,
+    "factSupport": 2.0,
+    "chunkFulltext": 1.0,
+    "entityTraversal": 1.0,
+}
 
 
 class EvidenceStatus(StrEnum):
@@ -212,21 +218,44 @@ class GraphRAGRetriever:
         ):
             return EvidenceBundle(status=EvidenceStatus.UNAVAILABLE)
 
+        fact_score_by_chunk_id: dict[str, float] = {}
+        for fact in fact_hits:
+            score = float(fact.get("score", 0.0))
+            for chunk_id in fact.get("chunkIds") or []:
+                key = str(chunk_id)
+                fact_score_by_chunk_id[key] = max(
+                    fact_score_by_chunk_id.get(key, 0.0), score
+                )
+
         paths = {
-            "chunkVector": _filter_scope(chunk_vector, scope_key),
+            "chunkVector": [
+                {**item, "semanticScore": float(item.get("score", 0.0))}
+                for item in _filter_scope(chunk_vector, scope_key)
+            ],
             "chunkFulltext": _filter_scope(chunk_fulltext, scope_key),
             "entityTraversal": _filter_scope(entity_chunks, scope_key),
-            "factSupport": _filter_scope(fact_chunks, scope_key),
+            "factSupport": [
+                {
+                    **item,
+                    "semanticScore": fact_score_by_chunk_id.get(
+                        str(item.get("chunkId")), 0.0
+                    ),
+                }
+                for item in _filter_scope(fact_chunks, scope_key)
+            ],
         }
         fused = _reciprocal_rank_fusion(paths)
-        ranked: list[dict[str, Any]] = []
-        for item in fused.values():
-            embedding = item.get("embedding") or []
-            cosine = cosine_similarity(query_vector, embedding) if query_vector else 0.0
-            item["cosineScore"] = cosine
-            ranked.append(item)
+        ranked = list(fused.values())
+        max_rrf_score = max(
+            (float(item["rrfScore"]) for item in ranked), default=1.0
+        )
+        for item in ranked:
+            item["rankingScore"] = (
+                0.7 * float(item["semanticScore"])
+                + 0.3 * float(item["rrfScore"]) / max_rrf_score
+            )
         ranked.sort(
-            key=lambda item: (-float(item["rrfScore"]), -float(item["cosineScore"]))
+            key=lambda item: (-float(item["rankingScore"]), -float(item["rrfScore"]))
         )
         selected = _within_context_budget(ranked[:top_k], self._context_max_chars)
         selected_ids = {str(item.get("chunkId")) for item in selected}
@@ -245,7 +274,7 @@ class GraphRAGRetriever:
             and str(item.get("chunkId")) not in selected_ids
         )
         top_score = max(
-            (float(item.get("cosineScore", 0.0)) for item in selected), default=0.0
+            (float(item.get("semanticScore", 0.0)) for item in selected), default=0.0
         )
         has_lexical_evidence = any(
             {"chunkFulltext", "entityTraversal"}.intersection(item.get("paths", []))
@@ -351,16 +380,19 @@ def _reciprocal_rank_fusion(
 ) -> dict[str, dict[str, Any]]:
     fused: dict[str, dict[str, Any]] = {}
     for path_name, items in paths.items():
+        weight = _PATH_WEIGHTS[path_name]
         for rank, item in enumerate(items, start=1):
             chunk_id = item.get("chunkId")
             if not chunk_id:
                 continue
             key = f"{item.get('versionId', '')}:{chunk_id}"
             target = fused.setdefault(key, {**item, "rrfScore": 0.0, "paths": []})
-            target["rrfScore"] += 1.0 / (k + rank)
+            target["rrfScore"] += weight / (k + rank)
             target["paths"].append(path_name)
-            if not target.get("embedding") and item.get("embedding"):
-                target["embedding"] = item["embedding"]
+            target["semanticScore"] = max(
+                float(target.get("semanticScore", 0.0)),
+                float(item.get("semanticScore", 0.0)),
+            )
     return fused
 
 
@@ -409,7 +441,7 @@ def _public_passage(item: dict[str, Any]) -> dict[str, Any]:
         "citation": citation,
         "content": item.get("text"),
         "quote": item.get("text"),
-        "score": round(float(item.get("cosineScore", 0.0)), 6),
+        "score": round(float(item.get("semanticScore", 0.0)), 6),
         "rrfScore": round(float(item.get("rrfScore", 0.0)), 6),
         "retrievalPaths": sorted(set(item.get("paths", []))),
         "source": {

@@ -6,6 +6,7 @@ description: >
 metadata:
   adk_additional_tools:
     - begin_ingestion
+    - choose_ingestion_recovery
     - create_schema_proposal
     - get_schema_proposal
     - review_schema_proposal
@@ -32,11 +33,18 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
    yêu cầu người dùng duyệt ngay; không gọi `get_ingestion_status` hoặc
    `get_schema_proposal` chỉ để đọc lại proposal đó. Nếu job đã có preview,
    đọc `get_ingestion_preview`; nếu đã `COMMITTED`, báo idempotent và dừng.
-2. Chạy `ingestion_batch_agent` với `ingestion_id` và đúng `batch_index` từ
+2. Nếu response có `stage: repair_required` và `recoveryOptions`, trình bày hai
+   lựa chọn recovery cho người dùng và dừng lượt: `REPAIR` chỉ sửa output đã có;
+   `REEXTRACT` xóa kết quả chưa commit từ batch lỗi trở đi để trích xuất lại. Chỉ
+   gọi `choose_ingestion_recovery` sau khi người dùng chọn. Không gọi
+   `ingestion_batch_agent` trước khi có lựa chọn; nếu `REPAIR` không available,
+   chỉ trình bày `REEXTRACT`.
+3. Sau khi recovery đã được chọn, hoặc khi response không cần recovery, chạy
+   `ingestion_batch_agent` với `ingestion_id` và đúng `batch_index` từ
    `nextBatch`. Sau mỗi batch,
    lấy `nextBatch` mới từ response hoặc `get_ingestion_status`; tiếp tục cho
    đến khi tất cả batch `STAGED`.
-3. Xử lý trường hợp thiếu schema (chỉ chạy khi batch báo schema gap).
+4. Xử lý trường hợp thiếu schema (chỉ chạy khi batch báo schema gap).
 
    Trong phase xử lý batch, hệ thống đã tải và đối chiếu ontology catalog/schema
    cần thiết từ ontology version đang được job sử dụng. Không tải lại schema context
@@ -72,21 +80,23 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
    rebase, chạy lại batch hoặc tạo proposal khác trong lúc proposal đang chờ.
    Nếu lỗi này là dữ liệu cũ nhưng `pendingProposalCount` bằng 0, làm theo
    `nextAction` mới; thường là `rebase_ingestion`, sau đó chạy lại `nextBatch`.
-4. Khi tất cả batch đã được xử lý, gọi `finalize_ingestion`.
+5. Khi tất cả batch đã được xử lý, gọi `finalize_ingestion`.
 
-   Nếu finalize hoặc validation của một batch trả về repair_required:
-   1. Gọi công cụ repair cho đúng batch với repairContext.
-   2. Chờ batch được validate và stage lại.
-   3. Gọi `finalize_ingestion` lại.
+   Nếu finalize hoặc validation của một batch trả về repair_required, dùng
+   `recoveryOptions` và chờ lựa chọn người dùng/A2UI như bước 2. Không gọi
+   repair hoặc extract lại batch trước lựa chọn đó. Khi chọn `REPAIR`, executor
+   chỉ dùng repairContext, protected baseline và scope đã khóa; khi chọn
+   `REEXTRACT`, mới chạy extraction thường từ batch đã reset, rồi gọi
+   `finalize_ingestion` lại sau khi các batch đã staged.
 
    Chỉ khi finalize thành công mới gọi `get_ingestion_preview`.
    Trình preview cho người dùng, gồm thay đổi, nguồn/trích dẫn, thời gian,
    schema và mâu thuẫn. Không gọi `commit_ingestion` trước khi người dùng xem
    và xác nhận báo cáo.
-5. Cho **mỗi** mâu thuẫn, dùng `review_ingestion_conflict` với đúng một lựa chọn
+6. Cho **mỗi** mâu thuẫn, dùng `review_ingestion_conflict` với đúng một lựa chọn
    `CONFIRM`, `REJECT`, `OTHER`. `OTHER` cần ghi chú và giữ chưa phân xử. Sau
    mỗi quyết định, đọc lại preview vì `reportDigest` thay đổi.
-6. Sau khi người dùng xác nhận commit cuối, gọi `commit_ingestion` với
+7. Sau khi người dùng xác nhận commit cuối, gọi `commit_ingestion` với
    `ingestionId` và `reportDigest` mới nhất. Tool này yêu cầu ADK confirmation;
    model không được tự điền quyết định duyệt hoặc gọi đường ghi khác. Nếu báo
    `PREVIEW_STALE`, tạo và trình báo cáo mới để xin xác nhận lại. Nếu commit bị
@@ -94,7 +104,7 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
    `COMMITTED` và `readbackVerified=true`. Khi thành công, trả lời bằng báo cáo
    commit cuối gồm ingestion/version ID, counts và readback; không gọi lại preview
    hoặc commit cho cùng job.
-7. Nếu người dùng hủy trước commit, gọi `abort_ingestion`; draft của job không
+8. Nếu người dùng hủy trước commit, gọi `abort_ingestion`; draft của job không
    được kích hoạt và job chuyển `ABORTED`.
 
 Trước commit, Neo4j không công bố fact mới và PostgreSQL chỉ giữ schema DRAFT.

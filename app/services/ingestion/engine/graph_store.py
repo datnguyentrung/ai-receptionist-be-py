@@ -589,8 +589,7 @@ class Neo4jIngestionStore:
                    node.chunkIndex AS chunkIndex, node.text AS text,
                    node.section AS section, node.pageStart AS pageStart,
                    node.pageEnd AS pageEnd, node.sourceAnchor AS sourceAnchor,
-                   node.scopeKey AS scopeKey, node.scopeKeys AS scopeKeys,
-                   node.embedding AS embedding, score
+                   node.scopeKey AS scopeKey, node.scopeKeys AS scopeKeys, score
             ORDER BY score DESC
             LIMIT $limit
             """,
@@ -770,7 +769,7 @@ class Neo4jIngestionStore:
                    chunk.section AS section, chunk.pageStart AS pageStart,
                    chunk.pageEnd AS pageEnd, chunk.sourceAnchor AS sourceAnchor,
                    chunk.scopeKey AS scopeKey, chunk.scopeKeys AS scopeKeys,
-                   chunk.embedding AS embedding, 1.0 AS score
+                   1.0 AS score
             """,
             chunk_ids=chunk_ids,
         )
