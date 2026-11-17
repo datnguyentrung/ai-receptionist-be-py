@@ -59,10 +59,19 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
       chối; ADK confirmation vẫn là lớp xác nhận cuối.
    3. Sau khi người dùng duyệt, gọi `apply_schema_proposal` để tạo hoặc cập nhật
       ontology DRAFT riêng cho ingestion job. Không sửa ontology ACTIVE.
-   4. Gọi `rebase_ingestion` với draft ID.
+   4. Gọi `rebase_ingestion` với UUID trong
+      `apply_schema_proposal.targetOntologyVersionId`. Không dùng tên version
+      dạng `draft-...` làm ID.
    5. Chạy lại đúng `nextBatch` mà rebase trả về; `nextBatch` có thể quay lại batch 0.
 
    Model không được tự phê duyệt schema proposal.
+
+   Nếu status có `SCHEMA_PROPOSAL_PENDING` hoặc `wait_for_schema_review` và vẫn
+   có proposal thực sự đang chờ (`pendingProposalCount > 0` hoặc
+   `pendingSchemaProposal(s)`), dừng lượt và chờ người dùng duyệt. Không apply,
+   rebase, chạy lại batch hoặc tạo proposal khác trong lúc proposal đang chờ.
+   Nếu lỗi này là dữ liệu cũ nhưng `pendingProposalCount` bằng 0, làm theo
+   `nextAction` mới; thường là `rebase_ingestion`, sau đó chạy lại `nextBatch`.
 4. Khi tất cả batch đã được xử lý, gọi `finalize_ingestion`.
 
    Nếu finalize hoặc validation của một batch trả về repair_required:
@@ -82,7 +91,9 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
    model không được tự điền quyết định duyệt hoặc gọi đường ghi khác. Nếu báo
    `PREVIEW_STALE`, tạo và trình báo cáo mới để xin xác nhận lại. Nếu commit bị
    gián đoạn, dùng cùng job để resume; chỉ báo thành công khi trạng thái
-   `COMMITTED` và `readbackVerified=true`.
+   `COMMITTED` và `readbackVerified=true`. Khi thành công, trả lời bằng báo cáo
+   commit cuối gồm ingestion/version ID, counts và readback; không gọi lại preview
+   hoặc commit cho cùng job.
 7. Nếu người dùng hủy trước commit, gọi `abort_ingestion`; draft của job không
    được kích hoạt và job chuyển `ABORTED`.
 

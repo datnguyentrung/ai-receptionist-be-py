@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 def ingestion_model_assignments() -> dict[str, str]:
     """Read the role-specific model configuration for a new ingestion job."""
     defaults = {
-        "extract": "gemini-3.5-flash-lite",
-        "repair": "gemini-3.5-flash-lite",
+        "extract": "gemini-3.1-flash-lite",
+        "repair": "gemini-3.1-flash-lite",
         "routing": "gemini-3.1-flash-lite",
         "evidence": "gemini-3.1-flash-lite",
     }
