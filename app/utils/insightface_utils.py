@@ -39,11 +39,12 @@ MODEL_DIR = os.path.abspath(
 os.environ["INSIGHTFACE_HOME"] = MODEL_DIR
 
 face_app: FaceAnalysis | None = None
+active_execution_providers: tuple[str, ...] = ()
 logger = logging.getLogger(__name__)
 
 
 def initialize_face_app() -> None:
-    global face_app
+    global active_execution_providers, face_app
 
     started_at = time.perf_counter()
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -76,30 +77,35 @@ def initialize_face_app() -> None:
         )
         app.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
+    active_execution_providers = tuple(sorted({
+        provider
+        for model in app.models.values()
+        for provider in model.session.get_providers()
+    }))
     if "CUDAExecutionProvider" in providers:
-        active_providers = {
-            provider
-            for model in app.models.values()
-            for provider in model.session.get_providers()
-        }
-        if "CUDAExecutionProvider" not in active_providers:
+        if "CUDAExecutionProvider" not in active_execution_providers:
             raise RuntimeError(
                 "CUDAExecutionProvider was requested but InsightFace fell back to CPU. "
-                f"Active providers: {', '.join(sorted(active_providers))}"
+                f"Active providers: {', '.join(active_execution_providers)}"
             )
 
     face_app = app
 
     logger.info(
-        "insightface_initialization_completed | model=%s | providers=%s | durationMs=%.2f",
+        "insightface_initialization_completed | model=%s | requestedProviders=%s | activeProviders=%s | durationMs=%.2f",
         settings.INSIGHTFACE_MODEL_NAME,
         providers,
+        active_execution_providers,
         (time.perf_counter() - started_at) * 1000,
     )
 
 
 def is_face_app_initialized() -> bool:
     return face_app is not None
+
+
+def get_active_execution_providers() -> tuple[str, ...]:
+    return active_execution_providers
 
 
 def detect_faces(img_array: Any, request_id: str | None = None):

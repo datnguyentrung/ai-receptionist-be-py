@@ -11,7 +11,11 @@ from app.core.config import settings
 from app.enums.face_embedding_error_code import FaceEmbeddingErrorCode
 from app.exceptions.face_embedding_exception import FaceEmbeddingException
 from app.schemas.face_embedding_schema import FaceEmbeddingResponse
-from app.utils.insightface_utils import detect_faces, is_face_app_initialized
+from app.utils.insightface_utils import (
+    detect_faces,
+    get_active_execution_providers,
+    is_face_app_initialized,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +175,7 @@ class FaceEmbeddingService:
         )
         logger.info(
             "response_completed | requestId=%s | filename=%s | mimeType=%s | "
-            "sizeBytes=%s | imageShape=%s | faceCount=%s | dimension=%s | "
+            "sizeBytes=%s | imageShape=%s | faceCount=%s | dimension=%s | providers=%s | "
             "timing={readMs=%.2f, decodeMs=%.2f, detectMs=%.2f, validateMs=%.2f, totalMs=%.2f}",
             request_id,
             filename,
@@ -180,6 +184,7 @@ class FaceEmbeddingService:
             tuple(image_np.shape),
             face_count,
             dimension,
+            get_active_execution_providers(),
             file_read_ms,
             decode_ms,
             detect_ms,
