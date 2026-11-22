@@ -22,4 +22,9 @@ NẾU GẶP MAPPED_WITHOUT_MAPPING:
 - Điều kiện, quy định và ngoại lệ có thể được giữ nguyên văn trong `policy.description` hoặc `requirement.description` khi schema có các entity/property này. Không kết luận SCHEMA_GAP chỉ vì logic có nhiều điều kiện.
 - Tóm tắt, mục lục hoặc đoạn diễn giải lại nội dung chi tiết phía sau phải đổi thành NO_RELEVANT_FACT hoặc DUPLICATE_EVIDENCE; không cần thêm schema để mô hình hóa chúng.
 
+NẾU GẶP LIST_ITEMS_NOT_REPRESENTED:
+- Đọc lại chunk được chỉ ra trong lỗi và bổ sung toàn bộ bullet còn thiếu vào property text phù hợp của node baseline.
+- Với property scalar như `description` hoặc `notes`, trả về một property thay thế chứa toàn bộ danh sách nguyên văn, phân cách bằng ký tự xuống dòng; không trả nhiều property trùng tên.
+- Evidence phải trích nguyên văn phần danh sách đã bổ sung.
+
 Không gọi công cụ nào.

@@ -15,7 +15,8 @@ metadata:
     - finalize_ingestion
     - get_ingestion_preview
     - list_ingestion_conflicts
-    - review_ingestion_conflict
+    - review_entity_resolutions
+    - review_ingestion_conflicts
     - commit_ingestion
     - abort_ingestion
     - get_ingestion_status
@@ -64,7 +65,7 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
    2. Sau khi tạo proposal, trả lời bằng văn bản để trình proposal và dừng lượt.
       Không gọi `review_schema_proposal` trong cùng lượt tạo proposal. Chỉ gọi
       tool review ở lượt sau khi có tin nhắn mới của người dùng đồng ý hoặc từ
-      chối; ADK confirmation vẫn là lớp xác nhận cuối.
+      chối. Dùng xác nhận đó trực tiếp, không tạo A2UI bổ sung.
    3. Sau khi người dùng duyệt, gọi `apply_schema_proposal` để tạo hoặc cập nhật
       ontology DRAFT riêng cho ingestion job. Không sửa ontology ACTIVE.
    4. Gọi `rebase_ingestion` với UUID trong
@@ -83,7 +84,7 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
 5. Khi tất cả batch đã được xử lý, gọi `finalize_ingestion`.
 
    Nếu finalize hoặc validation của một batch trả về repair_required, dùng
-   `recoveryOptions` và chờ lựa chọn người dùng/A2UI như bước 2. Không gọi
+   `recoveryOptions` và chờ lựa chọn người dùng như bước 2. Không gọi
    repair hoặc extract lại batch trước lựa chọn đó. Khi chọn `REPAIR`, executor
    chỉ dùng repairContext, protected baseline và scope đã khóa; khi chọn
    `REEXTRACT`, mới chạy extraction thường từ batch đã reset, rồi gọi
@@ -93,12 +94,23 @@ dung mới của cùng key tạo phiên bản mới. Chỉ chấp nhận Markdow
    Trình preview cho người dùng, gồm thay đổi, nguồn/trích dẫn, thời gian,
    schema và mâu thuẫn. Không gọi `commit_ingestion` trước khi người dùng xem
    và xác nhận báo cáo.
-6. Cho **mỗi** mâu thuẫn, dùng `review_ingestion_conflict` với đúng một lựa chọn
-   `CONFIRM`, `REJECT`, `OTHER`. `OTHER` cần ghi chú và giữ chưa phân xử. Sau
-   mỗi quyết định, đọc lại preview vì `reportDigest` thay đổi.
-7. Sau khi người dùng xác nhận commit cuối, gọi `commit_ingestion` với
-   `ingestionId` và `reportDigest` mới nhất. Tool này yêu cầu ADK confirmation;
-   model không được tự điền quyết định duyệt hoặc gọi đường ghi khác. Nếu báo
+6. Phân biệt hai loại review bằng trường ID:
+
+   - `entityResolutions[*].reviewId` là semantic entity review. Gọi
+     `review_entity_resolutions` đúng **một lần** với `ingestionId` và
+     `REUSE` hoặc `DISTINCT`.
+   - `conflicts[*].conflictId` là fact conflict. Gọi
+     `review_ingestion_conflicts` đúng **một lần** với `ingestionId` và
+     `CONFIRM`, `REJECT` hoặc `OTHER`.
+   - Không có tool review lẻ trên bề mặt agent. Không gọi lần lượt từng ID.
+   - `OTHER` cần ghi chú. Sau mỗi quyết định, đọc lại preview vì
+     `reportDigest` thay đổi.
+7. Chỉ gọi `commit_ingestion` khi `pendingEntityReviewCount` và
+   `pendingConflictCount` đều bằng 0. Sau khi người dùng xác nhận commit cuối, gọi
+   `commit_ingestion` với
+   `ingestionId` và `reportDigest` mới nhất ngay trong lượt xác nhận đó; không
+   tạo A2UI bổ sung. Model không được tự điền quyết định duyệt hoặc gọi đường ghi
+   khác. Nếu báo
    `PREVIEW_STALE`, tạo và trình báo cáo mới để xin xác nhận lại. Nếu commit bị
    gián đoạn, dùng cùng job để resume; chỉ báo thành công khi trạng thái
    `COMMITTED` và `readbackVerified=true`. Khi thành công, trả lời bằng báo cáo
@@ -111,3 +123,5 @@ Trước commit, Neo4j không công bố fact mới và PostgreSQL chỉ giữ s
 Sau commit, truy vấn thường dùng phiên bản hiện hành; truy vấn lịch sử vẫn giữ
 nguồn cũ. Với mâu thuẫn `OTHER`, câu trả lời phải trích dẫn cả hai nguồn và nêu
 rõ chưa xác định nguồn hiện hành.
+
+$preview_response_format

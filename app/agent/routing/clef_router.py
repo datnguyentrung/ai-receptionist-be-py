@@ -30,6 +30,7 @@ VALID_ROUTES = {
     "INGESTION_AGENT",
     "CALCULATION_AGENT",
     "GRAPH_QA_AGENT",
+    "CHATCHIT_AGENT",
     "ASK_CLARIFICATION",
 }
 
@@ -91,7 +92,10 @@ def route_with_clef(
                         "Yêu cầu thực hiện phép tính số học hoặc tính toán dựa trên các giá trị cụ thể, bao gồm cộng trừ nhân chia về học phí, số buổi, điểm số, thời lượng hoặc các tham số định lượng."
                     ),
                     "GRAPH_QA_AGENT": (
-                        "Yêu cầu tra cứu hoặc trả lời thông tin dựa trên tri thức đã có về Taekwondo, võ đường, học viện hoặc câu lạc bộ: tên CLB/võ đường, lịch sử, người sáng lập, cơ sở, thông tin liên hệ, lớp học, lịch học, học phí, quy định, kỳ thi, kỹ thuật, bài quyền và luật thi đấu. Bao gồm câu hỏi tri thức chung, chào hỏi, và câu hỏi ngắn như 'CLB tên gì?', 'võ đường tên gì?', 'lịch học?'. Nếu câu hỏi có thể trả lời bằng cách tra cứu Knowledge Graph thì chọn GRAPH_QA_AGENT."
+                        "Yêu cầu tra cứu hoặc trả lời thông tin dựa trên tri thức đã có về Taekwondo, võ đường, học viện hoặc câu lạc bộ: tên CLB/võ đường, lịch sử, người sáng lập, cơ sở, thông tin liên hệ, lớp học, lịch học, học phí, quy định, kỳ thi, kỹ thuật, bài quyền và luật thi đấu. Bao gồm câu hỏi tri thức chung và câu hỏi ngắn như 'CLB tên gì?', 'võ đường tên gì?', 'lịch học?'. Nếu câu hỏi có thể trả lời bằng cách tra cứu Knowledge Graph thì chọn GRAPH_QA_AGENT."
+                    ),
+                    "CHATCHIT_AGENT": (
+                        "Chào hỏi, cảm ơn, lời chúc, trò chuyện xã giao hoặc phản hồi ngắn không yêu cầu tra cứu tri thức hay thực hiện nghiệp vụ. Không chọn nếu người dùng hỏi thông tin cụ thể về Taekwondo hoặc võ đường."
                     ),
                     "ASK_CLARIFICATION": (
                         "Chỉ chọn khi câu hỏi có ít nhất hai cách hiểu nghiệp vụ cạnh tranh giữa các agent và không thể xác định ý định chính từ câu hiện tại hoặc lịch sử. Không chọn chỉ vì câu hỏi ngắn, viết tắt, thiếu tham số chi tiết, hoặc không chứa keyword rõ ràng."

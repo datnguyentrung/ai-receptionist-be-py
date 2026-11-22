@@ -70,6 +70,32 @@ def test_logger_omits_raw_event_prompt_and_user_payload(tmp_path: Path, monkeypa
     assert "prompt-secret" not in content
 
 
+def test_logger_summarizes_internal_ingestion_payload(tmp_path: Path, monkeypatch) -> None:
+    log_file = tmp_path / "log.txt"
+    monkeypatch.setattr(ingestion_logger, "LOG_FILE", log_file)
+    plugin = ingestion_logger.ADKDetailedLoggerPlugin()
+
+    asyncio.run(
+        plugin.on_user_message_callback(
+            invocation_context=object(),
+            user_message=SimpleNamespace(
+                parts=[
+                    SimpleNamespace(
+                        text='{"phase":"repair","ingestionId":"ing-1","batchIndex":1,'
+                        '"batch":{"chunks":[{"chunkIndex":5,"text":"secret chunk"}]},'
+                        '"validationIssues":[{"code":"EVIDENCE_NOT_GROUNDED"}]}'
+                    )
+                ]
+            ),
+        )
+    )
+
+    content = log_file.read_text(encoding="utf-8")
+    assert '"phase": "repair"' in content
+    assert '"chunkIndexes": [' in content
+    assert "secret chunk" not in content
+
+
 def test_tool_request_and_response_remain_detailed(tmp_path: Path, monkeypatch) -> None:
     log_file = tmp_path / "log.txt"
     monkeypatch.setattr(ingestion_logger, "LOG_FILE", log_file)

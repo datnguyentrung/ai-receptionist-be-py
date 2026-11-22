@@ -20,6 +20,21 @@ from app.services.ingestion.engine import operations
 from app.utils import log_ingestion_event
 
 
+def _review_correction(
+    *, stage: str, code: str, message: str, next_action: str
+) -> dict[str, Any]:
+    """Return a recoverable review error; these must not end the agent run."""
+    return {
+        "success": False,
+        "stage": stage,
+        "terminal": False,
+        "retryRequired": False,
+        "ingestionId": None,
+        "nextAction": next_action,
+        "errors": [{"code": code, "message": message, "retryable": True}],
+    }
+
+
 async def begin_ingestion(
     artifact_name: str,
     document_key: str,
@@ -285,7 +300,9 @@ async def finalize_ingestion(
 ) -> dict[str, Any]:
     try:
         container = await get_service_container()
-        workspace = await operations.finalize(container.repository, ingestion_id)
+        workspace = await operations.finalize(
+            container.repository, ingestion_id, container.graph_store
+        )
         result = finalize_result_payload(workspace)
         if workspace.job.status == IngestionJobStatus.READY:
             result = await operations.build_preview(
@@ -334,26 +351,49 @@ async def get_ingestion_preview(
 async def commit_ingestion(
     ingestion_id: str, report_digest: str, tool_context: ToolContext
 ) -> dict[str, Any]:
-    confirmation = getattr(tool_context, "tool_confirmation", None)
-    if confirmation is None or not confirmation.confirmed:
-        return tool_error(
-            "commit_approval",
-            "APPROVAL_REQUIRED",
-            "Human tool confirmation is required",
-        )
     try:
         container = await get_service_container()
         workspace = await container.repository.get_workspace(ingestion_id)
         if workspace is None:
             raise KeyError(ingestion_id)
         if workspace.job.status == IngestionJobStatus.AWAITING_COMMIT_APPROVAL:
-            await container.repository.record_commit_approval(
-                ingestion_id,
-                report_digest,
-                user_id=tool_context.user_id,
-                session_id=tool_context.session.id,
-                function_call_id=tool_context.function_call_id or "",
-            )
+            preview = await container.repository.get_preview(ingestion_id)
+            if preview["pendingEntityReviewCount"]:
+                return _review_correction(
+                    stage="awaiting_commit_approval",
+                    code="REVIEW_REQUIRED",
+                    message="Resolve every entity review before committing",
+                    next_action="review_entity_resolutions",
+                )
+            if preview["pendingConflictCount"]:
+                return _review_correction(
+                    stage="awaiting_commit_approval",
+                    code="REVIEW_REQUIRED",
+                    message="Resolve every fact conflict before committing",
+                    next_action="review_ingestion_conflicts",
+                )
+            if preview["reportDigest"] != report_digest:
+                return _review_correction(
+                    stage="commit_approval",
+                    code="PREVIEW_STALE",
+                    message="Preview changed; read the latest preview and ask for confirmation again",
+                    next_action="get_ingestion_preview",
+                )
+            try:
+                await container.repository.record_commit_approval(
+                    ingestion_id,
+                    report_digest,
+                    user_id=tool_context.user_id,
+                    session_id=tool_context.session.id,
+                    function_call_id=tool_context.function_call_id or "",
+                )
+            except ValueError as exc:
+                return _review_correction(
+                    stage="commit_approval",
+                    code="REVIEW_REQUIRED",
+                    message=str(exc),
+                    next_action="get_ingestion_preview",
+                )
         result = await operations.commit(
             container.repository,
             container.graph_store,
@@ -400,6 +440,17 @@ async def get_ingestion_status(
             item["decision"] == "PENDING"
             for item in await container.repository.list_fact_conflicts(ingestion_id)
         )
+        result["pendingEntityReviewCount"] = (
+            await container.repository.pending_entity_resolution_reviews(ingestion_id)
+        )
+        if result.get("stage") == "awaiting_commit_approval":
+            result["nextAction"] = (
+                "review_entity_resolutions"
+                if result["pendingEntityReviewCount"]
+                else "review_ingestion_conflicts"
+                if result["pendingConflictCount"]
+                else "confirm_and_commit"
+            )
         result["reportDigest"] = workspace.job.summary.get("reportDigest")
         store_checkpoint(tool_context, result)
         return result
@@ -507,12 +558,22 @@ async def list_ingestion_conflicts(
 ) -> dict[str, Any]:
     del tool_context
     try:
+        repository = (await get_service_container()).repository
+        conflicts = await repository.list_fact_conflicts(ingestion_id)
+        entity_resolutions = await repository.list_entity_resolution_reviews(
+            ingestion_id
+        )
         return {
             "success": True,
             "ingestionId": ingestion_id,
-            "conflicts": await (
-                await get_service_container()
-            ).repository.list_fact_conflicts(ingestion_id),
+            "conflicts": conflicts,
+            "entityResolutions": entity_resolutions,
+            "pendingConflictCount": sum(
+                item["decision"] == "PENDING" for item in conflicts
+            ),
+            "pendingEntityReviewCount": sum(
+                item["decision"] == "PENDING" for item in entity_resolutions
+            ),
         }
     except Exception as exc:  # noqa: BLE001
         return tool_exception("conflict_list", ingestion_id, exc)
@@ -524,24 +585,179 @@ async def review_ingestion_conflict(
     tool_context: ToolContext,
     note: str | None = None,
 ) -> dict[str, Any]:
-    confirmation = getattr(tool_context, "tool_confirmation", None)
-    if confirmation is None or not confirmation.confirmed:
-        return tool_error(
-            "conflict_review", "APPROVAL_REQUIRED", "Human confirmation is required"
-        )
     try:
         container = await get_service_container()
-        conflict = await container.repository.review_fact_conflict(
-            conflict_id, decision, note
-        )
+        try:
+            conflict = await container.repository.review_fact_conflict(
+                conflict_id, decision, note
+            )
+        except KeyError:
+            if await container.repository.entity_resolution_review_exists(conflict_id):
+                return _review_correction(
+                    stage="conflict_review",
+                    code="WRONG_REVIEW_TOOL",
+                    message=(
+                        "This is an entity resolution review ID; "
+                        "call review_entity_resolutions with REUSE or DISTINCT"
+                    ),
+                    next_action="review_entity_resolutions",
+                )
+            return _review_correction(
+                stage="conflict_review",
+                code="REVIEW_ID_NOT_FOUND",
+                message="Fact conflict ID was not found; read the latest preview",
+                next_action="get_ingestion_preview",
+            )
+        except ValueError as exc:
+            return _review_correction(
+                stage="conflict_review",
+                code="INVALID_REVIEW_DECISION",
+                message=str(exc),
+                next_action="review_ingestion_conflicts",
+            )
         preview = await container.repository.get_preview(str(conflict["ingestionId"]))
         return {
             "success": True,
             "conflict": conflict,
+            "ingestionId": conflict["ingestionId"],
             "reportDigest": preview["reportDigest"],
+            "pendingConflictCount": preview["pendingConflictCount"],
+            "pendingEntityReviewCount": preview["pendingEntityReviewCount"],
+            "nextAction": preview["nextAction"],
         }
     except Exception as exc:  # noqa: BLE001
         return tool_exception("conflict_review", None, exc)
+
+
+async def review_ingestion_conflicts(
+    ingestion_id: str,
+    decision: Literal["CONFIRM", "REJECT", "OTHER"],
+    tool_context: ToolContext,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Resolve all pending fact conflicts with one confirmed decision."""
+    try:
+        container = await get_service_container()
+        conflicts = await container.repository.review_fact_conflicts(
+            ingestion_id, decision, note
+        )
+        preview = await container.repository.get_preview(ingestion_id)
+        return {
+            "success": True,
+            "ingestionId": ingestion_id,
+            "updatedConflictIds": [item["conflictId"] for item in conflicts],
+            "updatedConflictCount": len(conflicts),
+            "reportDigest": preview["reportDigest"],
+            "pendingConflictCount": preview["pendingConflictCount"],
+            "pendingEntityReviewCount": preview["pendingEntityReviewCount"],
+            "nextAction": preview["nextAction"],
+        }
+    except ValueError as exc:
+        return _review_correction(
+            stage="conflict_reviews",
+            code="INVALID_REVIEW_DECISION",
+            message=str(exc),
+            next_action="review_ingestion_conflicts",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return tool_exception("conflict_reviews", ingestion_id, exc)
+
+
+async def review_entity_resolution(
+    review_id: str,
+    decision: Literal["REUSE", "DISTINCT"],
+    tool_context: ToolContext,
+    note: str | None = None,
+) -> dict[str, Any]:
+    try:
+        container = await get_service_container()
+        try:
+            review = await container.repository.review_entity_resolution(
+                review_id, decision, note
+            )
+        except KeyError:
+            if await container.repository.fact_conflict_exists(review_id):
+                return _review_correction(
+                    stage="entity_review",
+                    code="WRONG_REVIEW_TOOL",
+                    message=(
+                        "This is a fact conflict ID; "
+                        "call review_ingestion_conflicts instead"
+                    ),
+                    next_action="review_ingestion_conflicts",
+                )
+            return _review_correction(
+                stage="entity_review",
+                code="REVIEW_ID_NOT_FOUND",
+                message="Entity review ID was not found; read the latest preview",
+                next_action="get_ingestion_preview",
+            )
+        except ValueError as exc:
+            return _review_correction(
+                stage="entity_review",
+                code="INVALID_REVIEW_DECISION",
+                message=str(exc),
+                next_action="review_entity_resolutions",
+            )
+        ingestion_id = str(review["ingestionId"])
+        preview = await operations.build_preview(
+            container.repository,
+            container.graph_store,
+            ingestion_id,
+            await container.ontology_lifecycle.ingestion_schema_changes(ingestion_id),
+            await container.ontology_lifecycle.active_version_id(),
+        )
+        return {
+            "success": True,
+            "ingestionId": ingestion_id,
+            "entityResolution": review,
+            "reportDigest": preview["reportDigest"],
+            "pendingConflictCount": preview["pendingConflictCount"],
+            "pendingEntityReviewCount": preview["pendingEntityReviewCount"],
+            "nextAction": preview["nextAction"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return tool_exception("entity_review", None, exc)
+
+
+async def review_entity_resolutions(
+    ingestion_id: str,
+    decision: Literal["REUSE", "DISTINCT"],
+    tool_context: ToolContext,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Resolve all pending entity reviews with one confirmed decision."""
+    try:
+        container = await get_service_container()
+        reviews = await container.repository.review_entity_resolutions(
+            ingestion_id, decision, note
+        )
+        preview = await operations.build_preview(
+            container.repository,
+            container.graph_store,
+            ingestion_id,
+            await container.ontology_lifecycle.ingestion_schema_changes(ingestion_id),
+            await container.ontology_lifecycle.active_version_id(),
+        )
+        return {
+            "success": True,
+            "ingestionId": ingestion_id,
+            "updatedReviewIds": [item["reviewId"] for item in reviews],
+            "updatedReviewCount": len(reviews),
+            "reportDigest": preview["reportDigest"],
+            "pendingConflictCount": preview["pendingConflictCount"],
+            "pendingEntityReviewCount": preview["pendingEntityReviewCount"],
+            "nextAction": preview["nextAction"],
+        }
+    except ValueError as exc:
+        return _review_correction(
+            stage="entity_reviews",
+            code="INVALID_REVIEW_DECISION",
+            message=str(exc),
+            next_action="review_entity_resolutions",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return tool_exception("entity_reviews", ingestion_id, exc)
 
 
 async def fill_ingestion(
@@ -564,5 +780,8 @@ __all__ = [
     "get_ingestion_preview",
     "get_ingestion_status",
     "list_ingestion_conflicts",
+    "review_ingestion_conflicts",
+    "review_entity_resolution",
+    "review_entity_resolutions",
     "review_ingestion_conflict",
 ]

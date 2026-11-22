@@ -1,11 +1,15 @@
+from .ingestion_commit_approval import (
+    IngestionCommitApproval,
+    IngestionKnowledgeRevision,
+)
+from .ingestion_entity_resolution_review import IngestionEntityResolutionReview
+from .ingestion_fact_conflict import IngestionFactConflict
+from .ingestion_workspace_checkpoint import IngestionWorkspaceCheckpoint
 from .ontology_alias import (
     OntologyAlias,
     OntologyAliasSource,
 )
 from .ontology_compiled_snapshot import OntologyCompiledSnapshot
-from .ingestion_workspace_checkpoint import IngestionWorkspaceCheckpoint
-from .ingestion_fact_conflict import IngestionFactConflict
-from .ingestion_commit_approval import IngestionCommitApproval, IngestionKnowledgeRevision
 from .ontology_entity_type import OntologyEntityType
 from .ontology_property import (
     OntologyProperty,
@@ -27,13 +31,14 @@ from .ontology_version import (
 )
 
 __all__ = [
+    "IngestionCommitApproval",
+    "IngestionEntityResolutionReview",
+    "IngestionFactConflict",
+    "IngestionKnowledgeRevision",
+    "IngestionWorkspaceCheckpoint",
     "OntologyAlias",
     "OntologyAliasSource",
     "OntologyCompiledSnapshot",
-    "IngestionWorkspaceCheckpoint",
-    "IngestionFactConflict",
-    "IngestionCommitApproval",
-    "IngestionKnowledgeRevision",
     "OntologyEntityType",
     "OntologyEntityTypeScope",
     "OntologyProperty",

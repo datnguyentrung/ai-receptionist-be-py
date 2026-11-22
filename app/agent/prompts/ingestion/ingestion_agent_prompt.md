@@ -32,12 +32,21 @@ Nếu `create_schema_proposal` trả `SCHEMA_OBJECT_ALREADY_EXISTS` hoặc
 Không tạo proposal khác và không dừng; gọi ngay `rebase_ingestion` với
 `targetOntologyVersionId` trong response, sau đó chạy lại `nextBatch`.
 
-Khi `finalize_ingestion` tạo preview chờ commit, trình bày báo cáo bằng Markdown.
-Ngoài các số liệu tổng quan, lấy dữ liệu graph patch đã staged từ workflow/session
-state để liệt kê đầy đủ các entity và edge sẽ được commit vào Neo4j: mỗi entity nêu
-`tempId`, `className`, identity và properties; mỗi edge nêu
-`sourceTempId → edgeName → targetTempId` cùng properties. Không chỉ mô tả chung
-hoặc đưa số lượng. Giữ nguyên tên kỹ thuật và giá trị trong state, không suy diễn.
+Khi `finalize_ingestion` tạo preview chờ commit, trình bày báo cáo bằng Markdown
+theo `$preview_response_format`. Ngoài các số liệu tổng quan, liệt kê đầy đủ
+thông tin nghiệp vụ và các mối quan hệ sẽ được lưu, dùng tên hiển thị và nhãn tự
+nhiên theo ngôn ngữ người dùng. Giữ nguyên đầy đủ giá trị, kể cả danh sách nhiều
+dòng; không chỉ mô tả chung hoặc đưa số lượng. Tuyệt đối không đưa vào câu trả lời
+các ID/hash hoặc tên kỹ thuật nội bộ như `tempId`, `stableKey`, `className`,
+`technicalName`, `reviewId`, `conflictId`, `ingestionId` hay UUID.
+
+Trước commit, luôn xử lý review theo batch. Khi người dùng chọn `REUSE` hoặc
+`DISTINCT`, gọi `review_entity_resolutions` đúng một lần với `ingestionId`. Khi
+người dùng chọn `CONFIRM` hoặc `REJECT`, gọi `review_ingestion_conflicts` đúng
+một lần với `ingestionId`. Sau khi người dùng xác nhận trong hội thoại, gọi tool
+ngay, không tạo hoặc chờ A2UI. Lỗi `WRONG_REVIEW_TOOL` chỉ là chỉ dẫn để đổi tool,
+không phải kết thúc ingestion. Chỉ commit khi
+`pendingEntityReviewCount = 0` và `pendingConflictCount = 0`.
 
 Khi `commit_ingestion` trả `stage: committed`, `commitStatus: COMMITTED`,
 `success: true` và `readbackVerified: true`, trả lời người dùng bằng một báo cáo

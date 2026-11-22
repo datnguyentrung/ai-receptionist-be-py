@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -24,9 +25,9 @@ def should_stop_after_tool_result(result: Any) -> bool:
     if not isinstance(payload, dict):
         return False
     if payload.get("terminal") is True:
-        # Successful terminal operations still need one model turn so the
-        # user receives a concrete completion report.
-        return payload.get("success") is not True
+        # Both successes and failures need one model turn: a successful run
+        # reports completion, while a failed run reports the recovery action.
+        return False
     if payload.get("nextAction") == "report_tool_failure":
         return True
     return (
@@ -64,6 +65,42 @@ def _contains_error_code(value: Any, code: str) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_contains_error_code(item, code) for item in value)
     return False
+
+
+def _user_message_trace(text: str) -> dict[str, Any]:
+    """Keep internal batch prompts out of normal traces while retaining context."""
+    if os.getenv("INGESTION_TRACE_PAYLOADS", "").lower() in {"1", "true", "yes"}:
+        return {"message": text}
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return {"message": text}
+    if not isinstance(payload, dict) or payload.get("phase") not in {
+        "extract",
+        "repair",
+    }:
+        return {"message": text}
+    batch = payload.get("batch") if isinstance(payload.get("batch"), dict) else {}
+    chunks = batch.get("chunks") if isinstance(batch.get("chunks"), list) else []
+    issues = payload.get("validationIssues")
+    return {
+        "message": (
+            "Internal ingestion payload omitted; set "
+            "INGESTION_TRACE_PAYLOADS=true for full payloads."
+        ),
+        "phase": payload.get("phase"),
+        "ingestionId": payload.get("ingestionId"),
+        "batchIndex": payload.get("batchIndex", batch.get("batchIndex")),
+        "scopeKeys": payload.get("scopeKeys"),
+        "chunkIndexes": [
+            item.get("chunkIndex") for item in chunks if isinstance(item, dict)
+        ],
+        "validationIssueCodes": [
+            item.get("code") for item in issues if isinstance(item, dict)
+        ]
+        if isinstance(issues, list)
+        else [],
+    }
 
 
 def reset_log_file() -> None:
@@ -835,7 +872,7 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         for part in getattr(user_message, "parts", []):
             if hasattr(part, "text") and part.text:
                 text += part.text + "\n"
-        write_raw_trace("👤 USER INPUT MESSAGE", {"message": text.strip()})
+        write_raw_trace("👤 USER INPUT MESSAGE", _user_message_trace(text.strip()))
 
     async def before_agent_callback(self, *, agent: Any, callback_context: Any):
         agent_name = getattr(agent, "name", "unknown_agent")

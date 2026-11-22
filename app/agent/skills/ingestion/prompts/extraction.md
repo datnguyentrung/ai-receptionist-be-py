@@ -9,6 +9,9 @@ NGUYÊN TẮC:
 6. Trước khi kết luận SCHEMA_GAP, kiểm tra toàn bộ schema đã nạp, gồm các property tổng quát như `description`, `notes`, `details` và các property chuyên biệt như `age_range`. Dùng chúng khi ý nghĩa tương thích với nguồn; không tạo schema gap chỉ vì schema không có property mang đúng nguyên văn tiêu đề của tài liệu.
 7. Phần giới thiệu, tóm tắt, mục lục hoặc diễn giải lại các phần chi tiết phía sau không phải schema gap. Đánh dấu `NO_RELEVANT_FACT` hoặc `DUPLICATE_EVIDENCE` khi chúng không thêm một khẳng định nguyên tử có nguồn riêng.
 8. `entityExtractionContract` là hợp đồng động của ontology đang được pin. Với mỗi node mới, chỉ trả `properties` và evidence; phải trả đủ mọi `identityFields` của class dưới dạng property có evidence. Không tự tạo trường `identity`.
+9. Chỉ tạo `class_program` khi nguồn đặt tên một lớp/chương trình độc lập. Tần suất học, điều kiện hoàn thành, số quý hoặc thời lượng (ví dụ “1 buổi/tuần”, “2 quý”, “6–8 tháng”) là rule/property có evidence, không phải tên lớp mới.
+10. Với quy định có nhiều mệnh đề độc lập, tạo assertion/property riêng cho từng mệnh đề với evidence riêng; không gộp “5 phút”, “2 lần đi muộn = 1 buổi nghỉ” và thay đổi có ngày hiệu lực vào một description/notes. Thông tin có mốc hiệu lực phải giữ nguyên ngày trong evidence/property.
+11. Ngoại lệ cho property text đơn (`STRING`): khi một ô bảng hoặc danh sách có nhiều bullet cùng ngữ cảnh nhưng schema chỉ có một property phù hợp như `description` hoặc `notes`, ghi toàn bộ bullet nguyên văn vào đúng một property, ngăn cách bằng ký tự xuống dòng. Không chỉ lấy bullet đầu và không tạo nhiều property cùng tên.
 
 QUY TẮC CANONICAL REFERENCE:
 1. `batch.canonicalGraphContext` chứa các entity đã staged từ batch trước. Đây là nguồn identity đã được xác thực.

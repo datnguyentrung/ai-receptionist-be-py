@@ -23,7 +23,8 @@ from app.agent.tools.ingestion_tools.workflow import (
     get_ingestion_preview,
     get_ingestion_status,
     list_ingestion_conflicts,
-    review_ingestion_conflict,
+    review_entity_resolutions,
+    review_ingestion_conflicts,
 )
 
 INGESTION_TOOLS = (
@@ -37,7 +38,8 @@ INGESTION_TOOLS = (
     abort_ingestion,
     get_ingestion_status,
     list_ingestion_conflicts,
-    review_ingestion_conflict,
+    review_entity_resolutions,
+    review_ingestion_conflicts,
     list_ontology_scopes,
     load_ontology_scopes,
     create_schema_proposal,
@@ -61,7 +63,8 @@ INGESTION_ROOT_TOOLS = (
     commit_ingestion,
     abort_ingestion,
     list_ingestion_conflicts,
-    review_ingestion_conflict,
+    review_entity_resolutions,
+    review_ingestion_conflicts,
 )
 
 INGESTION_BATCH_TOOLS = (

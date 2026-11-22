@@ -331,10 +331,7 @@ async def test_approved_proposal_returns_apply_next_action(
         AsyncMock(return_value=SimpleNamespace(ontology_lifecycle=lifecycle)),
     )
     monkeypatch.setattr(schema, "log_ingestion_event", lambda *args, **kwargs: None)
-    context = SimpleNamespace(
-        state={},
-        tool_confirmation=SimpleNamespace(confirmed=True),
-    )
+    context = SimpleNamespace(state={})
 
     result = await schema.review_schema_proposal(
         str(proposal_id),

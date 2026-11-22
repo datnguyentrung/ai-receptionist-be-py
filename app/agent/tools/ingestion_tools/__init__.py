@@ -45,7 +45,10 @@ from app.agent.tools.ingestion_tools.workflow import (
     get_ingestion_preview,
     get_ingestion_status,
     list_ingestion_conflicts,
+    review_entity_resolution,
+    review_entity_resolutions,
     review_ingestion_conflict,
+    review_ingestion_conflicts,
 )
 from app.utils import log_ingestion_event
 
@@ -74,10 +77,13 @@ __all__ = [
     "load_ontology_scopes",
     "log_ingestion_event",
     "rebase_ingestion",
-    "repair_context",
     "rebuild_batch_accumulator",
+    "repair_context",
     "repair_ingestion_batch",
+    "review_entity_resolution",
+    "review_entity_resolutions",
     "review_ingestion_conflict",
+    "review_ingestion_conflicts",
     "review_schema_proposal",
     "rollback_document_version",
     "store_checkpoint",

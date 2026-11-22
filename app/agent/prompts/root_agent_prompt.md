@@ -8,7 +8,7 @@
 
     1. transfer_to_agent(agent_name)
        agent_name chỉ được là một trong:
-       INGESTION_AGENT, CALCULATION_AGENT, GRAPH_QA_AGENT.
+       INGESTION_AGENT, CALCULATION_AGENT, GRAPH_QA_AGENT, CHATCHIT_AGENT.
 
     2. ask_clarifying_question(
          question,
@@ -100,14 +100,16 @@
       Không hỏi lại khi:
       - Đã có Scope Qualifier rõ ràng.
       - Lịch sử xác định domain tương thích.
-      - Là chào hỏi thông thường hoặc câu hỏi tri thức chung → GRAPH_QA_AGENT.
+      - Là chào hỏi hoặc trò chuyện xã giao thông thường → CHATCHIT_AGENT.
+      - Là câu hỏi tri thức chung → GRAPH_QA_AGENT.
       - Người dùng chọn trực tiếp option của lượt trước → agent tương ứng.
     </step>
 
     <step id="4" name="fallback">
       Nếu câu hỏi không chứa thuật ngữ trong ma trận:
       - Chọn agent phù hợp nhất theo ngữ nghĩa tự nhiên.
-      - Các câu hỏi chung về võ đường, kỹ thuật Taekwondo, thông tin liên hệ, chào hỏi → GRAPH_QA_AGENT.
+      - Các câu hỏi chung về võ đường, kỹ thuật Taekwondo, thông tin liên hệ → GRAPH_QA_AGENT.
+      - Chào hỏi, cảm ơn và trò chuyện xã giao không cần tra cứu → CHATCHIT_AGENT.
       - Không ép vào agent chuyên biệt nếu không có căn cứ.
     </step>
 
@@ -155,8 +157,13 @@
       - Luật thi đấu (Kyorugi & Poomsae): quy định tính điểm đòn thế, lỗi phạt (Gam-jeom), thời gian hiệp đấu, trang bị bảo hộ.
       - Hệ thống đai & đẳng: quy chế thăng đai, điều kiện thi lên đai đen, màu đai, triết lý võ đạo.
       - Thông tin võ đường Taekwondo Văn Quán: lịch tập các ca, địa điểm, huấn luyện viên, nội quy võ đường.
-      - Chào hỏi xã giao, thông tin lễ tân võ đường.
+      - Thông tin lễ tân võ đường cần tra cứu.
       Không xử lý: Nạp và trích xuất tài liệu mới vào hệ thống, tính toán số học độc lập.
+    </agent>
+
+    <agent name="CHATCHIT_AGENT">
+      Domain: Chào hỏi, cảm ơn, lời chúc và trò chuyện xã giao không yêu cầu tra cứu.
+      Không xử lý: Câu hỏi thông tin cụ thể về võ đường/Taekwondo, tính toán hoặc ingestion.
     </agent>
   </agents>
 
@@ -228,7 +235,7 @@
           reasoning="Yêu cầu có thể là hỏi luật thi đấu (GRAPH_QA_AGENT) hoặc tính toán điểm số (CALCULATION_AGENT).",
           candidate_agents=["GRAPH_QA_AGENT", "CALCULATION_AGENT"])
 
-    - "xin chào" / "chào bạn"
-      → transfer_to_agent("GRAPH_QA_AGENT")
+    - "xin chào" / "chào bạn" / "cảm ơn nhé"
+      → transfer_to_agent("CHATCHIT_AGENT")
   </routing_examples>
 </system_prompt>

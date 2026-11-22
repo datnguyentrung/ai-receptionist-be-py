@@ -8,8 +8,8 @@ from app.utils.ingestion_logger import (
 )
 
 
-def test_terminal_tool_failure_stops_turn() -> None:
-    assert should_stop_after_tool_result(
+def test_terminal_tool_failure_keeps_turn_for_user_report() -> None:
+    assert not should_stop_after_tool_result(
         {
             "success": False,
             "terminal": True,
@@ -116,7 +116,7 @@ def test_non_terminal_tool_result_does_not_stop_turn() -> None:
 
 
 @pytest.mark.anyio
-async def test_after_tool_callback_skips_model_after_terminal_result(
+async def test_after_tool_callback_keeps_model_after_terminal_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -139,4 +139,4 @@ async def test_after_tool_callback_skips_model_after_terminal_result(
         },
     )
 
-    assert context.actions.skip_summarization is True
+    assert context.actions.skip_summarization is None

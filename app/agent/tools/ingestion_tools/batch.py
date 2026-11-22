@@ -196,6 +196,7 @@ async def submit_ingestion_batch(
     }
     try:
         container = await get_service_container()
+        prior_fact_probe = getattr(container.graph_store, "has_committed_facts", None)
         workspace = await operations.submit_batch(
             container.repository,
             container.ontology_cache,
@@ -203,6 +204,9 @@ async def submit_ingestion_batch(
             batch_index,
             scope_keys,
             extraction,
+            prior_fact_available=(
+                await prior_fact_probe() if prior_fact_probe is not None else False
+            ),
         )
         result = batch_result_payload(workspace, batch_index)
         tool_context.state["active_ingestion_id"] = ingestion_id

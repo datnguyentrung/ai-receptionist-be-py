@@ -1,7 +1,5 @@
 """ADK Model Factory for shared Gemini configuration."""
 
-import os
-
 from google.adk.models.google_llm import Gemini
 from google.genai.types import HttpRetryOptions
 
@@ -11,10 +9,7 @@ from app.core.config import settings
 def create_model() -> Gemini:
     """Khởi tạo model Gemini với cấu hình chung."""
     return Gemini(
-        model=os.getenv(
-            "GOOGLE_ADK_MODEL",
-            "gemini-3.1-flash-lite",
-        ),
+        model=settings.GOOGLE_ADK_HIGH_MODEL,
         client_kwargs={
             "api_key": settings.GEMINI_API_KEY,
         },

@@ -224,15 +224,32 @@ class AdkBatchModel:
         tool_context: Any,
         output: type[IngestionModel],
     ) -> Any:
-        result = await tool.run_async(
-            args={
-                "request": json.dumps(
-                    payload, ensure_ascii=False, separators=(",", ":")
-                )
-            },
-            tool_context=tool_context,
-        )
-        return result if isinstance(result, output) else output.model_validate(result)
+        try:
+            result = await tool.run_async(
+                args={
+                    "request": json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    )
+                },
+                tool_context=tool_context,
+            )
+            return result if isinstance(result, output) else output.model_validate(result)
+        except Exception as exc:
+            log_ingestion_event(
+                "BATCH_MODEL_FAILURE",
+                request={
+                    "ingestion_id": payload.get("ingestionId"),
+                    "batch_index": payload.get("batchIndex"),
+                    "phase": payload.get("phase"),
+                },
+                payload={
+                    "agent": getattr(tool, "name", type(tool).__name__),
+                    "expectedOutput": output.__name__,
+                    "errorType": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
 
     async def select_scopes(
         self, payload: dict[str, Any], tool_context: Any
@@ -868,6 +885,12 @@ class BatchExecutionModule:
         extraction: SemanticGraphPatchFragment,
         tool_context: Any,
     ) -> tuple[dict[str, Any], Any]:
+        prior_fact_probe = getattr(
+            prepared.container.graph_store, "has_committed_facts", None
+        )
+        prior_fact_available = (
+            await prior_fact_probe() if prior_fact_probe is not None else False
+        )
         workspace = await operations.submit_batch(
             prepared.container.repository,
             prepared.container.ontology_cache,
@@ -875,6 +898,7 @@ class BatchExecutionModule:
             prepared.batch.batch_index,
             scope_keys,
             extraction,
+            prior_fact_available=prior_fact_available,
         )
         return self._result_and_state(
             workspace,
@@ -1265,6 +1289,13 @@ class BatchExecutionModule:
                 "resolvedScopeKeys": resolved,
                 "stage": result.get("stage"),
                 "success": result.get("success"),
+                "terminal": result.get("terminal"),
+                "nextAction": result.get("nextAction"),
+                "errorCodes": [
+                    item.get("code")
+                    for item in result.get("errors", [])
+                    if isinstance(item, dict)
+                ],
                 "validationAttempts": result.get(
                     "validationAttempts", result.get("attempt")
                 ),

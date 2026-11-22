@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     SERVER_PUBLIC_URL: str = ""
 
     # Standalone ADK Web / ingestion runtime
-    GOOGLE_ADK_MODEL: str = "gemini-3.1-flash-lite"
+    GOOGLE_ADK_HIGH_MODEL: str = "gemini-3.5-flash-lite"
+    GOOGLE_ADK_LOW_MODEL: str = "gemini-3.1-flash-lite"
     ADK_WEB_HOST: str = "127.0.0.1"
     ADK_WEB_PORT: int = 8001
     ADK_ALLOWED_ORIGINS: str = "http://localhost:8001,http://127.0.0.1:8001"

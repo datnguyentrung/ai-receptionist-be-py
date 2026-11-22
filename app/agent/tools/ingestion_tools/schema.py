@@ -207,20 +207,13 @@ async def review_schema_proposal(
     reviewed_by: str | None = None,
 ) -> dict[str, Any]:
     del reviewed_by
-    confirmation = getattr(tool_context, "tool_confirmation", None)
-    if confirmation is None or not confirmation.confirmed:
-        return tool_error(
-            "schema_proposal_review",
-            "APPROVAL_REQUIRED",
-            "Human confirmation is required",
-        )
     effective_id = str(proposal_id).strip() or tool_context.state.get(
         "pending_schema_proposal_id", ""
     )
     try:
         container = await get_service_container()
         proposal = await container.ontology_lifecycle.review_proposal(
-            effective_id, approved=approved, reviewed_by="human-confirmed"
+            effective_id, approved=approved, reviewed_by="conversation-confirmed"
         )
         tool_context.state["pending_schema_proposal_id"] = str(proposal.id)
         if (
@@ -257,7 +250,7 @@ async def review_schema_proposal(
             request={
                 "proposal_id": effective_id,
                 "approved": approved,
-                "reviewed_by": "human-confirmed",
+                "reviewed_by": "conversation-confirmed",
             },
         )
         return result
