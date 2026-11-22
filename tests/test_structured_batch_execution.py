@@ -1,14 +1,11 @@
 """Regression tests for deterministic structured batch orchestration."""
 
 import asyncio
+import inspect
 from types import SimpleNamespace
-from typing import Any
+from unittest.mock import AsyncMock
 
-from app.agent.skills.ingestion import batch_execution
-from app.agent.skills.ingestion.batch_agent import (
-    IngestionBatchAgentTool,
-    create_ingestion_batch_agent,
-)
+from app.agent.skills.ingestion import batch_agent, batch_execution
 from app.agent.skills.ingestion.batch_execution import (
     BatchExecutionModule,
     BatchExtractionOutput,
@@ -51,7 +48,19 @@ def _prepared(scope_keys: list[str]) -> _PreparedBatch:
             id="ing-1", scope_hint=None, ontology_version_id="version-1"
         )
     )
-    batch = SimpleNamespace(status="PENDING", scope_keys=scope_keys, batch_index=0)
+    batch = SimpleNamespace(
+        status="PENDING",
+        scope_keys=scope_keys,
+        batch_index=0,
+        chunk_indexes=[0],
+        semantic_fragment=None,
+        graph_fragment=None,
+        validation_issues=[],
+        validation_attempts=0,
+        merged_schema_hash=None,
+        validated_baseline=None,
+    )
+    workspace.batches = (batch,)
     return _PreparedBatch(
         container=SimpleNamespace(repository=object(), ontology_cache=object()),
         workspace=workspace,
@@ -64,6 +73,22 @@ def _prepared(scope_keys: list[str]) -> _PreparedBatch:
         catalog_keys=["training"],
         version_id="version-1",
     )
+
+
+def test_model_chunks_exposes_only_citable_fields() -> None:
+    chunks = [
+        SimpleNamespace(
+            chunk_index=39,
+            text="- Ngân hàng: VIB",
+            source_anchor="document.md#Title",
+            section="Payment",
+            content_hash="hash",
+        )
+    ]
+
+    assert BatchExecutionModule._model_chunks(chunks) == [
+        {"chunkIndex": 39, "text": "- Ngân hàng: VIB"}
+    ]
 
 
 def _install_execution_fakes(
@@ -128,29 +153,18 @@ def test_large_ambiguous_prompt_selects_then_extracts(monkeypatch) -> None:
     assert model.calls == ["select", "extract"]
 
 
-def test_public_tool_rejects_invalid_request_without_execution() -> None:
-    class NeverCalled(BatchExecutionModule):
-        async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
-            raise AssertionError("invalid requests must not reach the executor")
+def test_public_tool_uses_typed_arguments() -> None:
+    parameters = inspect.signature(batch_agent.ingestion_batch_agent).parameters
 
-    tool = IngestionBatchAgentTool(
-        create_ingestion_batch_agent(), executor=NeverCalled()
+    assert list(parameters) == ["ingestion_id", "batch_index", "tool_context"]
+
+
+def test_blocked_batch_guard_precedes_model_work() -> None:
+    source = inspect.getsource(BatchExecutionModule._prepare)
+
+    assert source.index('status == "BLOCKED_SCHEMA"') < source.index(
+        'workflow_guard_payload(workspace, "load_scopes")'
     )
-    result = asyncio.run(
-        tool.run_async(
-            args={"request": "not json"}, tool_context=SimpleNamespace(state={})
-        )
-    )
-
-    assert result["success"] is False
-    assert result["errors"][0]["code"] == "INVALID_BATCH_AGENT_REQUEST"
-
-
-def test_public_shell_and_internal_structured_agents_expose_no_tools() -> None:
-    agent = create_ingestion_batch_agent()
-    assert agent.mode == "chat"
-    assert agent.tools == []
-    assert agent.output_schema is BatchExtractionOutput
 
 
 def test_semantic_evidence_validator_handles_equivalent_verbatim_quote(
@@ -420,10 +434,74 @@ def test_repair_required_reuses_saved_scope_and_bypasses_selector_extractor(
         batch_execution, "log_ingestion_event", lambda *_args, **_kwargs: None
     )
 
-    result = asyncio.run(module.execute("ing-1", 0, SimpleNamespace(state={})))
+    context = SimpleNamespace(
+        state={
+            "ingestion_recovery": {
+                "ingestionId": "ing-1",
+                "batchIndex": 0,
+                "strategy": "REPAIR",
+            }
+        }
+    )
+    result = asyncio.run(module.execute("ing-1", 0, context))
 
     assert result["success"] is True
     assert repaired_scopes == ["facility", "training"]
+    assert context.state["ingestion_recovery"] is None
     # Verify selector and extract were NOT called, only repair was called
     assert model.calls == ["repair"]
+
+
+def test_repair_required_waits_for_user_recovery_choice(monkeypatch) -> None:
+    model = FakeBatchModel()
+    module = BatchExecutionModule(model)
+    prep = _prepared(["training"])
+    prep.batch.status = "REPAIR_REQUIRED"
+    prep.batch.validation_attempts = 0
+    prep.batch.validated_baseline = None
+    prep.batch.validation_issues = [{"code": "EVIDENCE_NOT_GROUNDED"}]
+    monkeypatch.setattr(module, "_prepare", AsyncMock(return_value=prep))
+    monkeypatch.setattr(
+        batch_execution, "log_ingestion_event", lambda *_args, **_kwargs: None
+    )
+
+    result = asyncio.run(module.execute("ing-1", 0, SimpleNamespace(state={})))
+
+    assert result["nextAction"] == "choose_ingestion_recovery"
+    assert result["recoveryOptions"][0]["available"] is False
+    assert model.calls == []
+
+
+def test_exhausted_repair_never_falls_through_to_extraction(monkeypatch) -> None:
+    model = FakeBatchModel()
+    module = BatchExecutionModule(model)
+    prep = _prepared(["training"])
+    prep.batch.status = "REPAIR_REQUIRED"
+    prep.batch.validation_attempts = batch_execution.operations.MAX_BATCH_VALIDATION_ATTEMPTS
+    prep.batch.validated_baseline = None
+    prep.batch.validation_issues = [{"code": "EVIDENCE_NOT_GROUNDED"}]
+    monkeypatch.setattr(module, "_prepare", AsyncMock(return_value=prep))
+    monkeypatch.setattr(
+        batch_execution, "log_ingestion_event", lambda *_args, **_kwargs: None
+    )
+
+    result = asyncio.run(
+        module.execute(
+            "ing-1",
+            0,
+            SimpleNamespace(
+                state={
+                    "ingestion_recovery": {
+                        "ingestionId": "ing-1",
+                        "batchIndex": 0,
+                        "strategy": "REPAIR",
+                    }
+                }
+            ),
+        )
+    )
+
+    assert result["nextAction"] == "choose_ingestion_recovery"
+    assert result["recoveryOptions"][0]["available"] is False
+    assert model.calls == []
 

@@ -56,7 +56,6 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from app.enums import IngestionJobStatus, SourceVersionStatus
-from app.services.ingestion.engine.assertions import compare_assertions
 from app.schemas import (
     GraphNode,
     GraphPatchFragment,
@@ -67,7 +66,12 @@ from app.schemas import (
     ValidationIssue,
     Workspace,
 )
-from app.services.ingestion.engine.graph_store import Neo4jIngestionStore
+from app.services.ingestion.engine.assertions import compare_assertions
+from app.services.ingestion.engine.entity_resolution import resolve_entities
+from app.services.ingestion.engine.graph_store import (
+    Neo4jIngestionStore,
+    rewrite_payload_to_canonical_keys,
+)
 from app.services.ingestion.engine.repository import IngestionRepository
 from app.services.ingestion.engine.workflow_policy import evaluate_workflow
 from app.services.ingestion.pipeline.reader import DocumentReader
@@ -92,6 +96,34 @@ MAX_BATCH_VALIDATION_ATTEMPTS = max(
     1, int(os.getenv("INGESTION_MAX_BATCH_VALIDATION_ATTEMPTS", "2"))
 )
 logger = logging.getLogger(__name__)
+
+
+def recovery_options(batch: IngestionBatchData) -> list[dict[str, Any]]:
+    """Describe the user-selectable recovery paths for a repair-required batch."""
+    repair_unavailable_reason: str | None = None
+    if not batch.validated_baseline:
+        repair_unavailable_reason = "No protected baseline is available for repair."
+    elif batch.validation_attempts >= MAX_BATCH_VALIDATION_ATTEMPTS:
+        repair_unavailable_reason = "The repair retry limit has been reached."
+
+    return [
+        {
+            "strategy": "REPAIR",
+            "label": "Continue repair",
+            "description": "Repair only the reported validation issues using the saved baseline and scope.",
+            "available": repair_unavailable_reason is None,
+            "unavailableReason": repair_unavailable_reason,
+        },
+        {
+            "strategy": "REEXTRACT",
+            "label": "Re-extract from this batch",
+            "description": "Discard uncommitted work from this batch onward and extract it again.",
+            "available": True,
+            "unavailableReason": None,
+            "destructive": True,
+            "resetFromBatch": batch.batch_index,
+        },
+    ]
 
 
 # ============================================================================
@@ -437,8 +469,9 @@ def _merge_repair_fragment(
         ]
         merged_properties.extend(node.properties)
 
-        # Gộp evidence (bảo toàn chứng cứ từ cả baseline và delta)
-        merged_evidence = [*previous.evidence, *node.evidence]
+        # A repaired node may replace invalid node-level evidence. Preserve the
+        # baseline only when the repair delta does not provide replacement evidence.
+        merged_evidence = node.evidence or previous.evidence
 
         # Cập nhật thông tin node
         merged_node = previous.model_copy(
@@ -477,7 +510,7 @@ def _merge_repair_fragment(
             edges_map[edge_key] = previous_edge.model_copy(
                 update={
                     "properties": {**previous_edge.properties, **edge.properties},
-                    "evidence": [*previous_edge.evidence, *edge.evidence],
+                    "evidence": edge.evidence or previous_edge.evidence,
                 }
             )
 
@@ -580,6 +613,7 @@ async def submit_batch(
     batch_index: int,
     scope_keys: list[str],
     semantic_fragment: dict[str, Any] | SemanticGraphPatchFragment,
+    prior_fact_available: bool = False,
 ) -> Workspace:
     workspace = await required_workspace(repository, ingestion_id)
     batch = next(
@@ -694,6 +728,7 @@ async def submit_batch(
                     item["stableKey"]: item["className"]
                     for item in entity_index.values()
                 },
+                prior_fact_available=prior_fact_available,
             )
         )
 
@@ -787,6 +822,7 @@ async def submit_batch(
 async def finalize(
     repository: IngestionRepository,
     ingestion_id: str,
+    graph_store: Neo4jIngestionStore | None = None,
 ) -> Workspace:
     workspace = await required_workspace(repository, ingestion_id)
     incomplete = [
@@ -794,6 +830,11 @@ async def finalize(
     ]
     if incomplete:
         return workspace
+
+    prior_fact_available = False
+    candidate_probe = getattr(graph_store, "has_committed_facts", None)
+    if candidate_probe is not None:
+        prior_fact_available = await candidate_probe()
 
     coverage_errors: dict[int, list[dict[str, Any]]] = {}
     for batch in workspace.batches:
@@ -816,6 +857,7 @@ async def finalize(
         issues = validate_coverage_integrity(
             fragment,
             workspace_chunks(workspace, batch.chunk_indexes),
+            prior_fact_available=prior_fact_available,
         )
         if issues:
             coverage_errors[batch.batch_index] = [
@@ -870,9 +912,80 @@ async def build_preview(
     workspace = await repository.refresh_document_current(ingestion_id)
     if workspace.job.status not in {
         IngestionJobStatus.READY, IngestionJobStatus.AWAITING_COMMIT_APPROVAL
-    } or workspace.job.readiness_fingerprint != workspace_fingerprint(workspace):
+    }:
         raise RuntimeError("Finalize and validate all batches before preview")
+    current_fingerprint = workspace_fingerprint(workspace)
+    if (
+        workspace.job.status == IngestionJobStatus.READY
+        and workspace.job.readiness_fingerprint != current_fingerprint
+    ):
+        raise RuntimeError("Finalize and validate all batches before preview")
+    if (
+        workspace.job.status == IngestionJobStatus.AWAITING_COMMIT_APPROVAL
+        and workspace.job.readiness_fingerprint != current_fingerprint
+    ):
+        workspace = await repository.mark_ready(ingestion_id, current_fingerprint)
     payload = await graph_store.preview_payload(workspace)
+    # Resolve against committed entities before comparing facts or relationships.
+    # Deterministic rules map automatically; semantic candidates require a human
+    # REUSE decision before they can rewrite a canonical key.
+    requests = [
+        {"stableKey": item["stableKey"], "className": item["className"]}
+        for item in payload["nodes"]
+    ]
+    candidate_lookup = getattr(graph_store, "find_entity_candidates", None)
+    candidates_by_key = await candidate_lookup(requests) if candidate_lookup else {}
+    entity_resolutions = resolve_entities(payload["nodes"], candidates_by_key)
+    entity_review_rows = await repository.record_entity_resolution_reviews(
+        ingestion_id,
+        [
+            item.as_dict()
+            for item in entity_resolutions
+            if item.decision == "REVIEW_REQUIRED"
+        ],
+    )
+    review_by_extracted = {
+        item["extractedKey"]: item for item in entity_review_rows
+    }
+    canonical_map = {
+        item.extracted_key: item.canonical_key
+        for item in entity_resolutions
+        if item.decision in {"EXACT_REUSE", "DETERMINISTIC_REUSE"}
+        and item.canonical_key
+    }
+    canonical_map.update({
+        extracted_key: item["candidateKey"]
+        for extracted_key, item in review_by_extracted.items()
+        if item["decision"] == "REUSE"
+    })
+    payload = rewrite_payload_to_canonical_keys(payload, canonical_map)
+    # Identity aliases are evidence for the canonical entity, not competing
+    # canonical property assertions.  Keep their source-version entity link and
+    # mention provenance, while avoiding a second "name"/channel-type fact.
+    reused_by_key = {
+        item.canonical_key: next(
+            node["className"] for node in payload["nodes"] if node["stableKey"] == item.canonical_key
+        )
+        for item in entity_resolutions
+        if item.canonical_key
+        and (
+            item.decision in {"EXACT_REUSE", "DETERMINISTIC_REUSE"}
+            or (
+                review_by_extracted.get(item.extracted_key, {}).get("decision")
+                == "REUSE"
+            )
+        )
+    }
+    suppressed_fact_ids = {
+        fact["factId"]
+        for fact in payload["facts"]
+        if fact["factType"] == "PROPERTY"
+        and (
+            (reused_by_key.get(fact["subjectKey"]) == "contact_channel" and fact["predicate"] == "channel_type")
+            or (reused_by_key.get(fact["subjectKey"]) == "fee" and fact["predicate"] in {"name", "billing_period"})
+        )
+    }
+    payload["facts"] = [fact for fact in payload["facts"] if fact["factId"] not in suppressed_fact_ids]
     old_facts = await graph_store.current_assertions(
         sorted({item["subjectKey"] for item in payload["facts"]})
     )
@@ -880,15 +993,16 @@ async def build_preview(
     supports, candidates, assertions = compare_assertions(
         payload["facts"], old_facts, source_anchors
     )
-    existing_entities = await graph_store.current_entity_keys(
-        [item["stableKey"] for item in payload["nodes"]]
-    )
+    existing_entities = await graph_store.current_entity_keys([item["stableKey"] for item in payload["nodes"]])
     existing_relations = await graph_store.current_relation_keys(payload["edges"])
     supported_relations = sum(
         (item["sourceKey"], item["targetKey"], item["edgeName"], item["propertiesJson"])
         in existing_relations for item in payload["edges"]
     )
     await repository.record_fact_conflicts(ingestion_id, candidates)
+    pending_entity_review_count = sum(
+        item["decision"] == "PENDING" for item in entity_review_rows
+    )
     report = {
         "ingestionId": ingestion_id,
         "documentKey": workspace.document.document_key,
@@ -906,6 +1020,13 @@ async def build_preview(
             "relationships": len(payload["edges"]), "facts": len(payload["facts"]),
             "entitiesAdded": len(payload["nodes"]) - len(existing_entities),
             "entitiesSupported": len(existing_entities),
+            "entitiesReviewRequired": pending_entity_review_count,
+            "entitiesReviewedReuse": sum(
+                item["decision"] == "REUSE" for item in entity_review_rows
+            ),
+            "entitiesReviewedDistinct": sum(
+                item["decision"] == "DISTINCT" for item in entity_review_rows
+            ),
             "relationshipsAdded": len(payload["edges"]) - supported_relations,
             "relationshipsSupported": supported_relations,
             "factsAdded": sum(item["classification"] == "ADDED" for item in assertions),
@@ -913,8 +1034,25 @@ async def build_preview(
         },
         "assertions": assertions,
         "supports": supports,
+        "entityResolutions": [
+            item.as_dict()
+            | {
+                "reviewId": review_by_extracted.get(item.extracted_key, {}).get("reviewId"),
+                "reviewDecision": review_by_extracted.get(item.extracted_key, {}).get("decision"),
+                "effectiveDecision": (
+                    review_by_extracted[item.extracted_key]["decision"]
+                    if item.extracted_key in review_by_extracted
+                    else item.decision
+                ),
+            }
+            for item in entity_resolutions
+        ],
+        "canonicalKeyMap": canonical_map,
+        "supportedFactMap": {item["newFactId"]: item["oldFactId"] for item in supports},
+        "suppressedFactIds": sorted(suppressed_fact_ids),
         "warnings": ["Unknown fact dates are not inferred to be current"]
         if any(item["validFrom"] is None for item in assertions) else [],
+        "pendingEntityReviewCount": pending_entity_review_count,
     }
     return await repository.store_preview(ingestion_id, report)
 
@@ -932,12 +1070,86 @@ async def commit(
         if workspace.job.status == IngestionJobStatus.COMMITTED:
             if workspace.job.error_stage or workspace.job.error_message:
                 workspace = await repository.mark_committed(ingestion_id, {})
-            return {**status_payload(workspace, idempotent=True), **workspace.job.summary}
+            version_id = str(workspace.version.id)
+            readback = await graph_store.committed_summary(version_id)
+            expected = workspace.job.summary.get("preparedSummary") or {
+                key: workspace.job.summary.get(key)
+                for key in ("nodes", "edges", "chunks", "facts")
+            }
+            expected_keys = [
+                key for key in ("nodes", "edges", "chunks", "facts")
+                if expected.get(key) is not None
+            ]
+            graph_complete = bool(readback) and all(
+                readback.get(key) == expected.get(key)
+                for key in expected_keys
+            )
+            if graph_complete and expected_keys:
+                return {
+                    **status_payload(workspace, idempotent=True),
+                    **workspace.job.summary,
+                }
+
+            # PostgreSQL may still say COMMITTED after graph data was deleted.
+            # Rebuild the same immutable version from the staged workspace.
+            preview = await repository.get_preview(ingestion_id)
+            prepared = await graph_store.prepare_version(
+                workspace,
+                preview.get("canonicalKeyMap") or {},
+                preview.get("supportedFactMap") or {},
+                set(preview.get("suppressedFactIds") or []),
+            )
+            await graph_store.publish_version(
+                version_id,
+                None,
+                await repository.list_fact_conflicts(ingestion_id),
+                preview.get("supports", []),
+            )
+            readback = await graph_store.committed_summary(version_id)
+            if readback is None or not readback.get("readbackVerified"):
+                raise RuntimeError("Graph reconciliation readback failed")
+            expected = prepared
+            if any(
+                readback.get(key) != expected.get(key)
+                for key in ("nodes", "edges", "chunks", "facts")
+            ):
+                raise RuntimeError("Graph reconciliation counts differ from prepared graph")
+            workspace.job.summary["preparedSummary"] = prepared
+            committed = await repository.mark_committed(ingestion_id, readback)
+            return {
+                **status_payload(committed, idempotent=True),
+                **readback,
+                "reconciled": True,
+            }
         if workspace.job.status not in {
             IngestionJobStatus.AWAITING_COMMIT_APPROVAL, IngestionJobStatus.COMMITTING
         }:
             return error_payload("commit_approval", ingestion_id, "APPROVAL_REQUIRED", "No approved preview")
         preview = await repository.get_preview(ingestion_id)
+        if preview.get("pendingEntityReviewCount"):
+            return {
+                "success": False,
+                "stage": "awaiting_commit_approval",
+                "terminal": False,
+                "ingestionId": ingestion_id,
+                "nextAction": "review_entity_resolutions",
+                "errors": [{
+                    "code": "REVIEW_REQUIRED",
+                    "message": "Every entity resolution needs REUSE or DISTINCT before commit",
+                }],
+            }
+        if preview.get("pendingConflictCount"):
+            return {
+                "success": False,
+                "stage": "awaiting_commit_approval",
+                "terminal": False,
+                "ingestionId": ingestion_id,
+                "nextAction": "review_ingestion_conflicts",
+                "errors": [{
+                    "code": "REVIEW_REQUIRED",
+                    "message": "Every fact conflict needs a decision before commit",
+                }],
+            }
         if preview["reportDigest"] != report_digest or not await repository.has_commit_approval(ingestion_id, report_digest):
             return error_payload("commit_approval", ingestion_id, "APPROVAL_REQUIRED", "A matching human approval is required")
         phase = workspace.job.summary.get("commitPhase")
@@ -968,7 +1180,12 @@ async def commit(
                 workspace = await repository.set_commit_phase(ingestion_id, "COMMITTING")
             graph_status = await graph_store.version_status(version_id)
             if graph_status not in {"PREPARED", "COMMITTED"}:
-                prepared = await graph_store.prepare_version(workspace)
+                prepared = await graph_store.prepare_version(
+                    workspace,
+                    preview.get("canonicalKeyMap") or {},
+                    preview.get("supportedFactMap") or {},
+                    set(preview.get("suppressedFactIds") or []),
+                )
                 workspace.job.summary["preparedSummary"] = prepared
                 workspace = await repository.set_commit_phase(ingestion_id, "GRAPH_PREPARED")
             elif phase in {None, "COMMITTING"}:
@@ -1585,14 +1802,18 @@ def status_payload(
             "wait_for_schema_review",
         )
     elif pending.status == "REPAIR_REQUIRED":
-        stage, terminal, next_action = "repair_required", False, "repair_batch"
+        stage, terminal, next_action = (
+            "repair_required",
+            False,
+            "choose_ingestion_recovery",
+        )
     else:
         stage, terminal, next_action = "batching", False, "process_batch"
     result: dict[str, Any] = {
         "success": workspace.job.status != IngestionJobStatus.FAILED,
         "stage": stage,
         "terminal": terminal,
-        "retryRequired": next_action == "repair_batch",
+        "retryRequired": next_action == "choose_ingestion_recovery",
         "nextAction": next_action,
         "ingestionId": str(workspace.job.id),
         "documentId": str(workspace.document.id),
@@ -1616,6 +1837,8 @@ def status_payload(
             "chunkIndexes": pending.chunk_indexes,
             "selectedScopeKeys": pending.scope_keys,
         }
+        if pending.status == "REPAIR_REQUIRED":
+            result["recoveryOptions"] = recovery_options(pending)
     if workspace.job.error_message:
         result["errors"] = [
             {

@@ -23,15 +23,20 @@ from app.agent.tools.ingestion_tools import (
     update_batch_accumulator,
 )
 from app.core.config import settings
-from app.core.ingestion_runtime import get_service_container, ingestion_model_assignments
+from app.core.ingestion_runtime import (
+    get_service_container,
+    ingestion_model_assignments,
+)
 from app.schemas.ingestion.base import IngestionModel
+from app.schemas.ingestion.ontology import OntologyProjection
 from app.schemas.ingestion.semantic_patch import (
     SemanticGraphPatchFragment,
     SemanticGraphRepairDelta,
 )
-from app.schemas.ingestion.ontology import OntologyProjection
 from app.services.ingestion.engine import operations
-from app.services.ingestion.schema.extraction_contract import build_entity_extraction_contract
+from app.services.ingestion.schema.extraction_contract import (
+    build_entity_extraction_contract,
+)
 from app.utils.ingestion_helpers import stable_entity_key
 
 
@@ -219,15 +224,32 @@ class AdkBatchModel:
         tool_context: Any,
         output: type[IngestionModel],
     ) -> Any:
-        result = await tool.run_async(
-            args={
-                "request": json.dumps(
-                    payload, ensure_ascii=False, separators=(",", ":")
-                )
-            },
-            tool_context=tool_context,
-        )
-        return result if isinstance(result, output) else output.model_validate(result)
+        try:
+            result = await tool.run_async(
+                args={
+                    "request": json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    )
+                },
+                tool_context=tool_context,
+            )
+            return result if isinstance(result, output) else output.model_validate(result)
+        except Exception as exc:
+            log_ingestion_event(
+                "BATCH_MODEL_FAILURE",
+                request={
+                    "ingestion_id": payload.get("ingestionId"),
+                    "batch_index": payload.get("batchIndex"),
+                    "phase": payload.get("phase"),
+                },
+                payload={
+                    "agent": getattr(tool, "name", type(tool).__name__),
+                    "expectedOutput": output.__name__,
+                    "errorType": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
 
     async def select_scopes(
         self, payload: dict[str, Any], tool_context: Any
@@ -279,12 +301,20 @@ class BatchExecutionModule:
         self, model: BatchModel | None = None, *, prompt_max_bytes: int | None = None
     ) -> None:
         self._model = model or AdkBatchModel()
-        configured = os.getenv("INGESTION_BATCH_PROMPT_MAX_BYTES", "262144")
+        configured = os.getenv("INGESTION_BATCH_PROMPT_MAX_BYTES", "32768")
         self._prompt_max_bytes = (
             prompt_max_bytes
             if prompt_max_bytes is not None
             else max(1, int(configured))
         )
+
+    @staticmethod
+    def _model_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
+        """Expose only citable chunk data to ingestion models."""
+        return [
+            {"chunkIndex": chunk.chunk_index, "text": chunk.text}
+            for chunk in chunks
+        ]
 
     async def execute(
         self, ingestion_id: str, batch_index: int, tool_context: Any
@@ -332,43 +362,72 @@ class BatchExecutionModule:
                 )
                 return result
 
+            if prepared.batch.status == "BLOCKED_SCHEMA":
+                result = {
+                    **batch_result_payload(prepared.workspace, batch_index),
+                    "idempotent": True,
+                }
+                store_checkpoint(tool_context, result)
+                return result
+
             if prepared.batch.status == "REPAIR_REQUIRED":
+                recovery = tool_context.state.get("ingestion_recovery")
+                if not (
+                    isinstance(recovery, dict)
+                    and recovery.get("ingestionId") == ingestion_id
+                    and recovery.get("batchIndex") == batch_index
+                    and recovery.get("strategy") == "REPAIR"
+                ):
+                    result = batch_result_payload(prepared.workspace, batch_index)
+                    result["nextAction"] = "choose_ingestion_recovery"
+                    self._log_metrics(
+                        ingestion_id,
+                        batch_index,
+                        "recovery_selection_required",
+                        calls,
+                        prompt_bytes,
+                        [],
+                        [],
+                        result,
+                    )
+                    return result
                 scope_keys = self._normalize_scope_keys(
                     prepared.batch.scope_keys, prepared.catalog_keys
                 )
                 rep_ctx = repair_context(prepared.batch)
                 if rep_ctx is not None and bool(prepared.batch.validation_attempts < operations.MAX_BATCH_VALIDATION_ATTEMPTS):
                     strategy = "direct_repair"
+                    repair_scope = (
+                        await operations.load_scope(
+                            prepared.container.ontology_cache,
+                            scope_keys,
+                            prepared.version_id,
+                        )
+                    )["scope"]
                     repair_payload = {
                         "phase": "repair",
                         "ingestionId": ingestion_id,
                         "batchIndex": batch_index,
                         "scopeKeys": scope_keys,
-                        "scope": (
-                            await operations.load_scope(
-                                prepared.container.ontology_cache,
-                                scope_keys,
-                                prepared.version_id,
-                            )
-                        )["scope"],
+                        "entityExtractionContract": _contract_from_scope(repair_scope)
+                        or repair_scope,
                         "batch": prepared.payload["batch"],
                         **rep_ctx,
                     }
-                    repair_payload["entityExtractionContract"] = _contract_from_scope(
-                        repair_payload["scope"]
-                    )
                     repair_payload["modelAssignments"] = model_assignments()
                     repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
                         prepared.batch
                     )
-                    if repair_payload["entityExtractionContract"]:
+                    contract = repair_payload["entityExtractionContract"]
+                    if isinstance(contract, dict) and contract.get("contractHash"):
                         await prepared.container.repository.record_runtime_metadata(
                             ingestion_id,
                             model_assignments=repair_payload["modelAssignments"],
-                            contract_hash=repair_payload["entityExtractionContract"]["contractHash"],
+                            contract_hash=contract["contractHash"],
                         )
                     calls += 1
                     delta = await self._model.repair(repair_payload, tool_context)
+                    tool_context.state["ingestion_recovery"] = None
                     workspace = await operations.repair_batch(
                         prepared.container.repository,
                         prepared.container.ontology_cache,
@@ -391,6 +450,19 @@ class BatchExecutionModule:
                         result,
                     )
                     return result
+                result = batch_result_payload(prepared.workspace, batch_index)
+                result["nextAction"] = "choose_ingestion_recovery"
+                self._log_metrics(
+                    ingestion_id,
+                    batch_index,
+                    "recovery_unavailable",
+                    calls,
+                    prompt_bytes,
+                    [],
+                    [],
+                    result,
+                )
+                return result
 
             selected = self._normalize_scope_keys(
                 prepared.batch.scope_keys, prepared.catalog_keys
@@ -510,6 +582,29 @@ class BatchExecutionModule:
                         prepared, scope_keys, extraction_output.extraction, tool_context
                     )
 
+            if result.get("stage") == "schema_gap_candidate":
+                workspace = await prepared.container.repository.block_batch_for_proposal(
+                    ingestion_id,
+                    batch_index,
+                    result["errors"],
+                )
+                result = {
+                    **result,
+                    "nextAction": "create_schema_proposal",
+                }
+                store_checkpoint(tool_context, result)
+                self._log_metrics(
+                    ingestion_id,
+                    batch_index,
+                    strategy,
+                    calls,
+                    prompt_bytes,
+                    requested_scope_keys,
+                    result.get("scopeKeys", scope_keys),
+                    result,
+                )
+                return result
+
             # Semantic Evidence Validation flow
             working_extraction = extraction_output.extraction
             if self._should_run_semantic_evidence(result, ingestion_id):
@@ -529,24 +624,23 @@ class BatchExecutionModule:
 
             if self._should_repair(result):
                 rep_context = result["repairContext"]
+                repair_scope = (
+                    await operations.load_scope(
+                        prepared.container.ontology_cache,
+                        scope_keys,
+                        prepared.version_id,
+                    )
+                )["scope"]
                 repair_payload = {
                     "phase": "repair",
                     "ingestionId": ingestion_id,
                     "batchIndex": batch_index,
                     "scopeKeys": scope_keys,
-                    "scope": (
-                        await operations.load_scope(
-                            prepared.container.ontology_cache,
-                            scope_keys,
-                            prepared.version_id,
-                        )
-                    )["scope"],
+                    "entityExtractionContract": _contract_from_scope(repair_scope)
+                    or repair_scope,
                     "batch": prepared.payload["batch"],
                     **rep_context,
                 }
-                repair_payload["entityExtractionContract"] = _contract_from_scope(
-                    repair_payload["scope"]
-                )
                 repair_payload["modelAssignments"] = model_assignments()
                 repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
                     prepared.batch
@@ -604,6 +698,15 @@ class BatchExecutionModule:
         workspace = await operations.required_workspace(
             container.repository, ingestion_id
         )
+        existing_batch = next(
+            (item for item in workspace.batches if item.batch_index == batch_index),
+            None,
+        )
+        if existing_batch is not None and existing_batch.status == "BLOCKED_SCHEMA":
+            return {
+                **batch_result_payload(workspace, batch_index),
+                "idempotent": True,
+            }
         guarded = operations.workflow_guard_payload(workspace, "load_scopes")
         if guarded is not None:
             store_checkpoint(tool_context, guarded)
@@ -639,9 +742,7 @@ class BatchExecutionModule:
                 "batchIndex": batch.batch_index,
                 "scopeHint": workspace.job.scope_hint,
                 "selectedScopeKeys": batch.scope_keys,
-                "chunks": [
-                    item.model_dump(by_alias=True, mode="json") for item in chunks
-                ],
+                "chunks": self._model_chunks(chunks),
                 "canonicalGraphContext": canonical,
             },
             "scopeCatalog": catalog,
@@ -710,10 +811,9 @@ class BatchExecutionModule:
             "phase": "extract",
             "ingestionId": str(prepared.workspace.job.id),
             "requiredScopeKeys": selected,
-            "scope": scope,
-            "entityExtractionContract": contract,
+            "entityExtractionContract": contract or scope,
             "modelAssignments": assignments,
-            **prepared.payload,
+            "batch": prepared.payload["batch"],
         }
 
     async def _reconcile_scope_keys(
@@ -785,6 +885,12 @@ class BatchExecutionModule:
         extraction: SemanticGraphPatchFragment,
         tool_context: Any,
     ) -> tuple[dict[str, Any], Any]:
+        prior_fact_probe = getattr(
+            prepared.container.graph_store, "has_committed_facts", None
+        )
+        prior_fact_available = (
+            await prior_fact_probe() if prior_fact_probe is not None else False
+        )
         workspace = await operations.submit_batch(
             prepared.container.repository,
             prepared.container.ontology_cache,
@@ -792,6 +898,7 @@ class BatchExecutionModule:
             prepared.batch.batch_index,
             scope_keys,
             extraction,
+            prior_fact_available=prior_fact_available,
         )
         return self._result_and_state(
             workspace,
@@ -1182,6 +1289,13 @@ class BatchExecutionModule:
                 "resolvedScopeKeys": resolved,
                 "stage": result.get("stage"),
                 "success": result.get("success"),
+                "terminal": result.get("terminal"),
+                "nextAction": result.get("nextAction"),
+                "errorCodes": [
+                    item.get("code")
+                    for item in result.get("errors", [])
+                    if isinstance(item, dict)
+                ],
                 "validationAttempts": result.get(
                     "validationAttempts", result.get("attempt")
                 ),

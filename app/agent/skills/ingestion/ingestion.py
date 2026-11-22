@@ -23,8 +23,9 @@ def _build_ingestion_substitutions() -> dict[str, str]:
     Returns:
         dict[str, str]: Từ điển ánh xạ {placeholder: dynamic_value}.
     """
-    # 1. Trả về từ điển các tham số thay thế động
-    return {}
+    # Keep user-facing preview language outside the workflow implementation.
+    preview_template = _SKILL_DIR / "prompts" / "preview-response.md"
+    return {"preview_response_format": preview_template.read_text(encoding="utf-8")}
 
 
 def build_skill():

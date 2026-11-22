@@ -1,6 +1,9 @@
 import asyncio
+from dataclasses import replace
+from uuid import UUID, uuid4
 
 from app.schemas.ingestion.document import DocumentChunk
+from app.schemas.ingestion.graph_patch import GraphPatchFragment
 from app.schemas.ingestion.ontology import ActiveOntology
 from app.services.ingestion.engine.repository import (
     IngestionRepository,
@@ -90,5 +93,72 @@ def test_same_document_content_remains_idempotent_after_ontology_changes() -> No
         )
         assert again.job.id == first.job.id
         assert not resumed and committed
+
+    asyncio.run(run())
+
+
+def test_rebase_resets_stale_validated_baseline() -> None:
+    async def run():
+        repo = IngestionRepository()
+        old_version_id = "00000000-0000-0000-0000-000000000001"
+        target_version_id = uuid4()
+        workspace, _, _ = await repo.create_or_resume(
+            artifact_name="same.md",
+            content_hash="b" * 64,
+            chunks=[_chunk()],
+            ontology=ActiveOntology(version_id=old_version_id, version="v1.0.0"),
+            document_key="docs/same.md",
+            scope_hint=None,
+            skill_digest="skill",
+            model_id="model",
+            compiler_version="compiler",
+            batch_size=1,
+            max_batch_chars=100,
+        )
+        stale_baseline = GraphPatchFragment(
+            ontology_version=old_version_id,
+            nodes=[],
+            edges=[],
+            coverage=[],
+            warnings=[],
+        )
+        stale_batch = replace(
+            workspace.batches[0],
+            status="REPAIR_REQUIRED",
+            validation_attempts=2,
+            validation_issues=[
+                {
+                    "code": "UNKNOWN_ENTITY_TYPE",
+                    "message": "Unknown entity type: requirement",
+                    "location": "nodes.0.className",
+                    "retryable": False,
+                }
+            ],
+            validated_baseline=stale_baseline.model_dump(
+                by_alias=True, mode="json"
+            ),
+            scope_keys=["rank"],
+            snapshot_hashes={"rank": "stale-hash"},
+        )
+        stale_workspace = replace(workspace, batches=(stale_batch,))
+        repo._workspaces[str(workspace.job.id)] = stale_workspace
+
+        rebased = await repo.rebase_ontology_version(
+            str(workspace.job.id),
+            str(target_version_id),
+            {"rank": "new-hash"},
+            {},
+        )
+
+        batch = rebased.batches[0]
+        assert batch.status == "PENDING"
+        assert batch.validation_attempts == 0
+        assert batch.validation_issues == []
+        assert batch.validated_baseline is None
+        assert batch.semantic_fragment is None
+        assert batch.graph_fragment is None
+        assert batch.scope_keys == []
+        assert batch.snapshot_hashes == {}
+        assert rebased.job.ontology_version_id == UUID(str(target_version_id))
 
     asyncio.run(run())

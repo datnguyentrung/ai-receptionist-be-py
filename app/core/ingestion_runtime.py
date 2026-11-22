@@ -10,7 +10,6 @@ Mô-đun này cung cấp:
 import asyncio
 import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -40,15 +39,11 @@ logger = logging.getLogger(__name__)
 
 def ingestion_model_assignments() -> dict[str, str]:
     """Read the role-specific model configuration for a new ingestion job."""
-    defaults = {
-        "extract": "gemini-3.5-flash-lite",
-        "repair": "gemini-3.5-flash-lite",
-        "routing": "gemini-3.1-flash-lite",
-        "evidence": "gemini-3.1-flash-lite",
-    }
     return {
-        role: os.getenv(f"GOOGLE_ADK_INGESTION_{role.upper()}_MODEL", default)
-        for role, default in defaults.items()
+        "extract": settings.GOOGLE_ADK_HIGH_MODEL,
+        "repair": settings.GOOGLE_ADK_HIGH_MODEL,
+        "routing": settings.GOOGLE_ADK_LOW_MODEL,
+        "evidence": settings.GOOGLE_ADK_LOW_MODEL,
     }
 
 
@@ -163,6 +158,10 @@ async def build_service_container() -> ServiceContainer:
             api_key=settings.GEMINI_API_KEY,
             model=settings.RAG_EMBEDDING_MODEL,
             dimension=settings.RAG_EMBEDDING_DIMENSION,
+            batch_size=settings.RAG_EMBEDDING_BATCH_SIZE,
+            min_request_interval_seconds=(
+                settings.RAG_EMBEDDING_MIN_REQUEST_INTERVAL_SECONDS
+            ),
         )
     except Exception as exc:
         await driver.close()

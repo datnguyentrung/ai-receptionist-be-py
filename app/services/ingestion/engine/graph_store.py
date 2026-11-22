@@ -44,7 +44,7 @@ from typing import Any, cast
 from neo4j import AsyncDriver
 
 from app.services.graphrag.embeddings import GeminiEmbeddingProvider
-from app.services.ingestion.engine.assertions import temporal_interval
+from app.services.ingestion.engine.assertions import assertion_key, temporal_interval
 from app.services.ingestion.engine.repository import Workspace
 
 CHUNK_VECTOR_INDEX = "taekwondo_chunk_embedding"
@@ -156,8 +156,14 @@ class Neo4jIngestionStore:
                 "FOR (n:TaekwondoKnowledgeEntity) REQUIRE n.stableKey IS UNIQUE",
                 "CREATE CONSTRAINT taekwondo_fact_id_unique IF NOT EXISTS "
                 "FOR (n:TaekwondoKnowledgeFact) REQUIRE n.factId IS UNIQUE",
+                "CREATE CONSTRAINT taekwondo_fact_assertion_key_unique IF NOT EXISTS "
+                "FOR (n:TaekwondoKnowledgeFact) REQUIRE n.assertionKey IS UNIQUE",
                 "CREATE CONSTRAINT taekwondo_source_version_id_unique IF NOT EXISTS "
                 "FOR (n:TaekwondoSourceVersion) REQUIRE n.versionId IS UNIQUE",
+                "CREATE INDEX taekwondo_fact_structural_lookup IF NOT EXISTS "
+                "FOR (n:TaekwondoKnowledgeFact) ON (n.subjectKey, n.factType, n.predicate)",
+                "CREATE CONSTRAINT taekwondo_relation_key_unique IF NOT EXISTS "
+                "FOR ()-[r:TAEKWONDO_RELATION]-() REQUIRE r.relationshipKey IS UNIQUE",
             )
             for statement in constraints:
                 await (await session.run(cast(Any, statement))).consume()
@@ -173,13 +179,68 @@ class Neo4jIngestionStore:
         nodes, edges = _merge_fragments(fragments)
         return await _build_graphrag_payload(workspace, nodes, edges, None)
 
-    async def prepare_version(self, workspace: Workspace) -> dict[str, Any]:
+    async def prepare_version(
+        self, workspace: Workspace, canonical_map: dict[str, str] | None = None,
+        supported_fact_map: dict[str, str] | None = None,
+        suppressed_fact_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         """Write a source version hidden from public retrieval until publication."""
         fragments = [item.graph_fragment for item in workspace.batches if item.graph_fragment]
         nodes, edges = _merge_fragments(fragments)
         payload = await _build_graphrag_payload(workspace, nodes, edges, self._embedding_provider)
+        payload = rewrite_payload_to_canonical_keys(payload, canonical_map or {})
+        if suppressed_fact_ids:
+            payload["facts"] = [
+                fact for fact in payload["facts"]
+                if fact["factId"] not in suppressed_fact_ids
+            ]
+        payload = reuse_supported_fact_keys(payload, supported_fact_map or {})
         async with self._driver.session(database=self._database) as session:
             return await session.execute_write(self._write_and_verify, payload, False)
+
+    async def find_entity_candidates(
+        self, requests: list[dict[str, Any]], limit: int = 20
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Fetch committed candidates by entity type for safe local resolution.
+
+        The resolver applies deterministic rules locally.  This intentionally does
+        not perform an unbounded semantic search of the whole graph.
+        """
+        if not requests:
+            return {}
+        rows = await self._data(
+            """
+            UNWIND $requests AS request
+            MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})-[:ASSERTS_ENTITY]->
+                  (entity:TaekwondoKnowledgeEntity {entityType: request.className})
+            WITH request, collect(DISTINCT entity)[..$limit] AS entities
+            UNWIND entities AS entity
+            OPTIONAL MATCH (fact:TaekwondoKnowledgeFact)-[:SUBJECT]->(entity)
+            WHERE fact.factType = 'PROPERTY'
+            WITH request, entity, collect(DISTINCT {
+              predicate: fact.predicate, valueJson: fact.valueJson
+            }) AS facts
+            RETURN request.stableKey AS requestKey, entity.stableKey AS stableKey,
+                   entity.entityType AS entityType, entity.identityJson AS identityJson,
+                   entity.propertiesJson AS propertiesJson, entity.searchText AS searchText,
+                   facts
+            """,
+            requests=requests,
+            limit=max(1, limit),
+        )
+        result: dict[str, list[dict[str, Any]]] = {str(item["stableKey"]): [] for item in requests}
+        for row in rows:
+            properties = json.loads(row.get("propertiesJson") or "{}")
+            for fact in row.get("facts") or []:
+                if fact.get("predicate") and fact.get("valueJson") is not None:
+                    try:
+                        properties.setdefault(fact["predicate"], json.loads(fact["valueJson"]))
+                    except (TypeError, ValueError):
+                        properties.setdefault(fact["predicate"], fact["valueJson"])
+            result.setdefault(str(row["requestKey"]), []).append({
+                **row, "className": row.get("entityType"), "properties": properties,
+            })
+        return result
 
     async def version_status(self, version_id: str) -> str | None:
         rows = await self._data(
@@ -193,15 +254,10 @@ class Neo4jIngestionStore:
             return []
         return await self._data(
             """
-            MATCH (v:TaekwondoSourceVersion)-[:ASSERTS_FACT]->
+            MATCH (v:TaekwondoSourceVersion)-[assertion:ASSERTS_FACT]->
                   (f:TaekwondoKnowledgeFact)-[:SUBJECT]->(subject:TaekwondoKnowledgeEntity)
             WHERE subject.stableKey IN $subject_keys
-              AND (v.status = 'COMMITTED' OR
-                (v.status = 'SUPERSEDED' AND EXISTS {
-                  MATCH (newFact:TaekwondoKnowledgeFact)-[review:CONFLICTS_WITH]->(f)
-                  MATCH (:TaekwondoSourceVersion {versionId: newFact.versionId, status: 'COMMITTED'})
-                  WHERE review.decision = 'REJECT'
-                }))
+              AND v.status = 'COMMITTED'
               AND NOT EXISTS {
                 MATCH (f)-[r:CONFLICTS_WITH]->(:TaekwondoKnowledgeFact)
                 WHERE r.decision = 'REJECT'
@@ -210,15 +266,29 @@ class Neo4jIngestionStore:
                 MATCH (:TaekwondoKnowledgeFact)-[r:CONFLICTS_WITH]->(f)
                 WHERE r.decision = 'CONFIRM'
               }
+            OPTIONAL MATCH (f)-[:OBJECT]->(object:TaekwondoKnowledgeEntity)
             OPTIONAL MATCH (f)-[:SUPPORTED_BY]->(chunk:TaekwondoChunk)
             RETURN f.factId AS factId, f.factType AS factType, f.predicate AS predicate,
-                   f.valueJson AS valueJson, f.validFrom AS validFrom, f.validTo AS validTo,
+                   f.valueJson AS valueJson,
+                   coalesce(f.objectKey, object.stableKey) AS objectKey,
+                   assertion.validFrom AS validFrom, assertion.validTo AS validTo,
                    subject.stableKey AS subjectKey, v.versionId AS versionId,
                    v.documentName AS documentName,
                    collect(DISTINCT chunk.sourceAnchor) AS sourceAnchors
             """,
             subject_keys=subject_keys,
         )
+
+    async def has_committed_facts(self) -> bool:
+        """Return whether committed knowledge can justify DUPLICATE_EVIDENCE."""
+        rows = await self._data(
+            """
+            MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})
+                  -[:ASSERTS_FACT]->(fact:TaekwondoKnowledgeFact)
+            RETURN count(fact) > 0 AS available
+            """
+        )
+        return bool(rows and rows[0].get("available"))
 
     async def current_entity_keys(self, stable_keys: list[str]) -> set[str]:
         if not stable_keys:
@@ -241,7 +311,6 @@ class Neo4jIngestionStore:
             MATCH (s:TaekwondoKnowledgeEntity {stableKey: edge.sourceKey})-
                   [r:TAEKWONDO_RELATION {relationType: edge.edgeName}]->
                   (t:TaekwondoKnowledgeEntity {stableKey: edge.targetKey})
-            MATCH (:TaekwondoSourceVersion {versionId: r.versionId, status: 'COMMITTED'})
             WHERE r.propertiesJson = edge.propertiesJson
             RETURN DISTINCT edge.sourceKey AS sourceKey, edge.targetKey AS targetKey,
                    edge.edgeName AS edgeName, edge.propertiesJson AS propertiesJson
@@ -283,6 +352,18 @@ class Neo4jIngestionStore:
                 SET old.status = 'SUPERSEDED', old.supersededAt = coalesce(old.supersededAt, datetime())
                 """, previous_version_id=previous_version_id,
             )).consume()
+        # Direct relationships are projections of active canonical relationship facts.
+        # Remove only projections whose canonical fact has no committed provenance.
+        await (await tx.run(
+            """
+            MATCH ()-[r:TAEKWONDO_RELATION]->()
+            WHERE NOT EXISTS {
+              MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})-[:ASSERTS_FACT]->
+                    (f:TaekwondoKnowledgeFact {factType: 'RELATIONSHIP', assertionKey: r.relationshipKey})
+            }
+            DELETE r
+            """
+        )).consume()
         if conflicts:
             await (await tx.run(
                 """
@@ -293,15 +374,10 @@ class Neo4jIngestionStore:
                 SET review.decision = item.decision, review.note = item.note
                 """, conflicts=conflicts,
             )).consume()
-        if supports:
-            await (await tx.run(
-                """
-                UNWIND $supports AS item
-                MATCH (newFact:TaekwondoKnowledgeFact {factId: item.newFactId})
-                MATCH (oldFact:TaekwondoKnowledgeFact {factId: item.oldFactId})
-                MERGE (newFact)-[:SUPPORTS_SAME_ASSERTION]->(oldFact)
-                """, supports=supports,
-            )).consume()
+        # Canonical assertion keys make an exact duplicate the same fact node.
+        # `supports` is retained in the public preview contract only; provenance
+        # is represented by ASSERTS_FACT and SUPPORTED_BY, never by fact-to-fact links.
+        del supports
         return {"commitStatus": "COMMITTED", "versionId": version_id}
 
     @staticmethod
@@ -445,12 +521,12 @@ class Neo4jIngestionStore:
                     MATCH (s:TaekwondoKnowledgeEntity {stableKey: edge.sourceKey})
                     MATCH (t:TaekwondoKnowledgeEntity {stableKey: edge.targetKey})
                     MERGE (s)-[r:TAEKWONDO_RELATION {
-                      relationType: edge.edgeName,
-                      versionId: $version_id,
-                      sourceKey: edge.sourceKey,
-                      targetKey: edge.targetKey
+                      relationshipKey: edge.relationshipKey
                     }]->(t)
-                    SET r.propertiesJson = edge.propertiesJson,
+                    SET r.relationType = edge.edgeName,
+                        r.sourceKey = edge.sourceKey,
+                        r.targetKey = edge.targetKey,
+                        r.propertiesJson = edge.propertiesJson,
                     r.evidenceJson = edge.evidenceJson,
                     r.factText = edge.factText,
                     r.updatedAt = datetime()
@@ -468,24 +544,41 @@ class Neo4jIngestionStore:
                     UNWIND $facts AS fact
                     MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
                     MERGE (f:TaekwondoKnowledgeFact {factId: fact.factId})
-                    SET f.versionId = $version_id,
+                    ON CREATE SET f.factId = fact.factId,
                         f.factType = fact.factType,
                         f.statement = fact.statement,
                         f.predicate = fact.predicate,
                         f.valueJson = fact.valueJson,
-                        f.chunkIds = fact.evidenceChunkIds,
                         f.subjectKey = fact.subjectKey,
-                        f.validFrom = fact.validFrom,
-                        f.validTo = fact.validTo,
-                        f.confidence = fact.confidence,
+                        f.objectKey = fact.objectKey,
                         f.embedding = fact.embedding,
                         f.embeddingModel = $embedding_model,
                         f.embeddingVersion = $embedding_model,
                         f.ontologyVersionId = $ontology_version_id,
                         f.embeddingDimension = size(fact.embedding),
+                        f.createdAt = datetime()
+                    SET f.assertionKey = fact.assertionKey,
+                        f.factType = coalesce(f.factType, fact.factType),
+                        f.statement = coalesce(f.statement, fact.statement),
+                        f.predicate = coalesce(f.predicate, fact.predicate),
+                        f.valueJson = coalesce(f.valueJson, fact.valueJson),
+                        f.subjectKey = coalesce(f.subjectKey, fact.subjectKey),
+                        f.objectKey = coalesce(f.objectKey, fact.objectKey),
+                        f.embedding = coalesce(f.embedding, fact.embedding),
+                        f.embeddingModel = coalesce(f.embeddingModel, $embedding_model),
+                        f.embeddingVersion = coalesce(f.embeddingVersion, $embedding_model),
+                        f.ontologyVersionId = coalesce(f.ontologyVersionId, $ontology_version_id),
+                        f.embeddingDimension = coalesce(f.embeddingDimension, size(fact.embedding)),
                         f.active = true,
                         f.updatedAt = datetime()
-                    MERGE (v)-[:ASSERTS_FACT]->(f)
+                    MERGE (v)-[a:ASSERTS_FACT {occurrenceId: fact.occurrenceId}]->(f)
+                    SET a.occurrenceId = fact.occurrenceId,
+                        a.extractedStatement = fact.statement,
+                        a.extractedValueJson = fact.valueJson,
+                        a.validFrom = fact.validFrom,
+                        a.validTo = fact.validTo,
+                        a.confidence = fact.confidence,
+                        a.updatedAt = datetime()
                     WITH f, fact
                     MATCH (subject:TaekwondoKnowledgeEntity {stableKey: fact.subjectKey})
                     MERGE (f)-[:SUBJECT]->(subject)
@@ -533,8 +626,8 @@ class Neo4jIngestionStore:
                 MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
                 OPTIONAL MATCH (v)-[:ASSERTS_ENTITY]->(n:TaekwondoKnowledgeEntity)
                 WITH v, count(DISTINCT n) AS nodes
-                OPTIONAL MATCH ()-[r:TAEKWONDO_RELATION {versionId: $version_id}]->()
-                WITH v, nodes, count(DISTINCT r) AS edges
+                OPTIONAL MATCH (v)-[:ASSERTS_FACT]->(relationshipFact:TaekwondoKnowledgeFact {factType: 'RELATIONSHIP'})
+                WITH v, nodes, count(DISTINCT relationshipFact) AS edges
                 OPTIONAL MATCH (v)-[:HAS_CHUNK]->(c:TaekwondoChunk)
                 WITH v, nodes, edges, count(DISTINCT c) AS chunks
                 OPTIONAL MATCH (v)-[:ASSERTS_FACT]->(f:TaekwondoKnowledgeFact)
@@ -583,14 +676,13 @@ class Neo4jIngestionStore:
             """
             CALL db.index.vector.queryNodes($index, $limit, $embedding)
             YIELD node, score
-            MATCH (v:TaekwondoSourceVersion {versionId: node.versionId, status: 'COMMITTED'})
+            MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})-[:ASSERTS_FACT]->(node)
             RETURN node.chunkId AS chunkId, node.versionId AS versionId,
                    node.documentId AS documentId, node.documentName AS documentName,
                    node.chunkIndex AS chunkIndex, node.text AS text,
                    node.section AS section, node.pageStart AS pageStart,
                    node.pageEnd AS pageEnd, node.sourceAnchor AS sourceAnchor,
-                   node.scopeKey AS scopeKey, node.scopeKeys AS scopeKeys,
-                   node.embedding AS embedding, score
+                   node.scopeKey AS scopeKey, node.scopeKeys AS scopeKeys, score
             ORDER BY score DESC
             LIMIT $limit
             """,
@@ -770,7 +862,7 @@ class Neo4jIngestionStore:
                    chunk.section AS section, chunk.pageStart AS pageStart,
                    chunk.pageEnd AS pageEnd, chunk.sourceAnchor AS sourceAnchor,
                    chunk.scopeKey AS scopeKey, chunk.scopeKeys AS scopeKeys,
-                   chunk.embedding AS embedding, 1.0 AS score
+                   1.0 AS score
             """,
             chunk_ids=chunk_ids,
         )
@@ -828,8 +920,8 @@ class Neo4jIngestionStore:
             MATCH (v:TaekwondoSourceVersion {versionId: $version_id, status: 'COMMITTED'})
             OPTIONAL MATCH (v)-[:ASSERTS_ENTITY]->(n:TaekwondoKnowledgeEntity)
             WITH v, count(DISTINCT n) AS nodes
-            OPTIONAL MATCH ()-[r:TAEKWONDO_RELATION {versionId: $version_id}]->()
-            WITH v, nodes, count(DISTINCT r) AS edges
+            OPTIONAL MATCH (v)-[:ASSERTS_FACT]->(relationshipFact:TaekwondoKnowledgeFact {factType: 'RELATIONSHIP'})
+            WITH v, nodes, count(DISTINCT relationshipFact) AS edges
             OPTIONAL MATCH (v)-[:HAS_CHUNK]->(c:TaekwondoChunk)
             WITH v, nodes, edges, count(DISTINCT c) AS chunks
             OPTIONAL MATCH (v)-[:ASSERTS_FACT]->(f:TaekwondoKnowledgeFact)
@@ -1097,6 +1189,13 @@ async def _build_graphrag_payload(
                 "propertiesJson": _json(edge.get("properties") or {}),
                 "evidenceJson": _json(edge.get("evidence") or []),
                 "factText": fact_text,
+                "relationshipKey": assertion_key(
+                    fact_type="RELATIONSHIP",
+                    subject_key=source["stableKey"],
+                    predicate=edge["edgeName"],
+                    object_key=target["stableKey"],
+                    value=edge.get("properties") or {},
+                ),
             }
         )
         facts.append(
@@ -1113,6 +1212,21 @@ async def _build_graphrag_payload(
                 edge.get("confidence"),
             )
         )
+
+    # One canonical assertion can be evidenced by multiple chunks in this version.
+    # Keep one write payload while preserving every local evidence attachment.
+    facts_by_key: dict[str, dict[str, Any]] = {}
+    for fact in facts:
+        existing = facts_by_key.get(fact["assertionKey"])
+        if existing is None:
+            facts_by_key[fact["assertionKey"]] = fact
+            continue
+        existing["evidenceChunkIds"] = sorted(
+            set(existing["evidenceChunkIds"]) | set(fact["evidenceChunkIds"])
+        )
+        if (fact.get("confidence") or 0) > (existing.get("confidence") or 0):
+            existing["confidence"] = fact["confidence"]
+    facts = list(facts_by_key.values())
 
     # Tạo vector embedding cho tất cả các fact
     if facts and embedding_provider is not None:
@@ -1148,6 +1262,73 @@ async def _build_graphrag_payload(
         "edges": normalized_edges,
         "facts": facts,
     }
+
+
+def rewrite_payload_to_canonical_keys(
+    payload: dict[str, Any], canonical_map: dict[str, str]
+) -> dict[str, Any]:
+    """Rewrite a preview/write payload after graph-backed entity resolution.
+
+    Assertion and relationship identities are rebuilt after rewriting.  This is
+    essential: comparing facts before this point creates false "new" facts for
+    aliases of an already canonical entity.
+    """
+    if not canonical_map:
+        return payload
+    payload = json.loads(json.dumps(payload))
+    for node in payload.get("nodes", []):
+        node["stableKey"] = canonical_map.get(node["stableKey"], node["stableKey"])
+    for mention in payload.get("mentions", []):
+        mention["stableKey"] = canonical_map.get(mention["stableKey"], mention["stableKey"])
+    for edge in payload.get("edges", []):
+        edge["sourceKey"] = canonical_map.get(edge["sourceKey"], edge["sourceKey"])
+        edge["targetKey"] = canonical_map.get(edge["targetKey"], edge["targetKey"])
+        edge["relationshipKey"] = assertion_key(
+            fact_type="RELATIONSHIP", subject_key=edge["sourceKey"],
+            predicate=edge["edgeName"], object_key=edge["targetKey"],
+            value=json.loads(edge["propertiesJson"]),
+        )
+    for fact in payload.get("facts", []):
+        fact["subjectKey"] = canonical_map.get(fact["subjectKey"], fact["subjectKey"])
+        if fact.get("objectKey"):
+            fact["objectKey"] = canonical_map.get(fact["objectKey"], fact["objectKey"])
+        key = assertion_key(
+            fact_type=fact["factType"], subject_key=fact["subjectKey"],
+            predicate=fact["predicate"], object_key=fact.get("objectKey"),
+            value=json.loads(fact["valueJson"]),
+        )
+        fact["factId"] = key
+        fact["assertionKey"] = key
+        fact["occurrenceId"] = hashlib.sha256(_json({
+            "version": payload["version_id"], "assertionKey": key,
+            "validFrom": fact.get("validFrom"), "validTo": fact.get("validTo"),
+            "evidenceChunkIds": sorted(fact.get("evidenceChunkIds") or []),
+        }).encode("utf-8")).hexdigest()
+    # Multiple provisional nodes can point to one canonical node.  One source
+    # version should assert it once, while retaining its combined evidence.
+    payload["nodes"] = list({item["stableKey"]: item for item in payload.get("nodes", [])}.values())
+    payload["edges"] = list({item["relationshipKey"]: item for item in payload.get("edges", [])}.values())
+    payload["facts"] = list({item["assertionKey"]: item for item in payload.get("facts", [])}.values())
+    return payload
+
+
+def reuse_supported_fact_keys(payload: dict[str, Any], supported_fact_map: dict[str, str]) -> dict[str, Any]:
+    """Attach new evidence directly to the existing canonical fact node."""
+    if not supported_fact_map:
+        return payload
+    payload = json.loads(json.dumps(payload))
+    for fact in payload.get("facts", []):
+        old_key = supported_fact_map.get(fact["factId"])
+        if old_key:
+            fact["factId"] = old_key
+            fact["assertionKey"] = old_key
+            fact["occurrenceId"] = hashlib.sha256(_json({
+                "version": payload["version_id"], "assertionKey": old_key,
+                "validFrom": fact.get("validFrom"), "validTo": fact.get("validTo"),
+                "evidenceChunkIds": sorted(fact.get("evidenceChunkIds") or []),
+            }).encode("utf-8")).hexdigest()
+    payload["facts"] = list({item["assertionKey"]: item for item in payload.get("facts", [])}.values())
+    return payload
 
 
 def _merge_fragments(
@@ -1206,14 +1387,20 @@ def _merge_fragments(
             else:
                 existing = nodes_by_canonical_id[canonical_id]
                 known = {
-                    (item["propertyName"], _json(item.get("value")))
+                    (item["propertyName"], _json(item.get("value"))): item
                     for item in existing.get("properties", [])
                 }
-                existing["properties"].extend(
-                    item
-                    for item in node.get("properties", [])
-                    if (item["propertyName"], _json(item.get("value"))) not in known
-                )
+                for item in node.get("properties", []):
+                    property_key = (item["propertyName"], _json(item.get("value")))
+                    previous = known.get(property_key)
+                    if previous is None:
+                        existing["properties"].append(item)
+                        known[property_key] = item
+                    else:
+                        previous["evidence"] = list(previous.get("evidence") or []) + [
+                            evidence for evidence in item.get("evidence", [])
+                            if evidence not in (previous.get("evidence") or [])
+                        ]
                 existing["evidence"].extend(node.get("evidence", []))
 
             temp_map[orig_temp_id] = canonical_id
@@ -1221,7 +1408,7 @@ def _merge_fragments(
         fragment_temp_maps.append(temp_map)
 
     nodes = list(nodes_by_canonical_id.values())
-    edges_by_key: dict[tuple[str, str, str], dict] = {}
+    edges_by_key: dict[tuple[str, str, str, str], dict] = {}
     for fragment, temp_map in zip(dict_fragments, fragment_temp_maps, strict=True):
         for edge in fragment.get("edges", []):
             source_raw = str(edge.get("sourceTempId", ""))
@@ -1231,7 +1418,18 @@ def _merge_fragments(
             source = temp_id_to_canonical_id.get(source, source)
             target = temp_id_to_canonical_id.get(target, target)
             normalized = {**edge, "sourceTempId": source, "targetTempId": target}
-            edges_by_key[(edge.get("edgeName", ""), source, target)] = normalized
+            key = (
+                edge.get("edgeName", ""), source, target,
+                _json(edge.get("properties") or {}),
+            )
+            previous = edges_by_key.get(key)
+            if previous is None:
+                edges_by_key[key] = normalized
+            else:
+                previous["evidence"] = list(previous.get("evidence") or []) + [
+                    item for item in normalized.get("evidence") or []
+                    if item not in (previous.get("evidence") or [])
+                ]
     return nodes, list(edges_by_key.values())
 
 
@@ -1250,21 +1448,37 @@ def _fact(
     """
     Tạo cấu trúc đối tượng dữ liệu sự kiện tri thức (Fact) kèm mã băm SHA-256 định danh duy nhất.
     """
-    fact_id = hashlib.sha256(
+    canonical_key = assertion_key(
+        fact_type=fact_type,
+        subject_key=subject_key,
+        predicate=predicate,
+        object_key=object_key,
+        value=value,
+    )
+    valid_from, valid_to = temporal_interval(predicate, value, evidence)
+    evidence_chunk_ids = sorted(
+        {
+            chunk_id_by_index[item["chunkIndex"]]
+            for item in evidence
+            if item.get("chunkIndex") in chunk_id_by_index
+        }
+    )
+    occurrence_id = hashlib.sha256(
         _json(
             {
                 "version": version_id,
-                "type": fact_type,
-                "subject": subject_key,
-                "predicate": predicate,
-                "object": object_key,
-                "value": value,
+                "assertionKey": canonical_key,
+                "validFrom": valid_from,
+                "validTo": valid_to,
+                "evidenceChunkIds": evidence_chunk_ids,
             }
         ).encode("utf-8")
     ).hexdigest()
-    valid_from, valid_to = temporal_interval(predicate, value, evidence)
     return {
-        "factId": fact_id,
+        # factId remains for read compatibility; it is now the canonical fact identity.
+        "factId": canonical_key,
+        "assertionKey": canonical_key,
+        "occurrenceId": occurrence_id,
         "factType": fact_type,
         "statement": statement,
         "predicate": predicate,
@@ -1273,13 +1487,7 @@ def _fact(
         "validTo": valid_to,
         "subjectKey": subject_key,
         "objectKey": object_key,
-        "evidenceChunkIds": sorted(
-            {
-                chunk_id_by_index[item["chunkIndex"]]
-                for item in evidence
-                if item.get("chunkIndex") in chunk_id_by_index
-            }
-        ),
+        "evidenceChunkIds": evidence_chunk_ids,
         "confidence": confidence,
     }
 

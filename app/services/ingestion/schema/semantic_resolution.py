@@ -21,12 +21,13 @@ Danh sách các hàm / phương thức trong module:
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from google import genai
 from google.genai import types
+
+from app.core.config import settings
 
 from app.services.graphrag.embeddings import GeminiEmbeddingProvider, cosine_similarity
 
@@ -72,15 +73,13 @@ class AdkMergeVerifier:
         Khởi tạo AdkMergeVerifier.
 
         Args:
-            model: Tên mô hình Gemini (mặc định lấy từ INGESTION_MODEL hoặc GOOGLE_ADK_MODEL).
+            model: Tên mô hình Gemini; mặc định dùng settings.GOOGLE_ADK_HIGH_MODEL.
             api_key: Khóa API của Google Gemini.
         """
         # 1. Xác định tên model Gemini
-        self.model = model or os.getenv(
-            "INGESTION_MODEL", os.getenv("GOOGLE_ADK_MODEL", "gemini-2.5-flash")
-        )
+        self.model = model or settings.GOOGLE_ADK_HIGH_MODEL
         # 2. Lấy API key từ biến môi trường
-        api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        api_key = api_key or settings.GEMINI_API_KEY
         # 3. Khởi tạo client Gemini SDK
         self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
 

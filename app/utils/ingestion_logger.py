@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,96 @@ from typing import Any
 from app.core.rate_limiter import global_rate_limiter
 
 LOG_FILE = Path(__file__).resolve().parents[2] / "logs" / "log.txt"
+
+
+def should_stop_after_tool_result(result: Any) -> bool:
+    """Return whether one terminal tool result must end the current agent turn.
+
+    ADK treats a function-response event marked with ``skip_summarization`` as
+    final, so setting that action prevents another model/tool loop iteration.
+    """
+    if not isinstance(result, dict):
+        return False
+    payload = result.get("result") if set(result) == {"result"} else result
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("terminal") is True:
+        # Both successes and failures need one model turn: a successful run
+        # reports completion, while a failed run reports the recovery action.
+        return False
+    if payload.get("nextAction") == "report_tool_failure":
+        return True
+    return (
+        payload.get("nextAction") == "wait_for_schema_review"
+        and _contains_error_code(payload, "SCHEMA_PROPOSAL_PENDING")
+        and _has_pending_schema_proposal(payload)
+    )
+
+
+def _has_pending_schema_proposal(payload: dict[str, Any]) -> bool:
+    """Return whether a schema review is still genuinely pending.
+
+    A blocked batch can retain an old SCHEMA_PROPOSAL_PENDING validation error
+    after its proposal was approved and applied. Only stop the turn when the
+    payload also identifies a proposal that still needs review.
+    """
+    pending_count = payload.get("pendingProposalCount")
+    if isinstance(pending_count, int):
+        return pending_count > 0
+
+    for key in ("pendingSchemaProposal", "pendingSchemaProposals"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return bool(value)
+        if isinstance(value, (list, tuple)):
+            return bool(value)
+    return False
+
+
+def _contains_error_code(value: Any, code: str) -> bool:
+    if isinstance(value, dict):
+        if value.get("code") == code:
+            return True
+        return any(_contains_error_code(item, code) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_error_code(item, code) for item in value)
+    return False
+
+
+def _user_message_trace(text: str) -> dict[str, Any]:
+    """Keep internal batch prompts out of normal traces while retaining context."""
+    if os.getenv("INGESTION_TRACE_PAYLOADS", "").lower() in {"1", "true", "yes"}:
+        return {"message": text}
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return {"message": text}
+    if not isinstance(payload, dict) or payload.get("phase") not in {
+        "extract",
+        "repair",
+    }:
+        return {"message": text}
+    batch = payload.get("batch") if isinstance(payload.get("batch"), dict) else {}
+    chunks = batch.get("chunks") if isinstance(batch.get("chunks"), list) else []
+    issues = payload.get("validationIssues")
+    return {
+        "message": (
+            "Internal ingestion payload omitted; set "
+            "INGESTION_TRACE_PAYLOADS=true for full payloads."
+        ),
+        "phase": payload.get("phase"),
+        "ingestionId": payload.get("ingestionId"),
+        "batchIndex": payload.get("batchIndex", batch.get("batchIndex")),
+        "scopeKeys": payload.get("scopeKeys"),
+        "chunkIndexes": [
+            item.get("chunkIndex") for item in chunks if isinstance(item, dict)
+        ],
+        "validationIssueCodes": [
+            item.get("code") for item in issues if isinstance(item, dict)
+        ]
+        if isinstance(issues, list)
+        else [],
+    }
 
 
 def reset_log_file() -> None:
@@ -781,7 +872,7 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         for part in getattr(user_message, "parts", []):
             if hasattr(part, "text") and part.text:
                 text += part.text + "\n"
-        write_raw_trace("👤 USER INPUT MESSAGE", {"message": text.strip()})
+        write_raw_trace("👤 USER INPUT MESSAGE", _user_message_trace(text.strip()))
 
     async def before_agent_callback(self, *, agent: Any, callback_context: Any):
         agent_name = getattr(agent, "name", "unknown_agent")
@@ -809,6 +900,26 @@ class ADKDetailedLoggerPlugin(BasePlugin):
         write_raw_trace(
             f"📦 [TOOL RESPONSE] {tool_name}", {"tool": tool_name, "result": result}
         )
+        stop_turn = should_stop_after_tool_result(result)
+        if stop_turn:
+            tool_context.actions.skip_summarization = True
+            write_raw_trace(
+                f"⛔ [TOOL TERMINATION] {tool_name}",
+                {
+                    "tool": tool_name,
+                    "nextAction": (
+                        result.get("nextAction")
+                        if isinstance(result, dict)
+                        else None
+                    ),
+                    "reason": (
+                        "schema_proposal_pending"
+                        if isinstance(result, dict)
+                        and _contains_error_code(result, "SCHEMA_PROPOSAL_PENDING")
+                        else "terminal_tool_result"
+                    ),
+                },
+            )
         if tool_name in {
             "submit_ingestion_batch",
             "repair_ingestion_batch",
@@ -820,7 +931,7 @@ class ADKDetailedLoggerPlugin(BasePlugin):
             "create_schema_proposal",
             "finalize_ingestion",
             "fill_ingestion",
-        }:
+        } and not stop_turn:
             await asyncio.sleep(1.2)
 
     async def before_model_callback(self, *, callback_context: Any, llm_request: Any):

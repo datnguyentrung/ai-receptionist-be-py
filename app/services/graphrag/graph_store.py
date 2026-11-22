@@ -78,7 +78,6 @@ class Neo4jGraphStore:
             node.pageStart AS pageStart,
             node.pageEnd AS pageEnd,
             node.sourceAnchor AS sourceAnchor,
-            node.embedding AS embedding,
             score
         """
         async with self._driver.session(database=self._database) as session:
@@ -109,7 +108,6 @@ class Neo4jGraphStore:
             node.pageStart AS pageStart,
             node.pageEnd AS pageEnd,
             node.sourceAnchor AS sourceAnchor,
-            node.embedding AS embedding,
             score
         """
         async with self._driver.session(database=self._database) as session:
@@ -149,26 +147,21 @@ class Neo4jGraphStore:
         query = f"""
         CALL db.index.vector.queryNodes('{FACT_VECTOR_INDEX}', $limit, $query_vector)
         YIELD node, score
-        MATCH (source:TaekwondoSourceVersion {{versionId: node.versionId}})
-        WHERE (source.status = 'COMMITTED' OR
-          (source.status = 'SUPERSEDED' AND EXISTS {{
-            MATCH (newFact:TaekwondoKnowledgeFact)-[r:CONFLICTS_WITH]->(node)
-            MATCH (current:TaekwondoSourceVersion {{versionId: newFact.versionId, status: 'COMMITTED'}})
-            WHERE r.decision = 'REJECT'
-          }}))
-          AND NOT EXISTS {{ MATCH (node)-[r:CONFLICTS_WITH]->() WHERE r.decision = 'REJECT' }}
+        MATCH (source:TaekwondoSourceVersion {{status: 'COMMITTED'}})-[:ASSERTS_FACT]->(node)
+        WHERE NOT EXISTS {{ MATCH (node)-[r:CONFLICTS_WITH]->() WHERE r.decision = 'REJECT' }}
           AND NOT EXISTS {{ MATCH ()-[r:CONFLICTS_WITH]->(node) WHERE r.decision = 'CONFIRM' }}
         OPTIONAL MATCH (node)-[review:CONFLICTS_WITH]-(other:TaekwondoKnowledgeFact)
+        OPTIONAL MATCH (node)-[:SUPPORTED_BY]->(chunk:TaekwondoChunk)
         WITH node, score, collect(DISTINCT {{factId: other.factId,
-          chunkIds: other.chunkIds, decision: review.decision,
-          versionId: other.versionId}}) AS conflictPeers
+          decision: review.decision}}) AS conflictPeers,
+          collect(DISTINCT chunk.chunkId) AS chunkIds
         RETURN
             node.factId AS factId,
             node.statement AS statement,
             node.factType AS factType,
-            node.validFrom AS validFrom,
-            node.validTo AS validTo,
-            node.chunkIds AS chunkIds,
+            NULL AS validFrom,
+            NULL AS validTo,
+            chunkIds AS chunkIds,
             conflictPeers AS conflictPeers,
             score
         """
@@ -202,8 +195,7 @@ class Neo4jGraphStore:
             c.section AS section,
             c.pageStart AS pageStart,
             c.pageEnd AS pageEnd,
-            c.sourceAnchor AS sourceAnchor,
-            c.embedding AS embedding
+            c.sourceAnchor AS sourceAnchor
         LIMIT $limit
         """
         async with self._driver.session(database=self._database) as session:
@@ -234,8 +226,7 @@ class Neo4jGraphStore:
             c.section AS section,
             c.pageStart AS pageStart,
             c.pageEnd AS pageEnd,
-            c.sourceAnchor AS sourceAnchor,
-            c.embedding AS embedding
+            c.sourceAnchor AS sourceAnchor
         """
         async with self._driver.session(database=self._database) as session:
             result = await session.run(query, chunk_ids=chunk_ids, include_historical=include_historical)
@@ -246,15 +237,15 @@ class Neo4jGraphStore:
         query = """
         MATCH (v:TaekwondoSourceVersion {documentKey: $document_key})
         WHERE v.status IN ['COMMITTED', 'SUPERSEDED']
-        OPTIONAL MATCH (v)-[:ASSERTS_FACT]->(f:TaekwondoKnowledgeFact)
+        OPTIONAL MATCH (v)-[assertion:ASSERTS_FACT]->(f:TaekwondoKnowledgeFact)
         OPTIONAL MATCH (f)-[:SUPPORTED_BY]->(c:TaekwondoChunk)
         WITH v, f, collect(DISTINCT c.sourceAnchor) AS anchors
         RETURN v.versionId AS versionId, v.status AS status,
                v.documentKey AS documentKey, v.documentName AS documentName,
                v.committedAt AS committedAt, f.factId AS factId,
                f.statement AS statement, f.predicate AS predicate,
-               f.valueJson AS valueJson, f.validFrom AS validFrom,
-               f.validTo AS validTo, anchors AS sourceAnchors
+               f.valueJson AS valueJson, assertion.validFrom AS validFrom,
+               assertion.validTo AS validTo, anchors AS sourceAnchors
         ORDER BY v.committedAt DESC, factId
         """
         async with self._driver.session(database=self._database) as session:

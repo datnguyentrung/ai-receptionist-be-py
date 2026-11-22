@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     SERVER_PUBLIC_URL: str = ""
 
     # Standalone ADK Web / ingestion runtime
-    GOOGLE_ADK_MODEL: str = "gemini-3.5-flash-lite"
+    GOOGLE_ADK_HIGH_MODEL: str = "gemini-3.5-flash-lite"
+    GOOGLE_ADK_LOW_MODEL: str = "gemini-3.1-flash-lite"
     ADK_WEB_HOST: str = "127.0.0.1"
     ADK_WEB_PORT: int = 8001
     ADK_ALLOWED_ORIGINS: str = "http://localhost:8001,http://127.0.0.1:8001"
@@ -39,9 +40,11 @@ class Settings(BaseSettings):
     # GraphRAG retrieval/indexing
     RAG_EMBEDDING_MODEL: str = "gemini-embedding-001"
     RAG_EMBEDDING_DIMENSION: int = 768
+    RAG_EMBEDDING_BATCH_SIZE: int = 32
+    RAG_EMBEDDING_MIN_REQUEST_INTERVAL_SECONDS: float = 0.0
     RAG_MIN_COSINE_SCORE: float = 0.55
     RAG_DEFAULT_TOP_K: int = 10
-    RAG_CANDIDATE_LIMIT: int = 20
+    RAG_CANDIDATE_LIMIT: int = 40
     RAG_CONTEXT_MAX_CHARS: int = 24000
     RAG_RETRIEVAL_TIMEOUT_SECONDS: float = 12.0
     RAG_PATH_TIMEOUT_SECONDS: float = 5.0
@@ -170,9 +173,7 @@ class Settings(BaseSettings):
 
     def mobile_command_topic(self, device_id: str) -> str:
         if "{deviceId}" not in self.MOBILE_COMMAND_TOPIC_TEMPLATE:
-            raise ValueError(
-                "MOBILE_COMMAND_TOPIC_TEMPLATE must contain {deviceId}"
-            )
+            raise ValueError("MOBILE_COMMAND_TOPIC_TEMPLATE must contain {deviceId}")
         return self.MOBILE_COMMAND_TOPIC_TEMPLATE.format(deviceId=device_id)
 
     def ensure_relay_credential(self) -> str:

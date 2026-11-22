@@ -69,6 +69,59 @@ from app.schemas.ingestion import (
 COMPILER_VERSION = "ontology-compiler-v2"
 logger = logging.getLogger(__name__)
 
+_LIST_ITEM = re.compile(
+    r"(?:^|<br\s*/?>|\r?\n|\|)\s*-\s*(.+?)(?=<br\s*/?>|\r?\n|\||$)",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalized_list_items(text: str) -> list[str]:
+    """Return meaningful bullet text from a Markdown or HTML-table cell."""
+    return [
+        _normalize_quote(item).strip()
+        for item in _LIST_ITEM.findall(text)
+        if _normalize_quote(item).strip()
+    ]
+
+
+def _validate_list_item_representation(
+    fragment: GraphPatchFragment, chunks: Iterable[PreparedChunk]
+) -> list[ValidationIssue]:
+    """Reject MAPPED chunks whose multi-item source lists lose an item."""
+    coverage = {item.chunk_index: item for item in fragment.coverage}
+    values_by_chunk: dict[int, list[str]] = {}
+    for node in fragment.nodes:
+        for fact in node.properties:
+            for evidence in fact.evidence:
+                values_by_chunk.setdefault(evidence.chunk_index, []).append(
+                    _normalize_quote(str(fact.value))
+                )
+
+    issues: list[ValidationIssue] = []
+    for chunk in chunks:
+        if coverage.get(chunk.chunk_index, None) is None:
+            continue
+        if coverage[chunk.chunk_index].decision != "MAPPED":
+            continue
+        source_items = _normalized_list_items(chunk.text)
+        if len(source_items) < 2:
+            continue
+        represented = "\n".join(values_by_chunk.get(chunk.chunk_index, []))
+        missing = [item for item in source_items if item not in represented]
+        if missing:
+            issues.append(
+                ValidationIssue(
+                    code="LIST_ITEMS_NOT_REPRESENTED",
+                    message=(
+                        f"Chunk {chunk.chunk_index} has {len(missing)} list item(s) "
+                        f"not represented in property values: {'; '.join(missing)}"
+                    ),
+                    location=f"coverage.{chunk.chunk_index}.decision",
+                    retryable=True,
+                )
+            )
+    return issues
+
 
 # ====================================================================================================
 # Hàm: validate_coverage_integrity
@@ -88,6 +141,7 @@ def validate_coverage_integrity(
     fragment: GraphPatchFragment,
     chunks: Iterable[PreparedChunk],
     external_node_types: dict[str, str] | None = None,
+    prior_fact_available: bool = False,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     chunk_by_index = {chunk.chunk_index: chunk for chunk in chunks}
@@ -149,8 +203,8 @@ def validate_coverage_integrity(
                     )
                 )
         elif item.decision == "DUPLICATE_EVIDENCE":
-            # Must resolve to existing fact in current fragment or prior staged entities
-            if not fact_chunks and not external_node_types:
+            # The batch may repeat a committed fact without extracting a new node.
+            if not fact_chunks and not external_node_types and not prior_fact_available:
                 issues.append(
                     ValidationIssue(
                         code="DUPLICATE_WITHOUT_PRIOR_FACT",
@@ -196,6 +250,7 @@ def validate_coverage_integrity(
                     retryable=True,
                 )
             )
+    issues.extend(_validate_list_item_representation(fragment, chunk_by_index.values()))
     return issues
 
 
@@ -409,6 +464,7 @@ class OntologyRegistry:
         fragment: GraphPatchFragment,
         chunks: Iterable[PreparedChunk],
         external_node_types: dict[str, str] | None = None,
+        prior_fact_available: bool = False,
     ) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         chunk_by_index = {chunk.chunk_index: chunk for chunk in chunks}
@@ -432,12 +488,17 @@ class OntologyRegistry:
                 fragment,
                 chunk_by_index.values(),
                 external_node_types=external_node_types,
+                prior_fact_available=prior_fact_available,
             )
         )
 
         # 3. Kiểm tra tính hợp lệ của từng Thực thể (Node) và các Thuộc tính (Properties)
         node_types: dict[str, str] = dict(external_node_types or {})
         for node_index, node in enumerate(fragment.nodes):
+            inherited_identity = (
+                node.temp_id in node_types
+                or f"entity:{node.temp_id}" in node_types
+            )
             node_types[node.temp_id] = node.class_name
             if node.class_name not in self.entity_types:
                 issues.append(
@@ -462,7 +523,7 @@ class OntologyRegistry:
                                 location=f"nodes.{node_index}.identity.{field}",
                             )
                         )
-                    elif field not in supplied_properties:
+                    elif not inherited_identity and field not in supplied_properties:
                         issues.append(
                             ValidationIssue(
                                 code="IDENTITY_SOURCE_PROPERTY_MISSING",
@@ -471,7 +532,7 @@ class OntologyRegistry:
                                 retryable=True,
                             )
                         )
-                    else:
+                    elif field in supplied_properties:
                         source_value = next(
                             fact.value for fact in node.properties
                             if fact.property_name == field

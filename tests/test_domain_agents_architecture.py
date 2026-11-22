@@ -5,12 +5,16 @@ from types import SimpleNamespace
 from google.genai import types
 
 from app.agent.agent import root_agent
+from app.agent.domains.chatchit.agent import create_chatchit_agent
 from app.agent.domains.calculate.agent import create_calculation_agent
 from app.agent.domains.graph_qa.agent import create_graph_qa_agent
 from app.agent.domains.ingestion.agent import create_ingestion_agent
 from app.agent.domains.ingestion.context_filter import (
     compact_ingestion_before_model,
 )
+from app.agent.routing.clef_router import VALID_ROUTES
+from app.agent.routing.hybrid_root_agent import DIRECT_ROUTES
+from app.agent.routing.routing_agent import create_llm_fallback_agent
 from app.agent.routing.tools import ask_clarifying_question
 from app.agent.tools.calculation import add, divide, multiply, subtract
 
@@ -46,6 +50,17 @@ def test_root_router_structure():
     assert root_agent.name == "root_agent"
     sub_agent_names = [a.name for a in root_agent.sub_agents]
     assert sub_agent_names == ["llm_fallback_router"]
+
+
+def test_chatchit_agent_is_available_to_the_router():
+    agent = create_chatchit_agent()
+    assert agent.name == "CHATCHIT_AGENT"
+    assert agent.tools == [] or agent.tools is None
+    assert "CHATCHIT_AGENT" in VALID_ROUTES
+    assert "CHATCHIT_AGENT" in DIRECT_ROUTES
+    assert "CHATCHIT_AGENT" in {
+        sub_agent.name for sub_agent in create_llm_fallback_agent().sub_agents
+    }
 
 
 def test_calculation_agent_sequential_structure():
@@ -84,11 +99,16 @@ def test_graph_qa_agent_sequential_structure():
 
 
 def test_ingestion_agent_structure():
-    """Kiểm tra INGESTION_AGENT giữ nguyên cơ chế SkillToolset và callback."""
+    """INGESTION_AGENT chỉ exposes tool ingestion đã được nạp trực tiếp."""
     ing_agent = create_ingestion_agent()
     assert ing_agent.name == "INGESTION_AGENT"
-    assert len(ing_agent.tools) == 1
-    assert type(ing_agent.tools[0]).__name__ == "SkillToolset"
+    tool_names = {
+        getattr(tool, "name", getattr(tool, "__name__", None))
+        for tool in ing_agent.tools
+    }
+    assert "ingestion_batch_agent" in tool_names
+    assert "load_skill" not in tool_names
+    assert "load_active_schema_context" not in tool_names
     assert ing_agent.before_model_callback == compact_ingestion_before_model
 
 
@@ -101,11 +121,11 @@ def test_compact_ingestion_before_model():
         ),
         types.Content(
             role="model",
-            parts=[types.Part(function_call=types.FunctionCall(name="load_skill", args={}))],
+            parts=[types.Part(function_call=types.FunctionCall(name="begin_ingestion", args={}))],
         ),
         types.Content(
             role="user",
-            parts=[types.Part(function_response=types.FunctionResponse(name="load_skill", response={}))],
+            parts=[types.Part(function_response=types.FunctionResponse(name="begin_ingestion", response={}))],
         ),
         types.Content(
             role="model",

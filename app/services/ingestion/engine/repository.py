@@ -38,17 +38,20 @@ Các hàm helper tiện ích đã được tách sang module ngoài: `app.utils.
 """
 
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, text
+from pydantic import BaseModel
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.enums import IngestionJobStatus, SourceVersionStatus
 from app.models import (
     IngestionCommitApproval,
+    IngestionEntityResolutionReview,
     IngestionFactConflict,
     IngestionKnowledgeRevision,
     IngestionWorkspaceCheckpoint,
@@ -74,10 +77,18 @@ from app.utils.ingestion_helpers import (
 MAPPER_VERSION = "taekwondo-mapper-v2"
 
 
+def _json_object(value: BaseModel | Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Serialize a Pydantic fragment while preserving already-serialized input."""
+    if value is None:
+        return None
+    if isinstance(value, BaseModel):
+        return value.model_dump(by_alias=True, mode="json")
+    return dict(value)
+
+
 # ==============================================================================
 # CLASS INGESTION REPOSITORY
 # ==============================================================================
-
 
 class IngestionRepository:
     """Lớp quản lý lưu trữ workspace nạp tài liệu trong bộ nhớ RAM (Process-local Workspace Store).
@@ -97,10 +108,7 @@ class IngestionRepository:
     # Đầu ra: Đối tượng IngestionRepository.
     # --------------------------------------------------------------------------
     def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession] | None = None,
-        *_: Any,
-        **__: Any,
+        self, session_factory: async_sessionmaker[AsyncSession] | None = None, *_: Any, **__: Any
     ) -> None:
         self._session_factory = session_factory
         self._workspaces: dict[str, Workspace] = {}
@@ -108,6 +116,7 @@ class IngestionRepository:
         self._document_current_version: dict[str, uuid.UUID] = {}
         self._local_revision = 0
         self._local_conflicts: dict[str, list[dict[str, Any]]] = {}
+        self._local_entity_reviews: dict[str, list[dict[str, Any]]] = {}
 
     # --------------------------------------------------------------------------
     # Tạo mới hoặc tái sử dụng workspace ingestion còn tồn tại trong tiến trình hiện tại.
@@ -269,9 +278,7 @@ class IngestionRepository:
         if workspace is not None or self._session_factory is None:
             return workspace
         async with self._session_factory() as session:
-            row = await session.get(
-                IngestionWorkspaceCheckpoint, uuid.UUID(str(ingestion_id))
-            )
+            row = await session.get(IngestionWorkspaceCheckpoint, uuid.UUID(str(ingestion_id)))
         if row is None:
             return None
         workspace = _workspace_from_payload(row.payload)
@@ -294,27 +301,12 @@ class IngestionRepository:
     ) -> list[Workspace]:
         if self._session_factory is not None:
             async with self._session_factory() as session:
-                rows = list(
-                    (
-                        await session.scalars(
-                            select(IngestionWorkspaceCheckpoint)
-                            .where(
-                                IngestionWorkspaceCheckpoint.payload["job"][
-                                    "status"
-                                ].as_string()
-                                == "COMMITTED"
-                            )
-                            .order_by(IngestionWorkspaceCheckpoint.updated_at.desc())
-                            .limit(limit)
-                        )
-                    ).all()
-                )
-            return [
-                item
-                for row in rows
-                if (item := _workspace_from_payload(row.payload))
-                and (document_id is None or str(item.document.id) == document_id)
-            ]
+                rows = list((await session.scalars(select(IngestionWorkspaceCheckpoint).where(
+                    IngestionWorkspaceCheckpoint.payload["job"]["status"].as_string() == "COMMITTED"
+                ).order_by(IngestionWorkspaceCheckpoint.updated_at.desc()).limit(limit))).all())
+            return [item for row in rows
+                    if (item := _workspace_from_payload(row.payload))
+                    and (document_id is None or str(item.document.id) == document_id)]
         workspaces = [
             item
             for item in self._workspaces.values()
@@ -378,19 +370,10 @@ class IngestionRepository:
         attempts = batch.validation_attempts + 1
         terminal = bool(issues) and attempts > max_attempts
 
-        def _dump_fragment(val: Any) -> dict | None:
-            if val is None:
-                return None
-            if hasattr(val, "model_dump"):
-                return getattr(val, "model_dump")(by_alias=True, mode="json")
-            if isinstance(val, dict):
-                return val
-            return None
-
         if not issues and fragment is not None:
-            baseline_dict = _dump_fragment(fragment)
+            baseline_dict = _json_object(fragment)
         elif validated_baseline is not None:
-            baseline_dict = _dump_fragment(validated_baseline)
+            baseline_dict = _json_object(validated_baseline)
         else:
             baseline_dict = batch.validated_baseline
 
@@ -399,8 +382,8 @@ class IngestionRepository:
             validation_attempts=attempts,
             validation_issues=issues,
             merged_schema_hash=merged_schema_hash,
-            semantic_fragment=_dump_fragment(semantic_fragment),
-            graph_fragment=_dump_fragment(fragment),
+            semantic_fragment=_json_object(semantic_fragment),
+            graph_fragment=_json_object(fragment),
             validated_baseline=baseline_dict,
             status="FAILED" if terminal else "REPAIR_REQUIRED" if issues else "STAGED",
             scope_keys=[item["scopeKey"] for item in scope_bindings],
@@ -458,7 +441,7 @@ class IngestionRepository:
         workspace = await self.get_workspace(ingestion_id)
         if workspace is None:
             raise KeyError(ingestion_id)
-        restarted = []
+        restarted: list[IngestionBatchData] = []
         for batch in workspace.batches:
             if batch.batch_index < batch_index:
                 restarted.append(batch)
@@ -608,12 +591,7 @@ class IngestionRepository:
         workspace.job.stage = "committed"
         workspace.job.error_stage = None
         workspace.job.error_message = None
-        workspace.job.summary = {
-            **workspace.job.summary,
-            **summary,
-            "committedAt": now,
-            "commitPhase": "COMMITTED",
-        }
+        workspace.job.summary = {**workspace.job.summary, **summary, "committedAt": now, "commitPhase": "COMMITTED"}
         workspace = self._replace_version_status(
             workspace, SourceVersionStatus.COMMITTED
         )
@@ -629,17 +607,12 @@ class IngestionRepository:
         self._workspaces[str(workspace.job.id)] = workspace
         return await self._save(workspace)
 
-    async def store_preview(
-        self, ingestion_id: str, report: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def store_preview(self, ingestion_id: str, report: dict[str, Any]) -> dict[str, Any]:
         workspace = self._required(ingestion_id)
         if workspace.job.status not in {
-            IngestionJobStatus.READY,
-            IngestionJobStatus.AWAITING_COMMIT_APPROVAL,
+            IngestionJobStatus.READY, IngestionJobStatus.AWAITING_COMMIT_APPROVAL
         }:
-            raise RuntimeError(
-                "Finalize all batches before creating an ingestion preview"
-            )
+            raise RuntimeError("Finalize all batches before creating an ingestion preview")
         workspace.job.status = IngestionJobStatus.AWAITING_COMMIT_APPROVAL
         workspace.job.stage = "awaiting_commit_approval"
         workspace.job.summary = {
@@ -652,11 +625,7 @@ class IngestionRepository:
         return await self.get_preview(ingestion_id)
 
     async def record_runtime_metadata(
-        self,
-        ingestion_id: str,
-        *,
-        model_assignments: dict[str, str],
-        contract_hash: str,
+        self, ingestion_id: str, *, model_assignments: dict[str, str], contract_hash: str
     ) -> Workspace:
         """Persist the execution configuration that produced the staged data."""
         workspace = self._required(ingestion_id)
@@ -673,43 +642,62 @@ class IngestionRepository:
         if not isinstance(report, dict):
             raise RuntimeError("No ingestion preview exists")
         conflicts = await self.list_fact_conflicts(ingestion_id)
-        digest = dict_digest(
-            {
-                "report": report,
-                "decisions": [
-                    {
-                        "id": item["conflictId"],
-                        "decision": item["decision"],
-                        "note": item.get("note"),
-                    }
-                    for item in conflicts
-                ],
-            }
-        )
+        entity_reviews = await self.list_entity_resolution_reviews(ingestion_id)
+        digest = dict_digest({
+            "report": report,
+            "decisions": [
+                {"id": item["conflictId"], "decision": item["decision"], "note": item.get("note")}
+                for item in conflicts
+            ],
+            "entityDecisions": [
+                {"id": item["reviewId"], "decision": item["decision"], "note": item.get("note")}
+                for item in entity_reviews
+            ],
+        })
         workspace.job.summary["reportDigest"] = digest
         await self._save(workspace)
+        review_by_extracted = {
+            item["extractedKey"]: item
+            for item in entity_reviews
+        }
+        entity_resolutions = [
+            {
+                **item,
+                "reviewId": review_by_extracted.get(item.get("extractedKey"), {}).get("reviewId"),
+                "reviewDecision": review_by_extracted.get(item.get("extractedKey"), {}).get("decision"),
+            }
+            for item in report.get("entityResolutions", [])
+        ]
+        pending_entity_review_count = sum(
+            item["decision"] == "PENDING" for item in entity_reviews
+        )
+        pending_conflict_count = sum(
+            item["decision"] == "PENDING" for item in conflicts
+        )
         return {
             "success": True,
             "stage": "awaiting_commit_approval",
             "terminal": False,
             "status": IngestionJobStatus.AWAITING_COMMIT_APPROVAL.value,
-            "nextAction": "review_preview_and_confirm",
+            "nextAction": (
+                "review_entity_resolutions"
+                if pending_entity_review_count
+                else "review_ingestion_conflicts"
+                if pending_conflict_count
+                else "confirm_and_commit"
+            ),
             **report,
+            "entityResolutions": entity_resolutions,
             "reportDigest": digest,
             "conflicts": conflicts,
-            "pendingConflictCount": sum(
-                item["decision"] == "PENDING" for item in conflicts
-            ),
+            "pendingConflictCount": pending_conflict_count,
+            "pendingEntityReviewCount": pending_entity_review_count,
+            "pendingReviewCount": pending_conflict_count + pending_entity_review_count,
         }
 
     async def record_commit_approval(
-        self,
-        ingestion_id: str,
-        report_digest: str,
-        *,
-        user_id: str,
-        session_id: str,
-        function_call_id: str,
+        self, ingestion_id: str, report_digest: str, *, user_id: str,
+        session_id: str, function_call_id: str,
     ) -> None:
         workspace = await self.get_workspace(ingestion_id)
         if workspace is None:
@@ -721,19 +709,17 @@ class IngestionRepository:
             raise ValueError("Preview changed; review the new report before committing")
         if preview["pendingConflictCount"]:
             raise ValueError("Every conflict needs CONFIRM, REJECT, or OTHER")
+        if preview["pendingEntityReviewCount"]:
+            raise ValueError("Every entity resolution needs REUSE or DISTINCT")
         if not user_id or not session_id or not function_call_id:
-            raise PermissionError("Trusted ADK confirmation context is required")
+            raise PermissionError("User and session context are required")
         if self._session_factory is not None:
             async with self._session_factory() as session, session.begin():
-                session.add(
-                    IngestionCommitApproval(
-                        ingestion_id=uuid.UUID(ingestion_id),
-                        report_digest=report_digest,
-                        user_id=user_id,
-                        session_id=session_id,
-                        function_call_id=function_call_id,
-                    )
-                )
+                session.add(IngestionCommitApproval(
+                    ingestion_id=uuid.UUID(ingestion_id), report_digest=report_digest,
+                    user_id=user_id, session_id=session_id,
+                    function_call_id=function_call_id,
+                ))
         workspace.job.summary["approvedDigest"] = report_digest
         workspace.job.summary["approvalUserId"] = user_id
         await self._save(workspace)
@@ -745,14 +731,10 @@ class IngestionRepository:
         if self._session_factory is None:
             return True
         async with self._session_factory() as session:
-            row = await session.scalar(
-                select(IngestionCommitApproval)
-                .where(
-                    IngestionCommitApproval.ingestion_id == uuid.UUID(ingestion_id),
-                    IngestionCommitApproval.report_digest == report_digest,
-                )
-                .order_by(IngestionCommitApproval.confirmed_at.desc())
-            )
+            row = await session.scalar(select(IngestionCommitApproval).where(
+                IngestionCommitApproval.ingestion_id == uuid.UUID(ingestion_id),
+                IngestionCommitApproval.report_digest == report_digest,
+            ).order_by(IngestionCommitApproval.confirmed_at.desc()))
             return row is not None
 
     async def set_commit_phase(self, ingestion_id: str, phase: str) -> Workspace:
@@ -773,21 +755,17 @@ class IngestionRepository:
         workspace.job.summary.pop("preview", None)
         workspace.job.summary.pop("reportDigest", None)
         workspace = await self._save(workspace)
-        signature = next(
-            (key for key, value in self._by_signature.items() if value == ingestion_id),
-            None,
-        )
+        signature = next((key for key, value in self._by_signature.items()
+                          if value == ingestion_id), None)
         if signature is not None:
             self._by_signature.pop(signature, None)
             if self._session_factory is not None:
                 async with self._session_factory() as session, session.begin():
-                    row = await session.get(
-                        IngestionWorkspaceCheckpoint, uuid.UUID(ingestion_id)
-                    )
+                    row = await session.get(IngestionWorkspaceCheckpoint, uuid.UUID(ingestion_id))
                     if row is not None:
-                        row.ingestion_signature = dict_digest(
-                            {"abortedSignature": signature, "jobId": ingestion_id}
-                        )
+                        row.ingestion_signature = dict_digest({
+                            "abortedSignature": signature, "jobId": ingestion_id
+                        })
         return workspace
 
     async def knowledge_revision(self) -> int:
@@ -799,22 +777,12 @@ class IngestionRepository:
 
     async def unfinished_commits(self) -> list[str]:
         if self._session_factory is None:
-            return [
-                key
-                for key, item in self._workspaces.items()
-                if item.job.status == IngestionJobStatus.COMMITTING
-            ]
+            return [key for key, item in self._workspaces.items()
+                    if item.job.status == IngestionJobStatus.COMMITTING]
         async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(IngestionWorkspaceCheckpoint).where(
-                        IngestionWorkspaceCheckpoint.payload["job"][
-                            "status"
-                        ].as_string()
-                        == "COMMITTING"
-                    )
-                )
-            ).all()
+            rows = (await session.scalars(select(IngestionWorkspaceCheckpoint).where(
+                IngestionWorkspaceCheckpoint.payload["job"]["status"].as_string() == "COMMITTING"
+            ))).all()
             return [str(row.job_id) for row in rows]
 
     async def advance_knowledge_revision(self, ingestion_id: str) -> int:
@@ -977,6 +945,7 @@ class IngestionRepository:
                         graph_fragment=None,
                         semantic_fragment=None,
                         validation_issues=[],
+                        validated_baseline=None,
                         merged_schema_hash=None,
                         scope_keys=[],
                         snapshot_hashes={},
@@ -1003,17 +972,11 @@ class IngestionRepository:
         await self._persist(workspace)
         return workspace
 
-    async def _persist(
-        self, workspace: Workspace, signature: str | None = None
-    ) -> None:
+    async def _persist(self, workspace: Workspace, signature: str | None = None) -> None:
         if self._session_factory is None:
             return
         signature = signature or next(
-            (
-                key
-                for key, value in self._by_signature.items()
-                if value == str(workspace.job.id)
-            ),
+            (key for key, value in self._by_signature.items() if value == str(workspace.job.id)),
             None,
         )
         if not signature:
@@ -1022,14 +985,12 @@ class IngestionRepository:
         async with self._session_factory() as session, session.begin():
             row = await session.get(IngestionWorkspaceCheckpoint, workspace.job.id)
             if row is None:
-                session.add(
-                    IngestionWorkspaceCheckpoint(
-                        job_id=workspace.job.id,
-                        ingestion_signature=signature,
-                        document_key=workspace.document.document_key,
-                        payload=payload,
-                    )
-                )
+                session.add(IngestionWorkspaceCheckpoint(
+                    job_id=workspace.job.id,
+                    ingestion_signature=signature,
+                    document_key=workspace.document.document_key,
+                    payload=payload,
+                ))
             else:
                 row.payload = payload
                 row.document_key = workspace.document.document_key
@@ -1038,11 +999,9 @@ class IngestionRepository:
         if self._session_factory is None:
             return None
         async with self._session_factory() as session:
-            row = await session.scalar(
-                select(IngestionWorkspaceCheckpoint).where(
-                    IngestionWorkspaceCheckpoint.ingestion_signature == signature
-                )
-            )
+            row = await session.scalar(select(IngestionWorkspaceCheckpoint).where(
+                IngestionWorkspaceCheckpoint.ingestion_signature == signature
+            ))
         if row is None:
             return None
         workspace = _workspace_from_payload(row.payload)
@@ -1050,35 +1009,19 @@ class IngestionRepository:
         self._by_signature[signature] = str(workspace.job.id)
         return str(workspace.job.id)
 
-    async def _current_version(
-        self, document_key: str, *, fresh: bool = False
-    ) -> uuid.UUID | None:
+    async def _current_version(self, document_key: str, *, fresh: bool = False) -> uuid.UUID | None:
         cached = self._document_current_version.get(document_key)
         if not fresh and (cached is not None or self._session_factory is None):
             return cached
         if self._session_factory is None:
-            current = next(
-                (
-                    item.version.id
-                    for item in reversed(list(self._workspaces.values()))
-                    if item.document.document_key == document_key
-                    and item.version.status == SourceVersionStatus.COMMITTED
-                ),
-                None,
-            )
+            current = next((item.version.id for item in reversed(list(self._workspaces.values()))
+                            if item.document.document_key == document_key
+                            and item.version.status == SourceVersionStatus.COMMITTED), None)
             return current
         async with self._session_factory() as session:
-            rows = list(
-                (
-                    await session.scalars(
-                        select(IngestionWorkspaceCheckpoint)
-                        .where(
-                            IngestionWorkspaceCheckpoint.document_key == document_key
-                        )
-                        .order_by(IngestionWorkspaceCheckpoint.updated_at.desc())
-                    )
-                ).all()
-            )
+            rows = list((await session.scalars(select(IngestionWorkspaceCheckpoint).where(
+                IngestionWorkspaceCheckpoint.document_key == document_key
+            ).order_by(IngestionWorkspaceCheckpoint.updated_at.desc()))).all())
         for row in rows:
             workspace = _workspace_from_payload(row.payload)
             if workspace.version.status == SourceVersionStatus.COMMITTED:
@@ -1089,14 +1032,11 @@ class IngestionRepository:
 
     async def refresh_document_current(self, ingestion_id: str) -> Workspace:
         workspace = self._required(ingestion_id)
-        current_id = await self._current_version(
-            workspace.document.document_key, fresh=True
-        )
+        current_id = await self._current_version(workspace.document.document_key, fresh=True)
         if current_id != workspace.document.current_version_id:
-            workspace = replace(
-                workspace,
-                document=replace(workspace.document, current_version_id=current_id),
-            )
+            workspace = replace(workspace, document=replace(
+                workspace.document, current_version_id=current_id
+            ))
             await self._save(workspace)
         return workspace
 
@@ -1104,33 +1044,20 @@ class IngestionRepository:
         """Retain the old checkpoint while removing it from the current view."""
         if self._session_factory is None:
             for item in self._workspaces.values():
-                if (
-                    item.document.document_key == document_key
-                    and str(item.version.id) == version_id
-                ):
-                    updated = self._replace_version_status(
-                        item, SourceVersionStatus.SUPERSEDED
-                    )
+                if item.document.document_key == document_key and str(item.version.id) == version_id:
+                    updated = self._replace_version_status(item, SourceVersionStatus.SUPERSEDED)
                     self._workspaces[str(updated.job.id)] = updated
                     return
             return
         async with self._session_factory() as session, session.begin():
-            rows = list(
-                (
-                    await session.scalars(
-                        select(IngestionWorkspaceCheckpoint).where(
-                            IngestionWorkspaceCheckpoint.document_key == document_key
-                        )
-                    )
-                ).all()
-            )
+            rows = list((await session.scalars(select(IngestionWorkspaceCheckpoint).where(
+                IngestionWorkspaceCheckpoint.document_key == document_key
+            ))).all())
             for row in rows:
                 item = _workspace_from_payload(row.payload)
                 if str(item.version.id) != version_id:
                     continue
-                updated = self._replace_version_status(
-                    item, SourceVersionStatus.SUPERSEDED
-                )
+                updated = self._replace_version_status(item, SourceVersionStatus.SUPERSEDED)
                 row.payload = _workspace_payload(updated)
                 self._workspaces[str(updated.job.id)] = updated
                 self._by_signature[row.ingestion_signature] = str(updated.job.id)
@@ -1141,92 +1068,252 @@ class IngestionRepository:
     ) -> list[dict[str, Any]]:
         """Upsert conflict candidates created by a committed document version."""
         if self._session_factory is None:
-            old = {
-                item["conflictId"]: item
-                for item in self._local_conflicts.get(ingestion_id, [])
-            }
+            old = {item["conflictId"]: item for item in self._local_conflicts.get(ingestion_id, [])}
             rows = []
             for item in conflicts:
-                conflict_id = str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL, f"{item['newFactId']}:{item['oldFactId']}"
-                    )
-                )
-                rows.append(
-                    {
-                        "conflictId": conflict_id,
-                        "ingestionId": ingestion_id,
-                        "decision": old.get(conflict_id, {}).get("decision", "PENDING"),
-                        "note": old.get(conflict_id, {}).get("note"),
-                        **item,
-                    }
-                )
+                conflict_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{item['newFactId']}:{item['oldFactId']}"))
+                rows.append({"conflictId": conflict_id, "ingestionId": ingestion_id,
+                             "decision": old.get(conflict_id, {}).get("decision", "PENDING"),
+                             "note": old.get(conflict_id, {}).get("note"), **item})
             self._local_conflicts[ingestion_id] = rows
             return rows
         async with self._session_factory() as session, session.begin():
             persisted: list[dict[str, Any]] = []
             pairs = {(item["newFactId"], item["oldFactId"]) for item in conflicts}
-            old_rows = list(
-                (
-                    await session.scalars(
-                        select(IngestionFactConflict).where(
-                            IngestionFactConflict.ingestion_id
-                            == uuid.UUID(ingestion_id)
-                        )
-                    )
-                ).all()
-            )
+            old_rows = list((await session.scalars(select(IngestionFactConflict).where(
+                IngestionFactConflict.ingestion_id == uuid.UUID(ingestion_id)
+            ))).all())
             for old in old_rows:
                 if (old.new_fact_id, old.old_fact_id) not in pairs:
                     await session.delete(old)
             for details in conflicts:
-                row = await session.scalar(
-                    select(IngestionFactConflict).where(
-                        IngestionFactConflict.new_fact_id == details["newFactId"],
-                        IngestionFactConflict.old_fact_id == details["oldFactId"],
-                    )
-                )
+                row = await session.scalar(select(IngestionFactConflict).where(
+                    IngestionFactConflict.new_fact_id == details["newFactId"],
+                    IngestionFactConflict.old_fact_id == details["oldFactId"],
+                ))
                 if row is None:
                     row = IngestionFactConflict(
-                        ingestion_id=uuid.UUID(ingestion_id),
-                        new_fact_id=details["newFactId"],
-                        old_fact_id=details["oldFactId"],
-                        details=details,
+                        ingestion_id=uuid.UUID(ingestion_id), new_fact_id=details["newFactId"],
+                        old_fact_id=details["oldFactId"], details=details,
                     )
                     session.add(row)
                     await session.flush()
                 else:
                     row.details = details
-                persisted.append(
-                    {"conflictId": str(row.id), "decision": row.decision, **row.details}
-                )
+                persisted.append({"conflictId": str(row.id), "decision": row.decision, **row.details})
             return persisted
+
+    async def record_entity_resolution_reviews(
+        self, ingestion_id: str, reviews: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Upsert only semantic candidates that require a human decision."""
+        if self._session_factory is None:
+            old = {(row["extractedKey"], row["candidateKey"]): row
+                   for row in self._local_entity_reviews.get(ingestion_id, [])}
+            rows = []
+            for item in reviews:
+                pair = (item["extractedKey"], item["canonicalKey"])
+                previous = old.get(pair, {})
+                rows.append({**item, "candidateKey": item["canonicalKey"],
+                             "reviewId": previous.get("reviewId", str(uuid.uuid5(uuid.NAMESPACE_URL, ":".join(pair)))),
+                             "decision": previous.get("decision", "PENDING")})
+            self._local_entity_reviews[ingestion_id] = rows
+            return rows
+        async with self._session_factory() as session, session.begin():
+            persisted = []
+            pairs = {
+                (item["extractedKey"], item["canonicalKey"])
+                for item in reviews
+            }
+            old_rows = list((await session.scalars(select(
+                IngestionEntityResolutionReview
+            ).where(
+                IngestionEntityResolutionReview.ingestion_id == uuid.UUID(ingestion_id)
+            ))).all())
+            for old in old_rows:
+                if (old.extracted_key, old.candidate_key) not in pairs:
+                    await session.delete(old)
+            for item in reviews:
+                row = await session.scalar(select(IngestionEntityResolutionReview).where(
+                    IngestionEntityResolutionReview.ingestion_id == uuid.UUID(ingestion_id),
+                    IngestionEntityResolutionReview.extracted_key == item["extractedKey"],
+                    IngestionEntityResolutionReview.candidate_key == item["canonicalKey"],
+                ))
+                if row is None:
+                    row = IngestionEntityResolutionReview(
+                        ingestion_id=uuid.UUID(ingestion_id), extracted_key=item["extractedKey"],
+                        candidate_key=item["canonicalKey"], details=item,
+                    )
+                    session.add(row)
+                    await session.flush()
+                else:
+                    row.details = item
+                persisted.append({**item, "candidateKey": item["canonicalKey"],
+                                  "reviewId": str(row.id), "decision": row.decision})
+            return persisted
+
+    async def list_entity_resolution_reviews(
+        self, ingestion_id: str
+    ) -> list[dict[str, Any]]:
+        if self._session_factory is None:
+            return list(self._local_entity_reviews.get(ingestion_id, []))
+        async with self._session_factory() as session:
+            rows = list((await session.scalars(select(
+                IngestionEntityResolutionReview
+            ).where(
+                IngestionEntityResolutionReview.ingestion_id == uuid.UUID(ingestion_id)
+            ).order_by(IngestionEntityResolutionReview.created_at))).all())
+        return [
+            {
+                **row.details,
+                "reviewId": str(row.id),
+                "ingestionId": str(row.ingestion_id),
+                "extractedKey": row.extracted_key,
+                "candidateKey": row.candidate_key,
+                "decision": row.decision,
+                "note": row.note,
+            }
+            for row in rows
+        ]
+
+    async def pending_entity_resolution_reviews(self, ingestion_id: str) -> int:
+        if self._session_factory is None:
+            return sum(row.get("decision") == "PENDING" for row in self._local_entity_reviews.get(ingestion_id, []))
+        async with self._session_factory() as session:
+            return int((await session.scalar(select(func.count()).select_from(IngestionEntityResolutionReview).where(
+                IngestionEntityResolutionReview.ingestion_id == uuid.UUID(ingestion_id),
+                IngestionEntityResolutionReview.decision == "PENDING",
+            ))) or 0)
+
+    async def review_entity_resolution(
+        self, review_id: str, decision: str, note: str | None = None
+    ) -> dict[str, Any]:
+        normalized = decision.strip().upper()
+        if normalized not in {"REUSE", "DISTINCT"}:
+            raise ValueError("decision must be REUSE or DISTINCT")
+        if self._session_factory is None:
+            for ingestion_id, rows in self._local_entity_reviews.items():
+                for row in rows:
+                    if row["reviewId"] == review_id:
+                        row["decision"], row["note"] = normalized, note
+                        workspace = self._required(ingestion_id)
+                        workspace.job.summary["approvedDigest"] = None
+                        return row
+            raise KeyError(review_id)
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(
+                IngestionEntityResolutionReview,
+                uuid.UUID(review_id),
+                with_for_update=True,
+            )
+            if row is None:
+                raise KeyError(review_id)
+            row.decision = normalized
+            row.note = note
+            row.reviewed_at = datetime.now(timezone.utc)
+            result = {
+                **row.details,
+                "reviewId": str(row.id),
+                "ingestionId": str(row.ingestion_id),
+                "extractedKey": row.extracted_key,
+                "candidateKey": row.candidate_key,
+                "decision": row.decision,
+                "note": row.note,
+            }
+        workspace = await self.get_workspace(str(row.ingestion_id))
+        if workspace:
+            workspace.job.summary["approvedDigest"] = None
+            await self._save(workspace)
+        return result
+
+    async def review_entity_resolutions(
+        self, ingestion_id: str, decision: str, note: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Apply one human decision to every pending entity review."""
+        normalized = decision.strip().upper()
+        if normalized not in {"REUSE", "DISTINCT"}:
+            raise ValueError("decision must be REUSE or DISTINCT")
+        if self._session_factory is None:
+            rows = [
+                row
+                for row in self._local_entity_reviews.get(ingestion_id, [])
+                if row.get("decision") == "PENDING"
+            ]
+            for row in rows:
+                row["decision"], row["note"] = normalized, note
+            if rows:
+                workspace = self._required(ingestion_id)
+                workspace.job.summary["approvedDigest"] = None
+                await self._save(workspace)
+            return rows
+        async with self._session_factory() as session, session.begin():
+            rows = list((await session.scalars(
+                select(IngestionEntityResolutionReview).where(
+                    IngestionEntityResolutionReview.ingestion_id
+                    == uuid.UUID(ingestion_id),
+                    IngestionEntityResolutionReview.decision == "PENDING",
+                ).with_for_update()
+            )).all())
+            now = datetime.now(timezone.utc)
+            for row in rows:
+                row.decision = normalized
+                row.note = note
+                row.reviewed_at = now
+            result = [
+                {
+                    **row.details,
+                    "reviewId": str(row.id),
+                    "ingestionId": str(row.ingestion_id),
+                    "extractedKey": row.extracted_key,
+                    "candidateKey": row.candidate_key,
+                    "decision": normalized,
+                    "note": note,
+                }
+                for row in rows
+            ]
+        if result:
+            workspace = await self.get_workspace(ingestion_id)
+            if workspace:
+                workspace.job.summary["approvedDigest"] = None
+                await self._save(workspace)
+        return result
+
+    async def entity_resolution_review_exists(self, review_id: str) -> bool:
+        try:
+            parsed = uuid.UUID(review_id)
+        except (TypeError, ValueError):
+            return False
+        if self._session_factory is None:
+            return any(
+                row.get("reviewId") == review_id
+                for rows in self._local_entity_reviews.values()
+                for row in rows
+            )
+        async with self._session_factory() as session:
+            return await session.get(IngestionEntityResolutionReview, parsed) is not None
+
+    async def fact_conflict_exists(self, conflict_id: str) -> bool:
+        try:
+            parsed = uuid.UUID(conflict_id)
+        except (TypeError, ValueError):
+            return False
+        if self._session_factory is None:
+            return any(
+                row.get("conflictId") == conflict_id
+                for rows in self._local_conflicts.values()
+                for row in rows
+            )
+        async with self._session_factory() as session:
+            return await session.get(IngestionFactConflict, parsed) is not None
 
     async def list_fact_conflicts(self, ingestion_id: str) -> list[dict[str, Any]]:
         if self._session_factory is None:
             return list(self._local_conflicts.get(ingestion_id, []))
         async with self._session_factory() as session:
-            rows = list(
-                (
-                    await session.scalars(
-                        select(IngestionFactConflict)
-                        .where(
-                            IngestionFactConflict.ingestion_id
-                            == uuid.UUID(ingestion_id)
-                        )
-                        .order_by(IngestionFactConflict.created_at)
-                    )
-                ).all()
-            )
-        return [
-            {
-                "conflictId": str(row.id),
-                "decision": row.decision,
-                "note": row.note,
-                **row.details,
-            }
-            for row in rows
-        ]
+            rows = list((await session.scalars(select(IngestionFactConflict).where(
+                IngestionFactConflict.ingestion_id == uuid.UUID(ingestion_id)
+            ).order_by(IngestionFactConflict.created_at))).all())
+        return [{"conflictId": str(row.id), "decision": row.decision, "note": row.note, **row.details} for row in rows]
 
     async def review_fact_conflict(
         self, conflict_id: str, decision: str, note: str | None = None
@@ -1248,28 +1335,67 @@ class IngestionRepository:
                         return row
             raise KeyError(conflict_id)
         async with self._session_factory() as session, session.begin():
-            row = await session.get(
-                IngestionFactConflict, uuid.UUID(conflict_id), with_for_update=True
-            )
+            row = await session.get(IngestionFactConflict, uuid.UUID(conflict_id), with_for_update=True)
             if row is None:
                 raise KeyError(conflict_id)
-            row.decision, row.note, row.reviewed_at = (
-                normalized,
-                note,
-                datetime.now(timezone.utc),
-            )
-            result = {
-                "conflictId": str(row.id),
-                "ingestionId": str(row.ingestion_id),
-                "decision": row.decision,
-                "note": row.note,
-                **row.details,
-            }
+            row.decision, row.note, row.reviewed_at = normalized, note, datetime.now(timezone.utc)
+            result = {"conflictId": str(row.id), "ingestionId": str(row.ingestion_id), "decision": row.decision, "note": row.note, **row.details}
         workspace = await self.get_workspace(str(row.ingestion_id))
         if workspace and workspace.job.summary.get("preview"):
             workspace.job.summary["approvedDigest"] = None
             await self._save(workspace)
             await self.get_preview(str(row.ingestion_id))
+        return result
+
+    async def review_fact_conflicts(
+        self, ingestion_id: str, decision: str, note: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Apply one human decision to every pending fact conflict."""
+        normalized = decision.strip().upper()
+        if normalized not in {"CONFIRM", "REJECT", "OTHER"}:
+            raise ValueError("decision must be CONFIRM, REJECT, or OTHER")
+        if normalized == "OTHER" and not (note or "").strip():
+            raise ValueError("OTHER requires a note explaining the unresolved conflict")
+        if self._session_factory is None:
+            rows = [
+                row
+                for row in self._local_conflicts.get(ingestion_id, [])
+                if row.get("decision") == "PENDING"
+            ]
+            for row in rows:
+                row["decision"], row["note"] = normalized, note
+            if rows:
+                workspace = self._required(ingestion_id)
+                workspace.job.summary["approvedDigest"] = None
+                await self._save(workspace)
+            return rows
+        async with self._session_factory() as session, session.begin():
+            rows = list((await session.scalars(
+                select(IngestionFactConflict).where(
+                    IngestionFactConflict.ingestion_id == uuid.UUID(ingestion_id),
+                    IngestionFactConflict.decision == "PENDING",
+                ).with_for_update()
+            )).all())
+            now = datetime.now(timezone.utc)
+            for row in rows:
+                row.decision = normalized
+                row.note = note
+                row.reviewed_at = now
+            result = [
+                {
+                    "conflictId": str(row.id),
+                    "ingestionId": str(row.ingestion_id),
+                    "decision": normalized,
+                    "note": note,
+                    **row.details,
+                }
+                for row in rows
+            ]
+        if result:
+            workspace = await self.get_workspace(ingestion_id)
+            if workspace:
+                workspace.job.summary["approvedDigest"] = None
+                await self._save(workspace)
         return result
 
     # ==========================================================================
@@ -1361,7 +1487,6 @@ class IngestionRepository:
 
 def _workspace_payload(workspace: Workspace) -> dict[str, Any]:
     """Turn dataclasses into JSONB without losing UUIDs or enum values."""
-
     def convert(value: Any) -> Any:
         if isinstance(value, uuid.UUID):
             return str(value)
@@ -1372,7 +1497,6 @@ def _workspace_payload(workspace: Workspace) -> dict[str, Any]:
         if isinstance(value, (list, tuple)):
             return [convert(item) for item in value]
         return value
-
     return convert(asdict(workspace))
 
 
@@ -1383,65 +1507,40 @@ def _workspace_from_payload(payload: dict[str, Any]) -> Workspace:
     job = payload["job"]
     return Workspace(
         document=IngestionDocumentData(
-            id=uuid.UUID(document["id"]),
-            document_key=document["document_key"],
+            id=uuid.UUID(document["id"]), document_key=document["document_key"],
             name=document["name"],
             current_version_id=uuid.UUID(document["current_version_id"])
-            if document.get("current_version_id")
-            else None,
+            if document.get("current_version_id") else None,
         ),
         version=IngestionDocumentVersionData(
-            id=uuid.UUID(version["id"]),
-            document_id=uuid.UUID(version["document_id"]),
+            id=uuid.UUID(version["id"]), document_id=uuid.UUID(version["document_id"]),
             content_hash=version["content_hash"],
             ontology_version_id=uuid.UUID(version["ontology_version_id"]),
             ontology_digest=version["ontology_digest"],
             status=SourceVersionStatus(version["status"]),
         ),
         job=IngestionJobData(
-            id=uuid.UUID(job["id"]),
-            document_version_id=uuid.UUID(job["document_version_id"]),
+            id=uuid.UUID(job["id"]), document_version_id=uuid.UUID(job["document_version_id"]),
             ontology_version_id=uuid.UUID(job["ontology_version_id"]),
-            status=IngestionJobStatus(job["status"]),
-            stage=job["stage"],
-            scope_hint=job.get("scope_hint"),
-            readiness_fingerprint=job.get("readiness_fingerprint"),
-            error_stage=job.get("error_stage"),
-            error_message=job.get("error_message"),
+            status=IngestionJobStatus(job["status"]), stage=job["stage"],
+            scope_hint=job.get("scope_hint"), readiness_fingerprint=job.get("readiness_fingerprint"),
+            error_stage=job.get("error_stage"), error_message=job.get("error_message"),
             summary=job.get("summary") or {},
         ),
-        chunks=tuple(
-            IngestionChunkData(
-                id=uuid.UUID(item["id"]),
-                document_version_id=uuid.UUID(item["document_version_id"]),
-                chunk_id=item["chunk_id"],
-                chunk_index=item["chunk_index"],
-                text=item["text"],
-                content_hash=item["content_hash"],
-                token_count=item["token_count"],
-                section=item.get("section"),
-                page_start=item.get("page_start"),
-                page_end=item.get("page_end"),
-                source_anchor=item["source_anchor"],
-            )
-            for item in payload["chunks"]
-        ),
-        batches=tuple(
-            IngestionBatchData(
-                id=uuid.UUID(item["id"]),
-                job_id=uuid.UUID(item["job_id"]),
-                batch_index=item["batch_index"],
-                chunk_indexes=item["chunk_indexes"],
-                status=item["status"],
-                semantic_fragment=item.get("semantic_fragment"),
-                graph_fragment=item.get("graph_fragment"),
-                validation_issues=item.get("validation_issues") or [],
-                validation_attempts=item["validation_attempts"],
-                merged_schema_hash=item.get("merged_schema_hash"),
-                scope_keys=item.get("scope_keys") or [],
-                snapshot_hashes=item.get("snapshot_hashes") or {},
-                validated_baseline=item.get("validated_baseline"),
-            )
-            for item in payload["batches"]
-        ),
+        chunks=tuple(IngestionChunkData(
+            id=uuid.UUID(item["id"]), document_version_id=uuid.UUID(item["document_version_id"]),
+            chunk_id=item["chunk_id"], chunk_index=item["chunk_index"], text=item["text"],
+            content_hash=item["content_hash"], token_count=item["token_count"],
+            section=item.get("section"), page_start=item.get("page_start"),
+            page_end=item.get("page_end"), source_anchor=item["source_anchor"],
+        ) for item in payload["chunks"]),
+        batches=tuple(IngestionBatchData(
+            id=uuid.UUID(item["id"]), job_id=uuid.UUID(item["job_id"]),
+            batch_index=item["batch_index"], chunk_indexes=item["chunk_indexes"],
+            status=item["status"], semantic_fragment=item.get("semantic_fragment"),
+            graph_fragment=item.get("graph_fragment"), validation_issues=item.get("validation_issues") or [],
+            validation_attempts=item["validation_attempts"], merged_schema_hash=item.get("merged_schema_hash"),
+            scope_keys=item.get("scope_keys") or [], snapshot_hashes=item.get("snapshot_hashes") or {},
+            validated_baseline=item.get("validated_baseline"),
+        ) for item in payload["batches"]),
     )

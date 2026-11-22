@@ -57,7 +57,9 @@ async def ingest(path: Path, ingestion_id: str | None = None) -> dict:
             if not result.get("success"):
                 return result
             workspace = await operations.required_workspace(container.repository, str(workspace.job.id))
-        workspace = await operations.finalize(container.repository, str(workspace.job.id))
+        workspace = await operations.finalize(
+            container.repository, str(workspace.job.id), container.graph_store
+        )
         if workspace.job.status != "READY":
             return operations.status_payload(workspace)
         return await operations.build_preview(

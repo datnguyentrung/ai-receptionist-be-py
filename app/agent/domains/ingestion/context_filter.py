@@ -12,9 +12,8 @@ def compact_ingestion_context(contents: list[types.Content]) -> list[types.Conte
     Mục đích:
         - Giảm context window, token cost và nhiễu từ các batch cũ.
         - Giữ nguyên yêu cầu ban đầu của User.
-        - Giữ cặp Function Call/Response của load_skill.
-        - Giữ cặp Function Call/Response của ingestion_batch_agent gần nhất.
-        - Giữ toàn bộ nội dung phát sinh sau batch gần nhất.
+        - Giữ checkpoint workflow gần nhất và batch gần nhất.
+        - Giữ toàn bộ nội dung phát sinh sau checkpoint đó.
         - Bảo toàn thứ tự thời gian của các Content được giữ lại.
 
     Nguyên tắc:
@@ -36,10 +35,20 @@ def compact_ingestion_context(contents: list[types.Content]) -> list[types.Conte
                 if name in calls:
                     pairs[name] = (calls.pop(name), i)
 
-    batch = pairs.get("ingestion_batch_agent")
-
-    if not batch:
+    checkpoint_names = (
+        "begin_ingestion",
+        "ingestion_batch_agent",
+        "create_schema_proposal",
+        "review_schema_proposal",
+        "apply_schema_proposal",
+        "rebase_ingestion",
+        "finalize_ingestion",
+        "get_ingestion_status",
+    )
+    checkpoints = [pair for name, pair in pairs.items() if name in checkpoint_names]
+    if not checkpoints:
         return contents
+    checkpoint = max(checkpoints, key=lambda pair: pair[1])
 
     first_user = next(
         (
@@ -51,12 +60,15 @@ def compact_ingestion_context(contents: list[types.Content]) -> list[types.Conte
         None,
     )
 
-    keep = set(batch) | set(pairs.get("load_skill", ()))
+    keep = set(checkpoint)
+    latest_batch = pairs.get("ingestion_batch_agent")
+    if latest_batch is not None:
+        keep.update(latest_batch)
 
     if first_user is not None:
         keep.add(first_user)
 
-    return [c for i, c in enumerate(contents) if i in keep or i > batch[1]]
+    return [c for i, c in enumerate(contents) if i in keep or i > checkpoint[1]]
 
 
 def compact_ingestion_before_model(
@@ -67,7 +79,6 @@ def compact_ingestion_before_model(
     del callback_context
     if llm_request.contents:
         llm_request.contents = compact_ingestion_context(llm_request.contents)
-    return None
 
 
-__all__ = ["compact_ingestion_context", "compact_ingestion_before_model"]
+__all__ = ["compact_ingestion_before_model", "compact_ingestion_context"]

@@ -19,6 +19,7 @@ DIRECT_ROUTES = {
     "INGESTION_AGENT",
     "CALCULATION_AGENT",
     "GRAPH_QA_AGENT",
+    "CHATCHIT_AGENT",
 }
 
 FALLBACK_AGENT = "llm_fallback_router"
