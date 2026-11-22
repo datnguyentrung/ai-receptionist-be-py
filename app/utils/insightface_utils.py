@@ -29,6 +29,7 @@ os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 from insightface.app import FaceAnalysis
 
 from app.core.config import settings
+from app.utils.insightface_provider import resolve_execution_provider
 
 MODEL_DIR = os.path.abspath(
     os.environ.get(
@@ -43,58 +44,77 @@ active_execution_providers: tuple[str, ...] = ()
 logger = logging.getLogger(__name__)
 
 
+def _create_face_app(provider: str) -> FaceAnalysis:
+    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        app = FaceAnalysis(
+            name=settings.INSIGHTFACE_MODEL_NAME,
+            root=MODEL_DIR,
+            providers=[provider],
+        )
+        app.prepare(
+            ctx_id=0 if provider == "CUDAExecutionProvider" else -1,
+            det_size=(640, 640),
+        )
+    return app
+
+
+def _app_execution_providers(app: FaceAnalysis) -> tuple[str, ...]:
+    return tuple(sorted({
+        provider
+        for model in app.models.values()
+        for provider in model.session.get_providers()
+    }))
+
+
 def initialize_face_app() -> None:
     global active_execution_providers, face_app
 
     started_at = time.perf_counter()
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    providers = settings.insightface_providers
-    available_providers = ort.get_available_providers()
-    unavailable_providers = set(providers) - set(available_providers)
-    if unavailable_providers:
-        raise RuntimeError(
-            "Requested ONNX Runtime provider(s) are unavailable: "
-            f"{', '.join(sorted(unavailable_providers))}. "
-            f"Available: {', '.join(available_providers)}"
-        )
-
-    # ctx_id=0: GPU đầu tiên; ctx_id=-1: CPU
-    ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
+    requested_provider = settings.face_execution_provider
+    selected_provider = resolve_execution_provider(
+        requested_provider,
+        available_providers=ort.get_available_providers(),
+    )
 
     logger.info(
-        "insightface_initialization_started | model=%s | providers=%s | root=%s",
+        "insightface_initialization_started | model=%s | requestedProvider=%s | selectedProvider=%s | root=%s",
         settings.INSIGHTFACE_MODEL_NAME,
-        providers,
+        requested_provider,
+        selected_provider,
         MODEL_DIR,
     )
 
-    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-        app = FaceAnalysis(
-            name=settings.INSIGHTFACE_MODEL_NAME,
-            root=MODEL_DIR,
-            providers=providers,
-        )
-        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
-
-    active_execution_providers = tuple(sorted({
-        provider
-        for model in app.models.values()
-        for provider in model.session.get_providers()
-    }))
-    if "CUDAExecutionProvider" in providers:
-        if "CUDAExecutionProvider" not in active_execution_providers:
+    try:
+        app = _create_face_app(selected_provider)
+        active_execution_providers = _app_execution_providers(app)
+        if selected_provider not in active_execution_providers:
             raise RuntimeError(
-                "CUDAExecutionProvider was requested but InsightFace fell back to CPU. "
-                f"Active providers: {', '.join(active_execution_providers)}"
+                f"Selected {selected_provider} but active providers are "
+                f"{', '.join(active_execution_providers)}"
             )
+    except Exception as exc:
+        if requested_provider != "auto" or selected_provider != "CUDAExecutionProvider":
+            raise RuntimeError(
+                f"FACE_EXECUTION_PROVIDER={requested_provider} could not initialize "
+                f"{selected_provider}: {exc}"
+            ) from exc
+        logger.warning(
+            "insightface_cuda_initialization_failed_retrying_cpu | reason=%s",
+            exc,
+        )
+        selected_provider = "CPUExecutionProvider"
+        app = _create_face_app(selected_provider)
+        active_execution_providers = _app_execution_providers(app)
 
     face_app = app
 
     logger.info(
-        "insightface_initialization_completed | model=%s | requestedProviders=%s | activeProviders=%s | durationMs=%.2f",
+        "insightface_initialization_completed | model=%s | requestedProvider=%s | selectedProvider=%s | activeProviders=%s | durationMs=%.2f",
         settings.INSIGHTFACE_MODEL_NAME,
-        providers,
+        requested_provider,
+        selected_provider,
         active_execution_providers,
         (time.perf_counter() - started_at) * 1000,
     )

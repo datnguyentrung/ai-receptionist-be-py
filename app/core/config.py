@@ -13,7 +13,7 @@ ENV_FILE = BASE_DIR / ".env"
 class Settings(BaseSettings):
     PROJECT_NAME: str = "AI Receptionist Face Embedding API"
     INSIGHTFACE_MODEL_NAME: str = "buffalo_l"
-    INSIGHTFACE_PROVIDERS: str = "CPUExecutionProvider"
+    FACE_EXECUTION_PROVIDER: str = "auto"
     FACE_EMBEDDING_DIMENSION: int = 512
     MAX_IMAGE_SIZE_BYTES: int = 5 * 1024 * 1024
     ALLOWED_IMAGE_TYPES: str = "image/jpeg,image/png"
@@ -129,12 +129,13 @@ class Settings(BaseSettings):
         ).render_as_string(hide_password=False)
 
     @property
-    def insightface_providers(self) -> list[str]:
-        return [
-            provider.strip()
-            for provider in self.INSIGHTFACE_PROVIDERS.split(",")
-            if provider.strip()
-        ]
+    def face_execution_provider(self) -> str:
+        provider = self.FACE_EXECUTION_PROVIDER.strip().lower()
+        if provider not in {"auto", "cpu", "cuda"}:
+            raise ValueError(
+                "FACE_EXECUTION_PROVIDER must be one of: auto, cpu, cuda"
+            )
+        return provider
 
     @property
     def allowed_image_types(self) -> set[str]:

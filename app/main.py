@@ -122,6 +122,8 @@ async def lifespan(app: FastAPI):
         initialize_face_app()
     except Exception:
         logger.exception("InsightFace model initialization failed")
+        if settings.face_execution_provider == "cuda":
+            raise
 
     await initialize_database()
 

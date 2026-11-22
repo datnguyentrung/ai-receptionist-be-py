@@ -32,7 +32,8 @@ real secrets.
 ```env
 PROJECT_NAME=AI Receptionist Face Embedding API
 INSIGHTFACE_MODEL_NAME=buffalo_l
-INSIGHTFACE_PROVIDERS=CPUExecutionProvider
+# auto (default) chooses CUDA only when its runtime is usable; cpu/cuda force a provider.
+FACE_EXECUTION_PROVIDER=auto
 FACE_EMBEDDING_DIMENSION=512
 MAX_IMAGE_SIZE_BYTES=5242880
 ALLOWED_IMAGE_TYPES=image/jpeg,image/png
