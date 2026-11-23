@@ -9,11 +9,10 @@ NGUYÊN TẮC:
 6. `entityExtractionContract` được tạo động từ ontology đã pin. Với node cần sửa, bổ sung mọi property nằm trong `identityFields` còn thiếu, cùng evidence nguyên văn. Không tự tạo `identity`; engine sẽ suy identity từ properties.
 7. `requiredCoverageUpdates` liệt kê các chunk phải được sửa trong output `coverage_updates`. Với mỗi chunk, hoặc thêm fact/edge có evidence từ chính chunk đó, hoặc đổi `MAPPED` thành một decision đúng nội dung. Không để nguyên `MAPPED`.
 
-NẾU GẶP EVIDENCE_NOT_GROUNDED:
-- Ưu tiên tìm và sao chép lại đoạn trích nguyên văn từ chunk.
-- Giữ nguyên dấu câu, khoảng trắng và ký tự xuống dòng.
-- Không tự viết lại nội dung evidence theo cách diễn đạt của mình.
-- Nếu bằng chứng quá dài, chọn đoạn ngắn hơn nhưng vẫn đủ chứng minh.
+NẾU GẶP EVIDENCE_NOT_GROUNDED HOẶC LỖI EVIDENCE:
+- Ưu tiên chọn đúng `blockId` từ danh sách `blocks` của chunk tương ứng thay vì tự viết chuỗi text.
+- Nếu dùng text, sao chép nguyên văn 100% từ chunk, giữ nguyên dấu câu, khoảng trắng và ký tự xuống dòng.
+- Tuyệt đối không tự viết lại nội dung evidence theo cách diễn đạt của mình.
 - Không thay đổi dữ kiện đúng chỉ vì evidence bị sai định dạng.
 
 NẾU GẶP MAPPED_WITHOUT_MAPPING:

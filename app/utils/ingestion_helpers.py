@@ -84,6 +84,7 @@ def workspace_chunks(
             page_start=item.page_start,
             page_end=item.page_end,
             source_anchor=item.source_anchor,
+            blocks=list(item.blocks),
         )
         for item in workspace.chunks
         if item.chunk_index in indexes

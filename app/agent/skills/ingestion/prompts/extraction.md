@@ -20,13 +20,17 @@ QUY TẮC CANONICAL REFERENCE:
 4. Không tạo evidence giả bằng cách gán chunk hiện tại cho identity lấy từ canonical context.
 5. Node canonical được phép không có node-level evidence nếu chunk hiện tại chỉ bổ sung property; property mới vẫn bắt buộc có evidence.
 
-QUY TẮC EVIDENCE:
-1. evidence.text phải được sao chép trực tiếp từ chunk gốc.
-2. Ưu tiên trích dẫn đoạn ngắn nhất nhưng đủ chứng minh dữ kiện.
-3. Không tự nối dòng, diễn đạt lại, thêm dấu câu hoặc chuẩn hóa văn bản.
-4. Nếu bằng chứng trải dài nhiều dòng, giữ nguyên ký tự xuống dòng.
-5. Khi có thể, sử dụng nhiều trích dẫn ngắn thay vì ghép các đoạn thành một câu mới.
-6. Trước khi trả kết quả, tự kiểm tra mỗi evidence.text có xuất hiện nguyên văn trong chunk nguồn hay không.
+QUY TẮC EVIDENCE VÀ BLOCK ID:
+1. Mọi evidence phải ưu tiên chọn `blockId` từ danh sách `blocks` của chunk tương ứng:
+   {"chunkIndex": <chỉ số chunk>, "blockId": "<blockId>", "text": ""}
+2. TUYỆT ĐỐI KHÔNG tự sáng tác, diễn đạt lại hoặc tự nối chuỗi `text` bằng chứng. Chọn một hoặc nhiều blockId từ các `blocks` đã cung cấp.
+3. Nếu một fact cần nhiều source block để chứng minh, trả về nhiều evidence object:
+   "evidence": [
+     {"chunkIndex": 9, "blockId": "chk_xxx:line:100"},
+     {"chunkIndex": 9, "blockId": "chk_xxx:line:102"}
+   ]
+4. Trong chế độ chuyển tiếp (transition), nếu chunk chưa có blockId khả dụng hoặc trích dẫn từ text thuần, có thể cung cấp `text` sao chép nguyên văn 100% từ chunk.
+5. Trước khi trả kết quả, đảm bảo blockId thuộc đúng chunkIndex của nó.
 
 COVERAGE BẮT BUỘC:
 1. SemanticGraphPatchFragment.coverage phải có đúng một mục cho mỗi chunk đầu vào.

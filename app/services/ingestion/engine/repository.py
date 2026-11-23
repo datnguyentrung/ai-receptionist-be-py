@@ -229,6 +229,7 @@ class IngestionRepository:
                 page_start=None,
                 page_end=None,
                 source_anchor=f"{chunk.source}#{chunk.structural_path}:L{chunk.start_line}-L{chunk.end_line}",
+                blocks=tuple(chunk.blocks),
             )
             for chunk in chunks
         )

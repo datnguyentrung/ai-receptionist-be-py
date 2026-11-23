@@ -314,6 +314,11 @@ async def repair_batch(
     )
     chunks = workspace_chunks(workspace, batch.chunk_indexes)
     if merged is not None:
+        from app.services.ingestion.schema.evidence_resolver import EvidenceResolver
+        resolver = EvidenceResolver(chunks)
+        merged, resolver_issues = resolver.resolve_fragment(merged)
+        issues.extend(resolver_issues)
+
         merged = GraphFragmentEvidenceGuard().canonicalize(merged, chunks)
         issues.extend(_repair_property_conflicts(merged, projection))
         issues.extend(_repair_edge_property_conflicts(baseline, merged))
@@ -719,6 +724,13 @@ async def submit_batch(
     validation_issues = list(compile_result.issues)
     chunks = workspace_chunks(workspace, batch.chunk_indexes)
     if fragment is not None:
+        from app.services.ingestion.schema.evidence_resolver import EvidenceResolver
+        # 1. Resolve blockId trước nếu có
+        resolver = EvidenceResolver(chunks)
+        fragment, resolver_issues = resolver.resolve_fragment(fragment)
+        validation_issues.extend(resolver_issues)
+
+        # 2. Heuristic canonical string repair cho legacy text evidence
         fragment = GraphFragmentEvidenceGuard().canonicalize(fragment, chunks)
         validation_issues.extend(
             registry.validate_fragment(

@@ -22,6 +22,11 @@ class Evidence(IngestionModel):
         ge=0,
         description="Chỉ số index của DocumentChunk chứa đoạn văn bản bằng chứng.",
     )
+    block_id : str | None = Field(
+        default = None,
+        alias="blockId",
+        description="ID của SourceBlock thực tế mà fact tham chiếu tới."
+    )
     text: str = Field(
         default="",
         description="Đoạn văn bản trích dẫn nguyên văn từ tài liệu nguồn làm căn cứ chứng minh.",

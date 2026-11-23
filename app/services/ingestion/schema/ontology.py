@@ -667,37 +667,71 @@ class OntologyRegistry:
                         location=f"{location}.{index}",
                     )
                 )
-            else:
-                chunk_surfaces = [chunk.text]
-                if chunk.section:
-                    chunk_surfaces.extend([
-                        f"{chunk.section}\n\n{chunk.text}",
-                        f"{chunk.section}\n{chunk.text}",
-                        chunk.section,
-                    ])
-                evidence_text = _normalize_quote(evidence.text)
-                if any(evidence_text in _normalize_quote(surface) for surface in chunk_surfaces):
-                    continue
-                reason, preview = _evidence_failure_reason(evidence_text, _normalize_quote(chunk.text))
-                logger.info(
-                    "EVIDENCE_GROUNDING location=%s chunkIndex=%s reason=%s evidence=%r nearest=%r",
-                    f"{location}.{index}.text",
-                    evidence.chunk_index,
-                    reason,
-                    evidence_text[:120],
-                    preview[:120],
+                continue
+
+            # Phase 7A: Provenance validation khi có block_id
+            if evidence.block_id:
+                # Kiểm tra block tồn tại trong chunk
+                chunk_blocks = {b.block_id: b for b in getattr(chunk, "blocks", []) or []}
+                if evidence.block_id not in chunk_blocks:
+                    # Kiểm tra xem có thuộc chunk khác không
+                    other_chunk = None
+                    for c_idx, c in chunk_by_index.items():
+                        if any(b.block_id == evidence.block_id for b in getattr(c, "blocks", []) or []):
+                            other_chunk = c_idx
+                            break
+                    if other_chunk is not None:
+                        issues.append(
+                            ValidationIssue(
+                                code="EVIDENCE_BLOCK_CHUNK_MISMATCH",
+                                message=f"Evidence blockId {evidence.block_id!r} belongs to chunk {other_chunk}, not {evidence.chunk_index}",
+                                location=f"{location}.{index}",
+                                retryable=True,
+                            )
+                        )
+                    else:
+                        issues.append(
+                            ValidationIssue(
+                                code="EVIDENCE_UNKNOWN_BLOCK",
+                                message=f"Evidence blockId {evidence.block_id!r} not found in document",
+                                location=f"{location}.{index}",
+                                retryable=True,
+                            )
+                        )
+                # Pass reference validation!
+                continue
+
+            # Legacy fallback: exact text check
+            chunk_surfaces = [chunk.text]
+            if chunk.section:
+                chunk_surfaces.extend([
+                    f"{chunk.section}\n\n{chunk.text}",
+                    f"{chunk.section}\n{chunk.text}",
+                    chunk.section,
+                ])
+            evidence_text = _normalize_quote(evidence.text)
+            if any(evidence_text in _normalize_quote(surface) for surface in chunk_surfaces):
+                continue
+            reason, preview = _evidence_failure_reason(evidence_text, _normalize_quote(chunk.text))
+            logger.info(
+                "EVIDENCE_GROUNDING location=%s chunkIndex=%s reason=%s evidence=%r nearest=%r",
+                f"{location}.{index}.text",
+                evidence.chunk_index,
+                reason,
+                evidence_text[:120],
+                preview[:120],
+            )
+            issues.append(
+                ValidationIssue(
+                    code="EVIDENCE_NOT_GROUNDED",
+                    message=(
+                        "Evidence text must be a verbatim excerpt from its chunk "
+                        f"({reason}); evidence={evidence_text[:120]!r}; nearest={preview[:120]!r}"
+                    ),
+                    location=f"{location}.{index}.text",
+                    retryable=True,
                 )
-                issues.append(
-                    ValidationIssue(
-                        code="EVIDENCE_NOT_GROUNDED",
-                        message=(
-                            "Evidence text must be a verbatim excerpt from its chunk "
-                            f"({reason}); evidence={evidence_text[:120]!r}; nearest={preview[:120]!r}"
-                        ),
-                        location=f"{location}.{index}.text",
-                        retryable=True,
-                    )
-                )
+            )
         return issues
 
 

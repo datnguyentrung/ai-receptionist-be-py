@@ -24,6 +24,92 @@ from pathlib import Path
 from typing import Protocol
 
 from app.schemas.ingestion import DocumentChunk, LoadedDocument
+from app.schemas.ingestion.document import SourceBlock
+
+TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def _is_table_row(line: str) -> bool:
+    """Kiểm tra một dòng có định dạng Markdown table row (ít nhất một pipe và không phải escaped đơn lẻ)."""
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+    # Kiểm tra xem pipe có nằm ngoài inline code hay không hoặc là hàng bảng thông thường
+    return stripped.startswith("|") or stripped.endswith("|") or (" | " in stripped)
+
+
+def parse_markdown_blocks(
+    *,
+    chunk_id: str,
+    content: str,
+    start_line: int,
+) -> list[SourceBlock]:
+    """Tạo các SourceBlock có locator ổn định từ Markdown nguồn của một chunk.
+    
+    Hỗ trợ stateful table parser:
+    - Nhận diện Table header, separator line, và data rows.
+    - Loại bỏ separator line (chỉ là cú pháp định dạng bảng, không phải knowledge evidence).
+    - Giữ locator chính xác theo số dòng gốc.
+    """
+    blocks: list[SourceBlock] = []
+    lines = content.splitlines()
+    in_table = False
+
+    for offset, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            in_table = False
+            continue
+
+        line_number = start_line + offset
+
+        # Kiểm tra separator line: không bao giờ tạo knowledge SourceBlock
+        if TABLE_SEPARATOR_RE.match(stripped):
+            in_table = True
+            continue
+
+        if _is_table_row(stripped):
+            # Nếu dòng trước hoặc dòng sau là separator hoặc đang ở trong bảng, đây là table_row
+            is_table = in_table
+            if not is_table:
+                # Lookahead dòng kế tiếp xem có phải separator không
+                if offset + 1 < len(lines) and TABLE_SEPARATOR_RE.match(lines[offset + 1].strip()):
+                    is_table = True
+                    in_table = True
+
+            if is_table:
+                blocks.append(
+                    SourceBlock(
+                        blockId=f"{chunk_id}:line:{line_number}",
+                        type="table_row",
+                        text=stripped,
+                        locator={
+                            "lineStart": line_number,
+                            "lineEnd": line_number,
+                        },
+                    )
+                )
+                continue
+
+        in_table = False
+        block_type = "paragraph"
+
+        if stripped.startswith(("- ", "* ", "+ ")) or re.match(r"^\d+\.\s", stripped):
+            block_type = "list_item"
+
+        blocks.append(
+            SourceBlock(
+                blockId=f"{chunk_id}:line:{line_number}",
+                type=block_type,
+                text=stripped,
+                locator={
+                    "lineStart": line_number,
+                    "lineEnd": line_number,
+                },
+            )
+        )
+
+    return blocks
 
 
 def _sha256(value: str) -> str:
@@ -228,6 +314,7 @@ class StructuralTextChunker:
         index: int,
         section: str | None,
         content: str,
+        source_content: str | None = None,
         structural_path: str,
         start_line: int,
         end_line: int,
@@ -239,7 +326,9 @@ class StructuralTextChunker:
             source: Tên tài liệu nguồn.
             index: Chỉ số thứ tự của chunk.
             section: Tiêu đề section trực tiếp của chunk.
-            content: Nội dung văn bản của chunk.
+            content: Nội dung phục vụ pipeline extraction hiện tại.
+            source_content: Nội dung đúng theo nguồn gốc để tạo SourceBlock và locator.
+                Nếu không truyền, sử dụng ``content``.
             structural_path: Đường dẫn phân cấp cấu trúc heading.
             start_line: Dòng bắt đầu trong tài liệu gốc.
             end_line: Dòng kết thúc trong tài liệu gốc.
@@ -247,24 +336,37 @@ class StructuralTextChunker:
         Returns:
             DocumentChunk: Đối tượng chunk đã khởi tạo.
         """
-        # 1. Chuẩn hóa nội dung chunk thành plain text
+        # 1. Chuẩn hóa nội dung chunk thành plain text cho pipeline hiện tại.
         canonical_content = canonicalize_markdown_plain_text(content)
-        # 2. Tính mã hash nội dung
+
+        # 2. Tính content hash và stable chunk ID đúng một lần.
         content_hash = chunk_content_hash(canonical_content)
-        # 3. Tạo đối tượng DocumentChunk hoàn chỉnh
+        chunk_id = stable_chunk_id(
+            structural_path=structural_path,
+            content_hash=content_hash,
+        )
+
+        # 3. SourceBlock luôn phải được tạo từ nội dung đúng theo nguồn gốc,
+        #    không phải content đã được chèn section/biến đổi để phục vụ extraction.
+        block_source_content = source_content if source_content is not None else content
+        blocks = parse_markdown_blocks(
+            chunk_id=chunk_id,
+            content=block_source_content,
+            start_line=start_line,
+        )
+
+        # 4. Tạo đối tượng DocumentChunk hoàn chỉnh.
         return DocumentChunk(
             index=index,
             source=source,
             section=section,
             content=canonical_content,
-            chunkId=stable_chunk_id(
-                structural_path=structural_path,
-                content_hash=content_hash,
-            ),
+            chunkId=chunk_id,
             contentHash=content_hash,
             structuralPath=structural_path,
             startLine=start_line,
             endLine=end_line,
+            blocks=blocks,
         )
 
     def _split_markdown(self, document: LoadedDocument) -> list[DocumentChunk]:
@@ -290,11 +392,15 @@ class StructuralTextChunker:
             Đóng gói các dòng nội dung hiện tại thành một DocumentChunk và reset bộ đệm.
             """
             nonlocal current_lines, current_start_line
-            content = "\n".join(current_lines).strip()
-            if not content:
+            raw_content = "\n".join(current_lines).strip()
+            if not raw_content:
                 current_lines = []
                 current_start_line = None
                 return
+
+            # ``raw_content`` giữ nguyên nội dung thực trong file nguồn để locator
+            # của SourceBlock không bị lệch khi section được chèn vào chunk content.
+            content = raw_content
             if current_section and not content.startswith(current_section):
                 content = f"{current_section}\n\n{content}"
             first_offset = next(
@@ -316,6 +422,7 @@ class StructuralTextChunker:
                     index=len(chunks),
                     section=current_section,
                     content=content,
+                    source_content=raw_content,
                     structural_path=f"{current_path}#{occurrence}",
                     start_line=base_line + first_offset,
                     end_line=base_line + last_offset,

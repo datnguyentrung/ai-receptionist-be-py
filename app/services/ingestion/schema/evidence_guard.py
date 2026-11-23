@@ -291,6 +291,12 @@ class GraphFragmentEvidenceGuard:
         ) -> list[Evidence]:
             normalized_items: list[Evidence] = []
             for index, item in enumerate(items):
+                # Phase 6: Nếu evidence đã có block_id, bỏ qua heuristic canonical string repair.
+                # EvidenceResolver đã/sẽ xử lý deterministic resolution.
+                if item.block_id:
+                    normalized_items.append(item)
+                    continue
+
                 chunk = chunk_by_index.get(item.chunk_index)
                 if chunk is None:
                     normalized_items.append(item)

@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from app.schemas.ingestion.base import IngestionModel
+from app.schemas.ingestion.document import SourceBlock
 
 CoverageDecision = Literal[
     "MAPPED",                   # Đoạn văn đã được trích xuất thành nodes/edges đầy đủ
@@ -93,4 +94,8 @@ class PreparedChunk(IngestionModel):
     )
     source_anchor: str = Field(
         description="Đoạn neo định vị tham chiếu nguồn (ví dụ: 'tai_lieu.pdf#page=3').",
+    )
+    blocks: list[SourceBlock] = Field(
+        default_factory=list,
+        description="Danh sách các SourceBlock cấu thành chunk để tham chiếu bằng chứng chính xác.",
     )

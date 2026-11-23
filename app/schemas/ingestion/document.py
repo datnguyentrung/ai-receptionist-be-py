@@ -2,10 +2,18 @@
 
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import Field
 
 from app.schemas.ingestion.base import IngestionModel
+
+
+class SourceBlock(IngestionModel):
+    block_id: str = Field(min_length=1, alias="blockId")
+    type: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    locator: dict[str, Any] = Field(default_factory=dict)
 
 
 class DocumentChunk(IngestionModel):
@@ -29,6 +37,8 @@ class DocumentChunk(IngestionModel):
     start_line: int = Field(ge=1, alias="startLine")
     # Số dòng kết thúc của chunk trong file nguồn gốc (đánh số từ 1)
     end_line: int = Field(ge=1, alias="endLine")
+    
+    blocks: list[SourceBlock] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,7 @@ class IngestionChunkData:
     page_start: int | None
     page_end: int | None
     source_anchor: str
+    blocks: tuple[SourceBlock, ...] = ()
 
 
 __all__ = [
@@ -90,4 +101,5 @@ __all__ = [
     "IngestionDocumentData",
     "IngestionDocumentVersionData",
     "LoadedDocument",
+    "SourceBlock",
 ]
