@@ -91,6 +91,39 @@ def test_model_chunks_exposes_only_citable_fields() -> None:
     ]
 
 
+def test_model_chunks_includes_blocks_when_present() -> None:
+    from app.schemas.ingestion.document import SourceBlock
+
+    chunks = [
+        SimpleNamespace(
+            chunk_index=47,
+            text="I Đẳng: 48 buổi | 6 tháng",
+            blocks=[
+                SourceBlock(
+                    blockId="chk_47:line:449",
+                    type="table_row",
+                    text="| I Đẳng | 48 buổi | 6 tháng |",
+                    locator={"lineStart": 449, "lineEnd": 449},
+                )
+            ],
+        )
+    ]
+
+    assert BatchExecutionModule._model_chunks(chunks) == [
+        {
+            "chunkIndex": 47,
+            "text": "I Đẳng: 48 buổi | 6 tháng",
+            "blocks": [
+                {
+                    "blockId": "chk_47:line:449",
+                    "type": "table_row",
+                    "text": "| I Đẳng | 48 buổi | 6 tháng |",
+                }
+            ],
+        }
+    ]
+
+
 def _install_execution_fakes(
     monkeypatch, module: BatchExecutionModule, prepared: _PreparedBatch
 ) -> None:

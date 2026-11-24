@@ -152,10 +152,12 @@ def _is_markdown_table_separator(value: str) -> bool:
     Returns:
         bool: True nếu là dòng phân cách bảng, ngược lại False.
     """
-    # 1. Loại bỏ dấu '|' và khoảng trắng
-    body = value.strip("|").replace(" ", "")
-    # 2. Dòng hợp lệ phải không rỗng và chỉ gồm các ký tự ':' hoặc '-'
-    return bool(body) and all(ch in {":", "-"} for ch in body)
+    stripped = value.strip()
+    if TABLE_SEPARATOR_RE.match(stripped):
+        return True
+    # Loại bỏ dấu '|' cả ở hai đầu lẫn ở giữa các cột
+    body = stripped.strip("|").replace(" ", "").replace("|", "")
+    return bool(body) and "-" in body and all(ch in {":", "-"} for ch in body)
 
 
 def _strip_inline_markdown(value: str) -> str:

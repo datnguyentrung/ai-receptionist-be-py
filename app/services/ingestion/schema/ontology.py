@@ -77,11 +77,12 @@ _LIST_ITEM = re.compile(
 
 def _normalized_list_items(text: str) -> list[str]:
     """Return meaningful bullet text from a Markdown or HTML-table cell."""
-    return [
-        _normalize_quote(item).strip()
-        for item in _LIST_ITEM.findall(text)
-        if _normalize_quote(item).strip()
-    ]
+    items: list[str] = []
+    for raw in _LIST_ITEM.findall(text):
+        cleaned = _normalize_quote(raw).strip()
+        if cleaned and any(ch.isalnum() for ch in cleaned):
+            items.append(cleaned)
+    return items
 
 
 def _validate_list_item_representation(

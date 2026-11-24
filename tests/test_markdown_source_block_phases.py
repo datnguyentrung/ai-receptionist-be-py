@@ -249,3 +249,45 @@ def test_evidence_resolver_mismatch_and_unknown():
     _, issues_unknown = resolver.resolve_evidence(ev_unknown)
     assert len(issues_unknown) == 1
     assert issues_unknown[0].code == "EVIDENCE_UNKNOWN_BLOCK"
+
+
+def test_canonicalize_markdown_table_strips_aligned_separator():
+    from app.services.ingestion.pipeline.strategies import canonicalize_markdown_plain_text
+    from app.services.ingestion.schema.ontology import _normalized_list_items
+
+    raw = (
+        "| Cấp đẳng | Mốc 85% số buổi tập được ghi | Số buổi được ghi riêng | Thời gian rèn luyện được ghi |\n"
+        "|---|---|---:|---|\n"
+        "| I Đẳng | 85% số buổi tập (40 buổi) | 48 buổi | 6 tháng |"
+    )
+    plain = canonicalize_markdown_plain_text(raw)
+    assert "---:" not in plain
+    assert "| ---" not in plain
+    assert _normalized_list_items(plain) == []
+    assert _normalized_list_items("Cấp đẳng: Mốc | --- | ---:\nI Đẳng: 6 tháng") == []
+
+
+def test_evidence_guard_multiline_table_quote():
+    from app.services.ingestion.schema.evidence_guard import canonical_table_excerpt
+
+    chunk = PreparedChunk(
+        chunk_id="chk_47",
+        chunk_index=47,
+        text=(
+            "14.2. Bảng thời lượng ghi trong sheet\n\n"
+            "Cấp đẳng: Mốc 85% số buổi tập được ghi | Số buổi được ghi riêng | Thời gian rèn luyện được ghi\n"
+            "I Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 6 tháng\n"
+            "II Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 12 tháng"
+        ),
+        content_hash="abc",
+        token_count=20,
+        source_anchor="doc.md#14.2",
+    )
+    quote = (
+        "Cấp đẳng: Mốc 85% số buổi tập được ghi | Số buổi được ghi riêng | Thời gian rèn luyện được ghi\n"
+        "---: --- | --- | ---\n"
+        "I Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 6 tháng"
+    )
+    canonical = canonical_table_excerpt(chunk, quote)
+    assert canonical in chunk.text
+    assert "I Đẳng: 85% số buổi tập (40 buổi) | 48 buổi | 6 tháng" in canonical

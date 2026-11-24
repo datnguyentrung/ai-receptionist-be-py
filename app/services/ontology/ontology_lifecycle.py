@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -162,14 +162,31 @@ class OntologyLifecycle:
                     OntologySchemaProposal.proposal_type == proposal_kind,
                     OntologySchemaProposal.status != SchemaProposalStatus.REJECTED,
                 ))).all())
-                if any((item.payload.get("scopeKey") if proposal_kind == SchemaProposalType.NEW_SCOPE else item.payload.get("technicalName")) == target_name
-                       and item.payload.get("entityType") == payload.get("entityType") for item in pending):
+                if any(
+                    str(
+                        item.payload.get("scopeKey")
+                        if proposal_kind == SchemaProposalType.NEW_SCOPE
+                        else item.payload.get("technicalName") or ""
+                    ).casefold()
+                    == str(target_name or "").casefold()
+                    and str(item.payload.get("entityType") or "").casefold()
+                    == str(payload.get("entityType") or "").casefold()
+                    for item in pending
+                ):
                     raise ValueError(f"Duplicate schema proposal: {target_name}")
                 version = await session.scalar(select(OntologyVersion).where(
                     OntologyVersion.created_by == f"ingestion:{ingestion_id}",
                     OntologyVersion.status == OntologyVersionStatus.DRAFT,
                 ))
                 version_id = version.id if version else uuid.UUID(ontology_version_id)
+                if proposal_kind == SchemaProposalType.NEW_RELATIONSHIP:
+                    source_entity, target_entity = await self._entities_by_names(
+                        session,
+                        version_id,
+                        [payload["sourceEntityType"], payload["targetEntityType"]],
+                    )
+                    payload["sourceEntityType"] = source_entity.technical_name
+                    payload["targetEntityType"] = target_entity.technical_name
                 model_and_column = {
                     SchemaProposalType.NEW_ENTITY_TYPE: (OntologyEntityType, OntologyEntityType.technical_name),
                     SchemaProposalType.NEW_RELATIONSHIP: (OntologyRelationship, OntologyRelationship.technical_name),
@@ -177,24 +194,32 @@ class OntologyLifecycle:
                 }
                 if proposal_kind in model_and_column:
                     model, column = model_and_column[proposal_kind]
-                    if await session.scalar(select(model.id).where(model.ontology_version_id == version_id, column == target_name)):
+                    if await session.scalar(
+                        select(model.id).where(
+                            model.ontology_version_id == version_id,
+                            func.lower(column) == str(target_name).strip().casefold(),
+                        )
+                    ):
                         raise SchemaObjectAlreadyExistsError(
                             proposal_kind, target_name
                         )
                 else:
-                    entity = await session.scalar(select(OntologyEntityType).where(
-                        OntologyEntityType.ontology_version_id == version_id,
-                        OntologyEntityType.technical_name == payload["entityType"],
-                    ))
-                    if entity and await session.scalar(select(OntologyProperty.id).where(
+                    entity = (
+                        await self._entities_by_names(
+                            session, version_id, [payload["entityType"]]
+                        )
+                    )[0]
+                    payload["entityType"] = entity.technical_name
+                    if await session.scalar(select(OntologyProperty.id).where(
                         OntologyProperty.ontology_version_id == version_id,
                         OntologyProperty.entity_type_id == entity.id,
-                        OntologyProperty.technical_name == target_name,
+                        func.lower(OntologyProperty.technical_name)
+                        == str(target_name).strip().casefold(),
                     )):
                         raise SchemaObjectAlreadyExistsError(
                             proposal_kind,
                             target_name,
-                            entity_type=payload["entityType"],
+                            entity_type=entity.technical_name,
                             property_object=True,
                         )
 
@@ -779,7 +804,8 @@ class OntologyLifecycle:
                     select(OntologyProperty).where(
                         OntologyProperty.ontology_version_id == version_id,
                         OntologyProperty.entity_type_id == entity.id,
-                        OntologyProperty.technical_name == payload["targetTechnicalName"],
+                        func.lower(OntologyProperty.technical_name)
+                        == payload["targetTechnicalName"].strip().casefold(),
                     )
                 )
                 if prop is None:
@@ -789,7 +815,8 @@ class OntologyLifecycle:
                 relationship = await session.scalar(
                     select(OntologyRelationship).where(
                         OntologyRelationship.ontology_version_id == version_id,
-                        OntologyRelationship.technical_name == payload["targetTechnicalName"],
+                        func.lower(OntologyRelationship.technical_name)
+                        == payload["targetTechnicalName"].strip().casefold(),
                     )
                 )
                 if relationship is None:
@@ -836,7 +863,8 @@ class OntologyLifecycle:
                 select(OntologyProperty).where(
                     OntologyProperty.ontology_version_id == version_id,
                     OntologyProperty.entity_type_id == entity.id,
-                    OntologyProperty.technical_name == payload["technicalName"],
+                    func.lower(OntologyProperty.technical_name)
+                    == payload["technicalName"].strip().casefold(),
                 )
             )
             if prop is None:
@@ -860,7 +888,8 @@ class OntologyLifecycle:
             relationship = await session.scalar(
                 select(OntologyRelationship).where(
                     OntologyRelationship.ontology_version_id == version_id,
-                    OntologyRelationship.technical_name == payload["technicalName"],
+                    func.lower(OntologyRelationship.technical_name)
+                    == payload["technicalName"].strip().casefold(),
                 )
             )
             if relationship is None:
@@ -883,7 +912,7 @@ class OntologyLifecycle:
     async def _entities_by_names(
         session: AsyncSession, version_id: uuid.UUID, names: list[str]
     ) -> list[OntologyEntityType]:
-        """Truy vấn các thực thể OntologyEntityType theo danh sách technical_name."""
+        """Truy vấn các thực thể OntologyEntityType theo technical_name (không phân biệt hoa/thường) hoặc alias."""
         if not names:
             return []
         rows = list(
@@ -891,16 +920,51 @@ class OntologyLifecycle:
                 await session.scalars(
                     select(OntologyEntityType).where(
                         OntologyEntityType.ontology_version_id == version_id,
-                        OntologyEntityType.technical_name.in_(names),
                     )
                 )
             ).all()
         )
-        by_name = {item.technical_name: item for item in rows}
-        missing = [name for name in names if name not in by_name]
+        by_id: dict[uuid.UUID, OntologyEntityType] = {}
+        by_name: dict[str, OntologyEntityType] = {}
+        for item in rows:
+            by_id[item.id] = item
+            by_name[item.technical_name] = item
+            by_name.setdefault(item.technical_name.casefold(), item)
+            if item.display_name:
+                by_name.setdefault(item.display_name.strip().casefold(), item)
+
+        unresolved = [
+            name
+            for name in names
+            if name not in by_name and name.strip().casefold() not in by_name
+        ]
+        if unresolved:
+            aliases = list(
+                (
+                    await session.scalars(
+                        select(OntologyAlias).where(
+                            OntologyAlias.ontology_version_id == version_id,
+                            OntologyAlias.entity_type_id.is_not(None),
+                        )
+                    )
+                ).all()
+            )
+            for alias in aliases:
+                target = by_id.get(alias.entity_type_id)
+                if target is not None and alias.alias:
+                    by_name.setdefault(alias.alias.strip().casefold(), target)
+
+        resolved: list[OntologyEntityType] = []
+        missing: list[str] = []
+        for name in names:
+            entity = by_name.get(name) or by_name.get(name.strip().casefold())
+            if entity is None:
+                missing.append(name)
+            else:
+                resolved.append(entity)
         if missing:
             raise KeyError(f"Unknown entity types: {missing}")
-        return [by_name[name] for name in names]
+        return resolved
 
     @staticmethod
     async def _scope_by_key(

@@ -1,9 +1,14 @@
+import asyncio
+import uuid
+from types import SimpleNamespace
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from app.models import SchemaProposalType
 from app.schemas.ingestion.proposal import SchemaProposalInput
 from app.services.ontology.ontology_lifecycle import (
+    OntologyLifecycle,
     _next_version_code,
     _validate_proposal_payload,
     identity_property_contract_errors,
@@ -60,3 +65,44 @@ def test_schema_proposal_tool_requires_typed_property_and_entity_payloads() -> N
                 "payload": {"description": "Missing identity strategy"},
             }
         )
+
+
+def test_entities_by_names_resolves_casefold_and_aliases() -> None:
+    policy_entity = SimpleNamespace(
+        id=uuid.uuid4(),
+        technical_name="policy",
+        display_name="Chính Sách",
+    )
+    alias_row = SimpleNamespace(
+        entity_type_id=policy_entity.id,
+        alias="QuyDinh",
+    )
+
+    class FakeScalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        async def scalars(self, _stmt):
+            self.calls += 1
+            return FakeScalars([policy_entity] if self.calls == 1 else [alias_row])
+
+    resolved = asyncio.run(
+        OntologyLifecycle._entities_by_names(
+            FakeSession(),
+            uuid.uuid4(),
+            ["Policy", "policy", "Chính Sách", "QuyDinh"],
+        )
+    )
+    assert [item.technical_name for item in resolved] == [
+        "policy",
+        "policy",
+        "policy",
+        "policy",
+    ]

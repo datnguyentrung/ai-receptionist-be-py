@@ -38,3 +38,9 @@ bcrypt~=4.2.1
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
 ruff>=0.9.0
+
+# Semantic Evidence Gate (NLI cross-encoder)
+transformers>=4.46
+torch>=2.4
+sentencepiece>=0.2.0
+protobuf>=4.25

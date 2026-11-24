@@ -12,6 +12,9 @@ from app.agent.tools.ingestion_tools.state import (
 from app.core.ingestion_runtime import get_service_container
 from app.schemas import SemanticGraphPatchFragment, SemanticGraphRepairDelta
 from app.services.ingestion.engine import operations
+from app.services.ingestion.schema.semantic_validation.factory import (
+    build_semantic_gate,
+)
 from app.utils import log_ingestion_event, stable_entity_key
 
 
@@ -207,6 +210,7 @@ async def submit_ingestion_batch(
             prior_fact_available=(
                 await prior_fact_probe() if prior_fact_probe is not None else False
             ),
+            semantic_gate=build_semantic_gate(),
         )
         result = batch_result_payload(workspace, batch_index)
         tool_context.state["active_ingestion_id"] = ingestion_id

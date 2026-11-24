@@ -68,6 +68,7 @@ from app.schemas import (
     SemanticGraphPatchFragment,
     Workspace,
 )
+from app.schemas.ingestion.document import SourceBlock
 from app.services.ingestion.pipeline.staged_ingestion import IngestionWorkspaceService
 from app.utils.ingestion_helpers import (
     dict_digest,
@@ -1489,6 +1490,8 @@ class IngestionRepository:
 def _workspace_payload(workspace: Workspace) -> dict[str, Any]:
     """Turn dataclasses into JSONB without losing UUIDs or enum values."""
     def convert(value: Any) -> Any:
+        if isinstance(value, BaseModel):
+            return value.model_dump(by_alias=True, mode="json")
         if isinstance(value, uuid.UUID):
             return str(value)
         if hasattr(value, "value"):
@@ -1534,6 +1537,10 @@ def _workspace_from_payload(payload: dict[str, Any]) -> Workspace:
             content_hash=item["content_hash"], token_count=item["token_count"],
             section=item.get("section"), page_start=item.get("page_start"),
             page_end=item.get("page_end"), source_anchor=item["source_anchor"],
+            blocks=tuple(
+                block if isinstance(block, SourceBlock) else SourceBlock.model_validate(block)
+                for block in (item.get("blocks") or ())
+            ),
         ) for item in payload["chunks"]),
         batches=tuple(IngestionBatchData(
             id=uuid.UUID(item["id"]), job_id=uuid.UUID(item["job_id"]),

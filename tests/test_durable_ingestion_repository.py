@@ -1,8 +1,9 @@
 import asyncio
+import json
 from dataclasses import replace
 from uuid import UUID, uuid4
 
-from app.schemas.ingestion.document import DocumentChunk
+from app.schemas.ingestion.document import DocumentChunk, SourceBlock
 from app.schemas.ingestion.graph_patch import GraphPatchFragment
 from app.schemas.ingestion.ontology import ActiveOntology
 from app.services.ingestion.engine.repository import (
@@ -16,6 +17,7 @@ def _chunk() -> DocumentChunk:
     return DocumentChunk(
         index=0, source="same.md", content="same content", chunk_id="chunk-1",
         content_hash="a" * 64, structural_path="root#0", start_line=1, end_line=1,
+        blocks=[SourceBlock(blockId="blk_001", type="paragraph", text="same content")],
     )
 
 
@@ -31,9 +33,13 @@ def test_identical_content_with_different_document_keys_never_collides() -> None
         first, _, _ = await repo.create_or_resume(document_key="docs/first.md", **common)
         second, _, _ = await repo.create_or_resume(document_key="docs/second.md", **common)
         assert first.job.id != second.job.id
-        restored = _workspace_from_payload(_workspace_payload(first))
+        payload = _workspace_payload(first)
+        json.dumps(payload)  # Must be JSON-serializable for Postgres JSONB checkpoint
+        restored = _workspace_from_payload(payload)
         assert restored.document.document_key == "docs/first.md"
         assert restored.chunks[0].text == "same content"
+        assert len(restored.chunks[0].blocks) == 1
+        assert restored.chunks[0].blocks[0].block_id == "blk_001"
     asyncio.run(run())
 
 

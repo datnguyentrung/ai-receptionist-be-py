@@ -76,6 +76,10 @@ from app.services.ingestion.engine.repository import IngestionRepository
 from app.services.ingestion.engine.workflow_policy import evaluate_workflow
 from app.services.ingestion.pipeline.reader import DocumentReader
 from app.services.ingestion.schema.evidence_guard import GraphFragmentEvidenceGuard
+from app.services.ingestion.schema.semantic_validation import (
+    LabelCatalog,
+    SemanticEvidenceGate,
+)
 from app.services.ingestion.schema.graph_patch_compiled import GraphPatchCompiler
 from app.services.ingestion.schema.ontology import (
     COMPILER_VERSION,
@@ -212,6 +216,7 @@ async def repair_batch(
     batch_index: int,
     scope_keys: list[str],
     repair_delta: SemanticGraphRepairDelta,
+    semantic_gate: SemanticEvidenceGate | None = None,
 ) -> Workspace:
     """Apply a delta to the protected baseline for one repair-required batch."""
 
@@ -337,6 +342,15 @@ async def repair_batch(
                 dropped_temp_ids=dropped_temp_ids,
             )
         )
+        if semantic_gate is not None and not issues:
+            report = await semantic_gate.verify(
+                merged, chunks, LabelCatalog.from_projection(projection)
+            )
+            semantic_issues = report.to_issues(
+                block_uncertain=semantic_gate.block_uncertain
+            )
+            if semantic_gate.enforce:
+                issues.extend(semantic_issues)
     issue_dicts = [issue.model_dump(by_alias=True, mode="json") for issue in issues]
     if issue_dicts:
         issue_dicts = await _classify_missing_scopes(
@@ -619,6 +633,7 @@ async def submit_batch(
     scope_keys: list[str],
     semantic_fragment: dict[str, Any] | SemanticGraphPatchFragment,
     prior_fact_available: bool = False,
+    semantic_gate: SemanticEvidenceGate | None = None,
 ) -> Workspace:
     workspace = await required_workspace(repository, ingestion_id)
     batch = next(
@@ -743,6 +758,29 @@ async def submit_batch(
                 prior_fact_available=prior_fact_available,
             )
         )
+
+        # 3. Semantic Evidence Gate: evidence phải *support* claim, không chỉ tồn tại.
+        # Chạy sau khi grounding/ontology sạch (lỗi grounding sẽ repair trước), và vì nằm
+        # trong submit_batch nên mọi repair đều bị kiểm chứng lại.
+        if semantic_gate is not None and not validation_issues:
+            report = await semantic_gate.verify(
+                fragment, chunks, LabelCatalog.from_projection(projection)
+            )
+            semantic_issues = report.to_issues(
+                block_uncertain=semantic_gate.block_uncertain
+            )
+            logger.info(
+                "SEMANTIC_GATE ingestionId=%s batchIndex=%s mode=%s currentDecision=PASS "
+                "semanticDecision=%s nliAvailable=%s findings=%s",
+                ingestion_id,
+                batch_index,
+                "enforce" if semantic_gate.enforce else "shadow",
+                "REJECT" if semantic_issues else "PASS",
+                report.nli_available,
+                json.dumps(report.summary(), ensure_ascii=False),
+            )
+            if semantic_gate.enforce:
+                validation_issues.extend(semantic_issues)
 
     if getattr(batch, "validated_baseline", None) and fragment is not None:
         try:

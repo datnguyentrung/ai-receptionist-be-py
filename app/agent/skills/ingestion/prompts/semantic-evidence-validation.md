@@ -21,3 +21,8 @@ KẾT QUẢ:
 
 Nếu không đủ căn cứ, không được trả EQUIVALENT.
 Trả về kết quả theo structured output schema.
+
+
+CANONICAL CLAIM:
+- Nếu issue có canonical_claim: đánh giá evidence_text/source_chunk_text có THỰC SỰ support canonical_claim không (đúng chủ thể, số liệu, phủ định, chiều quan hệ).
+- EQUIVALENT chỉ khi có source_quote NGUYÊN VĂN từ source_chunk_text hỗ trợ claim; sai chủ thể/số liệu/phủ định/chiều quan hệ thì UNSUPPORTED.

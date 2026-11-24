@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Standalone ADK Web / ingestion runtime
     GOOGLE_ADK_HIGH_MODEL: str = "gemini-3.5-flash-lite"
     GOOGLE_ADK_LOW_MODEL: str = "gemini-3.1-flash-lite"
+    GOOGLE_ADK_FALLBACK: str | None = None
     ADK_WEB_HOST: str = "127.0.0.1"
     ADK_WEB_PORT: int = 8001
     ADK_ALLOWED_ORIGINS: str = "http://localhost:8001,http://127.0.0.1:8001"
@@ -74,6 +75,16 @@ class Settings(BaseSettings):
     INGESTION_SEMANTIC_EVIDENCE_CANARY_PERCENT: int = 100
     INGESTION_SEMANTIC_EVIDENCE_MAX_CALLS_PER_BATCH: int = 1
     INGESTION_EVIDENCE_TARGETED_REPAIR_MAX_CALLS: int = 1
+    # Semantic Evidence Gate (rules + NLI + LLM fallback): off | shadow | enforce
+    INGESTION_SEMANTIC_GATE_MODE: str = "shadow"
+    INGESTION_SEMANTIC_GATE_BLOCK_UNCERTAIN: bool = True
+    INGESTION_NLI_MODEL: str = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+    INGESTION_NLI_DEVICE: str = "auto"  # auto = GPU nếu có, fallback CPU
+    INGESTION_NLI_BATCH_SIZE: int = 16
+    INGESTION_NLI_CACHE_SIZE: int = 4096
+    INGESTION_NLI_SUPPORT_THRESHOLD: float = 0.90
+    INGESTION_NLI_REFUTE_THRESHOLD: float = 0.90
+    INGESTION_NLI_MINIMUM_MARGIN: float = 0.20
 
     # Clef
     CLOUDFLARE_AUTH_TOKEN: str = ""

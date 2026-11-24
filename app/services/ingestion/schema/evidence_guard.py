@@ -127,21 +127,50 @@ def canonical_markdown_excerpt(chunk: PreparedChunk, quote: str) -> str:
 
 def canonical_table_excerpt(chunk: PreparedChunk, quote: str) -> str:
     """
-    Khôi phục dòng dữ liệu dạng bảng từ văn bản plain text chuẩn hóa.
+    Khôi phục dòng hoặc đoạn dữ liệu dạng bảng từ văn bản plain text chuẩn hóa.
 
     Args:
         chunk: Chunk văn bản nguồn.
         quote: Chuỗi trích dẫn.
 
     Returns:
-        str: Dòng văn bản khớp từ chunk.
+        str: Dòng hoặc đoạn văn bản khớp từ chunk.
     """
     # 1. Chuẩn hóa ký tự xuống dòng
     normalized = quote.replace("\r\n", "\n").replace("\r", "\n").strip()
     if ":" not in normalized and "|" not in normalized:
         return quote
 
-    # 2. Tìm kiếm dòng tương ứng trong bề mặt chunk
+    # 2. Hỗ trợ trích dẫn bảng nhiều dòng (bỏ qua sai lệch ở dòng phân cách --- / ---:)
+    quote_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if len(quote_lines) > 1:
+        def _is_sep(line: str) -> bool:
+            body = line.replace(" ", "").replace("|", "").replace(":", "").replace("-", "")
+            return not body and "-" in line
+
+        data_lines = [_plain_line(line) for line in quote_lines if not _is_sep(line)]
+        if data_lines:
+            for surface in _chunk_surfaces(chunk):
+                surface_lines = surface.splitlines()
+                first_target = data_lines[0]
+                last_target = data_lines[-1]
+                start_idx = next(
+                    (i for i, l in enumerate(surface_lines) if first_target and first_target in _plain_line(l)),
+                    None,
+                )
+                if start_idx is not None:
+                    end_idx = next(
+                        (
+                            j
+                            for j in range(start_idx, len(surface_lines))
+                            if last_target and last_target in _plain_line(surface_lines[j])
+                        ),
+                        None,
+                    )
+                    if end_idx is not None:
+                        return "\n".join(surface_lines[start_idx : end_idx + 1]).strip()
+
+    # 3. Tìm kiếm dòng tương ứng trong bề mặt chunk
     target = _plain_line(normalized)
     for surface in _chunk_surfaces(chunk):
         for line in surface.splitlines():

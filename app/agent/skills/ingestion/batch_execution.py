@@ -2,10 +2,11 @@
 
 import json
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from google.adk.agents import Agent
 from google.adk.models.google_llm import Gemini
@@ -36,6 +37,14 @@ from app.schemas.ingestion.semantic_patch import (
 from app.services.ingestion.engine import operations
 from app.services.ingestion.schema.extraction_contract import (
     build_entity_extraction_contract,
+)
+from app.services.ingestion.schema.semantic_validation import (
+    FallbackRequest,
+    FallbackVerdict,
+    Verdict,
+)
+from app.services.ingestion.schema.semantic_validation.factory import (
+    build_semantic_gate,
 )
 from app.utils.ingestion_helpers import stable_entity_key
 
@@ -124,7 +133,7 @@ def _contract_from_scope(scope: Any) -> dict[str, Any] | None:
         return None
     try:
         return build_entity_extraction_contract(OntologyProjection.model_validate(scope))
-    except Exception:  # Test doubles and legacy callers may expose only a scope summary.
+    except Exception:  # noqa: BLE001 - Test doubles and legacy callers may expose only a scope summary.
         return None
 
 
@@ -148,6 +157,52 @@ def _required_coverage_updates(batch: Any) -> list[dict[str, Any]]:
                 }
             )
     return required
+
+
+class _ModelLlmFallback:
+    """Adapter: `ingestion_evidence_validator` đóng vai LlmFallback của Semantic Gate."""
+
+    _VERDICTS: ClassVar[dict[EvidenceVerdict, Verdict]] = {
+        EvidenceVerdict.EQUIVALENT: Verdict.SUPPORTED,
+        EvidenceVerdict.REPAIRABLE: Verdict.REFUTED,
+        EvidenceVerdict.UNSUPPORTED: Verdict.REFUTED,
+        EvidenceVerdict.UNCERTAIN: Verdict.UNCERTAIN,
+    }
+
+    def __init__(self, model: BatchModel, tool_context: Any, batch_index: int) -> None:
+        self._model = model
+        self._tool_context = tool_context
+        self._batch_index = batch_index
+
+    async def judge(
+        self, requests: Sequence[FallbackRequest]
+    ) -> Mapping[str, FallbackVerdict]:
+        payload = {
+            "batch_index": self._batch_index,
+            "issues": [
+                {
+                    "issue_id": item.key,
+                    "chunk_id": f"chunk-{item.chunk_index}",
+                    "chunk_index": item.chunk_index,
+                    "location": item.key,
+                    "claim": {"location": item.key, "predicate": item.claim.predicate},
+                    "canonical_claim": item.claim.text,
+                    "evidence_text": item.evidence_text,
+                    "candidate_source_excerpt": item.reason,
+                    "source_chunk_text": item.source_text,
+                }
+                for item in requests
+            ],
+        }
+        result = await self._model.validate_evidence(payload, self._tool_context)
+        return {
+            decision.issue_id: FallbackVerdict(
+                self._VERDICTS[decision.verdict],
+                decision.source_quote,
+                decision.explanation,
+            )
+            for decision in result.decisions
+        }
 
 
 def _single_turn_agent(
@@ -235,6 +290,39 @@ class AdkBatchModel:
             )
             return result if isinstance(result, output) else output.model_validate(result)
         except Exception as exc:
+            fallback_model = (settings.GOOGLE_ADK_FALLBACK or "").strip()
+            agent = getattr(tool, "agent", None)
+            current_model = getattr(getattr(agent, "model", None), "model", None)
+            instruction = getattr(agent, "instruction", None)
+            err_text = str(exc)
+            is_overloaded = any(
+                code in err_text for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")
+            )
+            if (
+                fallback_model
+                and fallback_model != current_model
+                and is_overloaded
+                and agent is not None
+                and instruction is not None
+            ):
+                fallback_tool = AgentTool(
+                    _single_turn_agent(
+                        agent.name,
+                        str(instruction),
+                        output,
+                        fallback_model,
+                    ),
+                    include_plugins=True,
+                )
+                result = await fallback_tool.run_async(
+                    args={
+                        "request": json.dumps(
+                            payload, ensure_ascii=False, separators=(",", ":")
+                        )
+                    },
+                    tool_context=tool_context,
+                )
+                return result if isinstance(result, output) else output.model_validate(result)
             log_ingestion_event(
                 "BATCH_MODEL_FAILURE",
                 request={
@@ -309,12 +397,26 @@ class BatchExecutionModule:
         )
 
     @staticmethod
-    def _model_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
-        """Expose only citable chunk data to ingestion models."""
-        return [
-            {"chunkIndex": chunk.chunk_index, "text": chunk.text}
-            for chunk in chunks
-        ]
+    def _model_chunks(chunks: Sequence[Any]) -> list[dict[str, Any]]:
+        """Expose citable chunk data and deterministic source blocks to ingestion models."""
+        result: list[dict[str, Any]] = []
+        for chunk in chunks:
+            item: dict[str, Any] = {
+                "chunkIndex": chunk.chunk_index,
+                "text": chunk.text,
+            }
+            blocks = getattr(chunk, "blocks", None) or []
+            if blocks:
+                item["blocks"] = [
+                    {
+                        "blockId": b.block_id,
+                        "type": b.type,
+                        "text": b.text,
+                    }
+                    for b in blocks
+                ]
+            result.append(item)
+        return result
 
     async def execute(
         self, ingestion_id: str, batch_index: int, tool_context: Any
@@ -439,6 +541,7 @@ class BatchExecutionModule:
                     result = self._result_and_state(
                         workspace, ingestion_id, batch_index, tool_context
                     )
+                    resolved_scope_keys = result.get("scopeKeys")
                     self._log_metrics(
                         ingestion_id,
                         batch_index,
@@ -446,7 +549,9 @@ class BatchExecutionModule:
                         calls,
                         prompt_bytes,
                         scope_keys,
-                        result.get("scopeKeys", scope_keys),
+                        [str(k) for k in resolved_scope_keys]
+                        if isinstance(resolved_scope_keys, list)
+                        else scope_keys,
                         result,
                     )
                     return result
@@ -593,6 +698,7 @@ class BatchExecutionModule:
                     "nextAction": "create_schema_proposal",
                 }
                 store_checkpoint(tool_context, result)
+                resolved_scope_keys = result.get("scopeKeys")
                 self._log_metrics(
                     ingestion_id,
                     batch_index,
@@ -600,7 +706,9 @@ class BatchExecutionModule:
                     calls,
                     prompt_bytes,
                     requested_scope_keys,
-                    result.get("scopeKeys", scope_keys),
+                    [str(k) for k in resolved_scope_keys]
+                    if isinstance(resolved_scope_keys, list)
+                    else scope_keys,
                     result,
                 )
                 return result
@@ -645,11 +753,12 @@ class BatchExecutionModule:
                 repair_payload["requiredCoverageUpdates"] = _required_coverage_updates(
                     prepared.batch
                 )
-                if repair_payload["entityExtractionContract"]:
+                contract = repair_payload["entityExtractionContract"]
+                if isinstance(contract, dict) and contract.get("contractHash"):
                     await prepared.container.repository.record_runtime_metadata(
                         ingestion_id,
                         model_assignments=repair_payload["modelAssignments"],
-                        contract_hash=repair_payload["entityExtractionContract"]["contractHash"],
+                        contract_hash=contract["contractHash"],
                     )
                 calls += 1
                 delta = await self._model.repair(repair_payload, tool_context)
@@ -665,6 +774,7 @@ class BatchExecutionModule:
                     workspace, ingestion_id, batch_index, tool_context
                 )
 
+            resolved_scope_keys = result.get("scopeKeys")
             self._log_metrics(
                 ingestion_id,
                 batch_index,
@@ -672,7 +782,9 @@ class BatchExecutionModule:
                 calls,
                 prompt_bytes,
                 requested_scope_keys,
-                result.get("scopeKeys", scope_keys),
+                [str(k) for k in resolved_scope_keys]
+                if isinstance(resolved_scope_keys, list)
+                else scope_keys,
                 result,
             )
             return result
@@ -899,6 +1011,11 @@ class BatchExecutionModule:
             scope_keys,
             extraction,
             prior_fact_available=prior_fact_available,
+            semantic_gate=build_semantic_gate(
+                _ModelLlmFallback(
+                    self._model, tool_context, prepared.batch.batch_index
+                )
+            ),
         )
         return self._result_and_state(
             workspace,
@@ -989,8 +1106,7 @@ class BatchExecutionModule:
             val_res = await self._model.validate_evidence(
                 semantic_payload, tool_context
             )
-        except Exception:
-            # On validator error, fail closed
+        except Exception:  # noqa: BLE001 - On validator error, fail closed
             workspace = await operations.required_workspace(
                 prepared.container.repository, str(prepared.workspace.job.id)
             )
@@ -1165,8 +1281,8 @@ class BatchExecutionModule:
                         if ev_idx < len(edge.evidence):
                             ev_text = edge.evidence[ev_idx].text
                             chunk_idx = edge.evidence[ev_idx].chunk_index
-        except Exception:
-            pass
+        except (IndexError, ValueError, AttributeError):
+            return chunk_idx, ev_text, claim_info
 
         return chunk_idx, ev_text, claim_info
 
@@ -1230,8 +1346,8 @@ class BatchExecutionModule:
                             ev_idx = int(parts[e_pos + 1])
                         if ev_idx < len(edge.evidence):
                             edge.evidence[ev_idx].text = quote
-        except Exception:
-            pass
+        except (IndexError, ValueError, AttributeError):
+            return
 
     @staticmethod
     def _result_and_state(
