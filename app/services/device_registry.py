@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ import bcrypt
 
 from app.core.config import Settings
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RegistryDevice:
@@ -68,8 +70,32 @@ class DeviceRegistry:
         device = self._devices.get(device_code)
         return device if device and device.lifecycle_status == "ACTIVE" else None
 
+    def connected(self, device_code: str) -> RegistryDevice | None:
+        """Return a device allowed to establish its initial MQTT connection.
+
+        A freshly claimed device is PROVISIONED until its first heartbeat reaches
+        Java through this Fog.  It needs a narrowly scoped MQTT connection to
+        publish that heartbeat; topic ACLs keep it from receiving commands until
+        Java promotes it to ACTIVE.
+        """
+        if not self.gateway_active:
+            return None
+        device = self._devices.get(device_code)
+        return device if device and device.lifecycle_status in {"PROVISIONED", "ACTIVE"} else None
+
+    def connection_rejection_reason(self, device_code: str) -> str | None:
+        """Explain why a device cannot send its initial heartbeat, without secrets."""
+        if not self.gateway_active:
+            return "gateway_not_active"
+        device = self._devices.get(device_code)
+        if device is None:
+            return "device_not_in_fog_registry"
+        if device.lifecycle_status not in {"PROVISIONED", "ACTIVE"}:
+            return f"lifecycle_{device.lifecycle_status.lower()}"
+        return None
+
     def authenticate(self, device_code: str, password: str) -> bool:
-        device = self.active(device_code)
+        device = self.connected(device_code)
         if device is None or not device.credential_hash:
             return False
         try:
@@ -78,8 +104,12 @@ class DeviceRegistry:
             return False
 
     def record_heartbeat(self, device_code: str, payload: dict[str, Any]) -> None:
-        if self.active(device_code) is not None:
-            self._heartbeats[device_code] = {"deviceCode": device_code, **payload}
+        reason = self.connection_rejection_reason(device_code)
+        if reason is not None:
+            logger.warning("[Registry] Heartbeat rejected | deviceCode=%s | reason=%s", device_code, reason)
+            return
+        self._heartbeats[device_code] = {"deviceCode": device_code, **payload}
+        logger.info("[Registry] Heartbeat queued | deviceCode=%s", device_code)
 
     async def load(self) -> None:
         if not self._path.exists():
@@ -91,7 +121,13 @@ class DeviceRegistry:
         if not self._settings.FOG_GATEWAY_DEVICE_CODE:
             return False
         auth = (self._settings.FOG_GATEWAY_DEVICE_CODE, self._settings.FOG_GATEWAY_DEVICE_SECRET)
-        request = {"knownRegistryVersion": self._version, "heartbeats": list(self._heartbeats.values())}
+        heartbeats = list(self._heartbeats.values())
+        if heartbeats:
+            logger.info(
+                "[Registry] Syncing heartbeats | deviceCodes=%s",
+                [heartbeat["deviceCode"] for heartbeat in heartbeats],
+            )
+        request = {"knownRegistryVersion": self._version, "heartbeats": heartbeats}
         try:
             async with httpx.AsyncClient(timeout=8.0, auth=auth) as client:
                 response = await client.post(
@@ -110,6 +146,8 @@ class DeviceRegistry:
             self._version = int(payload.get("registryVersion", self._version))
             self._apply_gateway_lifecycle(payload.get("gatewayLifecycleStatus"))
         self._heartbeats.clear()
+        if heartbeats:
+            logger.info("[Registry] Heartbeat sync completed | count=%s", len(heartbeats))
         return True
 
     def _replace(self, payload: dict[str, Any]) -> None:
