@@ -6,6 +6,7 @@ perform network I/O, which keeps the MQTT data path available during a Java outa
 from __future__ import annotations
 
 import hmac
+import logging
 from typing import TYPE_CHECKING
 
 from amqtt.contexts import Action, BaseContext
@@ -19,6 +20,7 @@ _registry: DeviceRegistry | None = None
 _relay_username: str | None = None
 _relay_secret: str | None = None
 _relay_topics: tuple[str, ...] = ()
+logger = logging.getLogger(__name__)
 
 
 def set_registry(registry: DeviceRegistry) -> None:
@@ -58,17 +60,26 @@ def _matches_topic_filter(topic: str, topic_filter: str | None) -> bool:
 
 
 class RegistryAuthPlugin(BaseAuthPlugin):
-    """Accept only an ACTIVE registry device using its device code and secret."""
+    """Authenticate ACTIVE devices and PROVISIONED devices' first heartbeat."""
 
     async def authenticate(self, *, session: Session) -> bool:
         if _is_relay(session):
             return True
         if _registry is None or not session.username or not session.password:
+            logger.warning("[Registry] MQTT authentication rejected | reason=missing_registry_or_credentials")
             return False
         client_id = getattr(session, "client_id", None)
         if client_id != session.username:
+            logger.warning("[Registry] MQTT authentication rejected | deviceCode=%s | reason=client_id_mismatch", session.username)
             return False
-        return _registry.authenticate(session.username, session.password)
+        authenticated = _registry.authenticate(session.username, session.password)
+        if not authenticated:
+            logger.warning(
+                "[Registry] MQTT authentication rejected | deviceCode=%s | reason=%s",
+                session.username,
+                _registry.connection_rejection_reason(session.username) or "invalid_credential",
+            )
+        return authenticated
 
 
 class RegistryTopicAclPlugin(BaseTopicPlugin):
@@ -93,11 +104,21 @@ class RegistryTopicAclPlugin(BaseTopicPlugin):
             return False
         if _registry is None:
             return False
-        device = _registry.active(session.username)
+        device = _registry.connected(session.username)
         if device is None:
+            logger.warning(
+                "[Registry] MQTT topic rejected | deviceCode=%s | reason=%s",
+                session.username,
+                _registry.connection_rejection_reason(session.username) or "unknown",
+            )
             return False
         code = device.device_code
         heartbeat = f"taekwondo/devices/{code}/heartbeat"
+        if device.lifecycle_status == "PROVISIONED":
+            allowed = action == Action.PUBLISH and topic == heartbeat
+            if not allowed:
+                logger.warning("[Registry] MQTT topic rejected | deviceCode=%s | reason=provisioned_heartbeat_only", code)
+            return allowed
         if device.device_type == "ESP32":
             return action == Action.PUBLISH and topic in {heartbeat, f"esp32/{code}/sensor"}
         if device.device_type == "KIOSK":

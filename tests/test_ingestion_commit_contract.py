@@ -367,7 +367,11 @@ def test_entity_review_tool_is_registered_and_wrong_fact_tool_is_recoverable() -
     from app.agent.skills.ingestion.tools import get_tools
 
     registered_names = {
-        getattr(tool, "name", getattr(getattr(tool, "func", None), "__name__", None))
+        getattr(
+            tool,
+            "name",
+            getattr(tool, "__name__", getattr(getattr(tool, "func", None), "__name__", None)),
+        )
         for tool in get_tools()
     }
     assert "review_entity_resolutions" in registered_names
