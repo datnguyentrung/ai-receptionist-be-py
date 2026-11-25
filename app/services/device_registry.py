@@ -138,6 +138,16 @@ class DeviceRegistry:
         except httpx.HTTPError:
             return False
         payload = response.json()
+        rejected_device_codes = {
+            str(code)
+            for code in payload.get("rejectedDeviceCodes", [])
+            if isinstance(code, str) and code
+        }
+        if rejected_device_codes:
+            logger.warning(
+                "[Registry] Dropping heartbeats rejected by cloud | deviceCodes=%s",
+                sorted(rejected_device_codes),
+            )
         if payload.get("registryChanged"):
             async with self._lock:
                 self._replace(payload)
@@ -145,6 +155,8 @@ class DeviceRegistry:
         else:
             self._version = int(payload.get("registryVersion", self._version))
             self._apply_gateway_lifecycle(payload.get("gatewayLifecycleStatus"))
+        # A successful sync has either applied each queued heartbeat or listed it
+        # as rejected. Do not retry stale codes forever.
         self._heartbeats.clear()
         if heartbeats:
             logger.info("[Registry] Heartbeat sync completed | count=%s", len(heartbeats))

@@ -27,3 +27,4 @@ pyright-report.json
 .pytest_tmp/
 .pytest_cache/
 .codegraph**
+.fog/**
