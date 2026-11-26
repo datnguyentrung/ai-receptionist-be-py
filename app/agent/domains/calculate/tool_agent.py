@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from google.adk.agents import Agent
+from google.adk.agents.llm_agent import ToolUnion
 
 from app.agent.adk.model_factory import create_model
 from app.agent.tools.calculation import (
@@ -11,8 +12,6 @@ from app.agent.tools.calculation import (
     multiply,
     subtract,
 )
-
-from google.adk.agents.llm_agent import ToolUnion
 
 PROMPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -42,4 +41,4 @@ def create_calculation_tool_agent() -> Agent:
     )
 
 
-__all__ = ["create_calculation_tool_agent", "CALCULATION_TOOLS"]
+__all__ = ["CALCULATION_TOOLS", "create_calculation_tool_agent"]

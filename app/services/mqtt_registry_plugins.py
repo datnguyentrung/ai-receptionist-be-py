@@ -9,7 +9,7 @@ import hmac
 import logging
 from typing import TYPE_CHECKING
 
-from amqtt.contexts import Action, BaseContext
+from amqtt.contexts import Action
 from amqtt.plugins.base import BaseAuthPlugin, BaseTopicPlugin
 from amqtt.session import Session
 

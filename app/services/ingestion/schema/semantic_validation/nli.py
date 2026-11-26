@@ -7,8 +7,9 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol
 
 from app.services.ingestion.schema.semantic_validation.models import (
     RULE_VERSION,
@@ -75,7 +76,10 @@ class TransformersNliVerifier:
                 raise NliUnavailableError(self._error)
             try:
                 import torch
-                from transformers import AutoModelForSequenceClassification, AutoTokenizer
+                from transformers import (
+                    AutoModelForSequenceClassification,
+                    AutoTokenizer,
+                )
 
                 tokenizer = AutoTokenizer.from_pretrained(self.model_version)
                 model = AutoModelForSequenceClassification.from_pretrained(self.model_version)
@@ -88,11 +92,11 @@ class TransformersNliVerifier:
                 device = self._resolve_device(torch)
                 try:
                     model.to(device)
-                except Exception:  # noqa: BLE001 - GPU init failure -> CPU
+                except Exception:
                     logger.warning("NLI_DEVICE_FALLBACK device=%s -> cpu", device, exc_info=True)
                     device = "cpu"
                     model.to(device)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._failed_at = time.monotonic()
                 self._error = f"{type(exc).__name__}: {exc}"
                 logger.error("NLI_LOAD_FAILED model=%s error=%s", self.model_version, self._error)

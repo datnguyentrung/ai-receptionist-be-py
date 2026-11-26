@@ -17,8 +17,10 @@ MIN_CONFIDENCE = 0.5
 
 DIRECT_ROUTES = {
     "INGESTION_AGENT",
-    "CALCULATION_AGENT",
-    "GRAPH_QA_AGENT",
+    "ADMISSION_AGENT",
+    "TUITION_AGENT",
+    "TRAINING_AGENT",
+    "CENTER_INFO_AGENT",
     "CHATCHIT_AGENT",
 }
 
@@ -66,6 +68,19 @@ def extract_history(ctx: InvocationContext) -> list[dict]:
 
 class HybridRootAgent(BaseAgent):
     """Điều phối Clef trước, fallback về LLM Router."""
+
+    def _resolve_target_agent(self, target_name: str) -> BaseAgent | None:
+        """Tìm agent đích trong cây sub-agent hoặc trong các AgentTool của fallback router."""
+        direct = self.find_agent(target_name)
+        if direct is not None:
+            return direct
+
+        fallback = self.find_agent(FALLBACK_AGENT)
+        for tool in getattr(fallback, "tools", None) or []:
+            wrapped_agent = getattr(tool, "agent", None)
+            if isinstance(wrapped_agent, BaseAgent) and wrapped_agent.name == target_name:
+                return wrapped_agent
+        return None
 
     async def _run_async_impl(
         self,
@@ -117,7 +132,7 @@ class HybridRootAgent(BaseAgent):
                         f"meaningful={meaningful}, target={chosen})"
                     )
 
-            except Exception as exc:
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 # Chỉ bắt lỗi ở tầng Clef.
                 # Không bắt lỗi từ sub-agent nghiệp vụ.
                 reason = f"clef_error: {exc!s}"
@@ -165,7 +180,7 @@ class HybridRootAgent(BaseAgent):
             ),
         )
 
-        target_agent = self.find_agent(target_name)
+        target_agent = self._resolve_target_agent(target_name)
 
         if target_agent is None:
             err_msg = f"Routing target not found: {target_name}"

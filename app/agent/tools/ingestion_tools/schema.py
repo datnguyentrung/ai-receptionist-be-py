@@ -124,6 +124,7 @@ async def create_schema_proposal(
                 "retryable": True,
             }
         ]
+        container = await get_service_container()
         workspace = await container.repository.block_batch_for_proposal(
             effective_ingestion_id,
             batch_index,

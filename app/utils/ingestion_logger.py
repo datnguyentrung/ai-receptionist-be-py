@@ -80,8 +80,10 @@ def _user_message_trace(text: str) -> dict[str, Any]:
         "repair",
     }:
         return {"message": text}
-    batch = payload.get("batch") if isinstance(payload.get("batch"), dict) else {}
-    chunks = batch.get("chunks") if isinstance(batch.get("chunks"), list) else []
+    raw_batch = payload.get("batch")
+    batch: dict[str, Any] = raw_batch if isinstance(raw_batch, dict) else {}
+    raw_chunks = batch.get("chunks")
+    chunks: list[Any] = raw_chunks if isinstance(raw_chunks, list) else []
     issues = payload.get("validationIssues")
     return {
         "message": (

@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     # Java Cloud face check-in integration
     JAVA_CLOUD_BASE_URL: str = "http://127.0.0.1:8080"
     JAVA_FOG_SECRET: str = ""
+    # JWT of a read-only Java service account used by ADK catalogue FunctionTools.
+    JAVA_AGENT_API_TOKEN: str = ""
     JAVA_REQUEST_TIMEOUT_SECONDS: float = 10.0
     FOG_INTERNAL_BASE_URL: str = "http://127.0.0.1:8000"
     FOG_INTERNAL_SECRET: str = ""

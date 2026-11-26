@@ -29,10 +29,10 @@ from app.services.graphrag.embeddings import GeminiEmbeddingProvider
 from app.services.graphrag.graph_store import Neo4jGraphStore
 from app.services.ingestion.engine.graph_store import Neo4jIngestionStore
 from app.services.ingestion.engine.repository import IngestionRepository
-from app.services.ontology.schema_context import SchemaContextService
 from app.services.ingestion.schema.ontology import OntologyCache
 from app.services.ontology.ontology_compiler import OntologyCompiler
 from app.services.ontology.ontology_lifecycle import OntologyLifecycle
+from app.services.ontology.schema_context import SchemaContextService
 
 logger = logging.getLogger(__name__)
 

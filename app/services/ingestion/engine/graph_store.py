@@ -1352,7 +1352,7 @@ def _merge_fragments(
         if isinstance(raw_fragment, dict):
             fragment = raw_fragment
         elif hasattr(raw_fragment, "model_dump"):
-            fragment = getattr(raw_fragment, "model_dump")(by_alias=True, mode="json")
+            fragment = raw_fragment.model_dump(by_alias=True, mode="json")
         else:
             fragment = {}
         dict_fragments.append(fragment)

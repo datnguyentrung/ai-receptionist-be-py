@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
-from typing import Callable
 
 from app.services.ingestion.schema.semantic_validation.models import (
     CODE_NEGATION,

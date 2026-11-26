@@ -28,8 +28,10 @@ CLEF_URL = (
 # Tập hợp các routing target hợp lệ mà hệ thống hỗ trợ
 VALID_ROUTES = {
     "INGESTION_AGENT",
-    "CALCULATION_AGENT",
-    "GRAPH_QA_AGENT",
+    "ADMISSION_AGENT",
+    "TUITION_AGENT",
+    "TRAINING_AGENT",
+    "CENTER_INFO_AGENT",
     "CHATCHIT_AGENT",
     "ASK_CLARIFICATION",
 }
@@ -86,16 +88,22 @@ def route_with_clef(
                 ),
                 "criteria": {
                     "INGESTION_AGENT": (
-                        "Yêu cầu nạp tài liệu mới, xử lý file, trích xuất tri thức từ tài liệu, tạo hoặc cập nhật schema/ontology/Knowledge Graph, hoặc thực hiện quy trình ingestion."
+                        "Yêu cầu quản trị tri thức dành cho Admin: nạp tài liệu mới, quản lý phiên bản tài liệu, trích xuất tri thức, kiểm chứng bằng chứng hoặc commit/rollback facts vào kho tri thức."
                     ),
-                    "CALCULATION_AGENT": (
-                        "Yêu cầu thực hiện phép tính số học hoặc tính toán dựa trên các giá trị cụ thể, bao gồm cộng trừ nhân chia về học phí, số buổi, điểm số, thời lượng hoặc các tham số định lượng."
+                    "ADMISSION_AGENT": (
+                        "Tư vấn phụ huynh mới và tuyển sinh: điều kiện nhập học, độ tuổi tiếp nhận, gợi ý lớp học phù hợp theo độ tuổi/nhu cầu, chính sách học thử và quy trình đăng ký học."
                     ),
-                    "GRAPH_QA_AGENT": (
-                        "Yêu cầu tra cứu hoặc trả lời thông tin dựa trên tri thức đã có về Taekwondo, võ đường, học viện hoặc câu lạc bộ: tên CLB/võ đường, lịch sử, người sáng lập, cơ sở, thông tin liên hệ, lớp học, lịch học, học phí, quy định, kỳ thi, kỹ thuật, bài quyền và luật thi đấu. Bao gồm câu hỏi tri thức chung và câu hỏi ngắn như 'CLB tên gì?', 'võ đường tên gì?', 'lịch học?'. Nếu câu hỏi có thể trả lời bằng cách tra cứu Knowledge Graph thì chọn GRAPH_QA_AGENT."
+                    "TUITION_AGENT": (
+                        "Tư vấn học phí và ưu đãi: chính sách học phí, bảng giá các gói học, chi phí võ phục và dụng cụ, chương trình ưu đãi/khuyến mãi, tính toán học phí dự kiến và phương thức thanh toán."
+                    ),
+                    "TRAINING_AGENT": (
+                        "Tư vấn lớp học và chương trình đào tạo: lịch tập luyện, chi tiết lớp học, kiến thức chuyên môn Taekwondo (đòn thế, bài quyền, luật thi đấu), chương trình đào tạo, lợi ích tập võ, lộ trình cấp đai, quy định thi lên đai, nội quy và học bù."
+                    ),
+                    "CENTER_INFO_AGENT": (
+                        "Tư vấn thông tin chung về trung tâm: giới thiệu và lịch sử trung tâm, địa chỉ các cơ sở, thời gian hoạt động, đội ngũ huấn luyện viên, cơ sở vật chất phòng tập và thông tin liên hệ."
                     ),
                     "CHATCHIT_AGENT": (
-                        "Chào hỏi, cảm ơn, lời chúc, trò chuyện xã giao hoặc phản hồi ngắn không yêu cầu tra cứu tri thức hay thực hiện nghiệp vụ. Không chọn nếu người dùng hỏi thông tin cụ thể về Taekwondo hoặc võ đường."
+                        "Hội thoại xã giao thông thường: chào hỏi, cảm ơn, lời chúc, giới thiệu bản thân TBot, hướng dẫn sử dụng chatbot hoặc hướng dẫn liên hệ nhân viên hỗ trợ."
                     ),
                     "ASK_CLARIFICATION": (
                         "Chỉ chọn khi câu hỏi có ít nhất hai cách hiểu nghiệp vụ cạnh tranh giữa các agent và không thể xác định ý định chính từ câu hiện tại hoặc lịch sử. Không chọn chỉ vì câu hỏi ngắn, viết tắt, thiếu tham số chi tiết, hoặc không chứa keyword rõ ràng."
@@ -177,7 +185,7 @@ def route_with_clef(
             },
         )
         # Báo lỗi nếu kiểu câu trả lời decision không hợp lệ
-        raise ValueError("Unexpected Clef decision type")
+        raise TypeError("Unexpected Clef decision type")
 
     # Kiểm tra xem câu trả lời meaningful có đúng loại NoulClefResponse không
     if not isinstance(meaningful_answer, NoulClefResponse):
@@ -190,7 +198,7 @@ def route_with_clef(
             },
         )
         # Báo lỗi nếu kiểu câu trả lời meaningful không hợp lệ
-        raise ValueError("Unexpected Clef meaningful type")
+        raise TypeError("Unexpected Clef meaningful type")
 
     # Lấy domain agent được Clef lựa chọn trực tiếp từ schema ChoiceClefResponse
     target = decision_answer.choice

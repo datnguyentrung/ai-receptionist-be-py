@@ -19,8 +19,8 @@ from app.services.ingestion.schema.evidence_guard import (
     canonical_whitespace_excerpt,
 )
 from app.services.ingestion.schema.graph_patch_compiled import (
-    GraphPatchCompileResult,
     GraphPatchCompiler,
+    GraphPatchCompileResult,
 )
 from app.services.ingestion.schema.identity_resolver import (
     IdentityResolutionError,
@@ -42,8 +42,8 @@ from app.services.ingestion.schema.semantic_resolution import (
 )
 
 __all__ = [
-    "AdkMergeVerifier",
     "COMPILER_VERSION",
+    "AdkMergeVerifier",
     "DisambiguationPair",
     "GraphFragmentEvidenceGuard",
     "GraphPatchCompileResult",

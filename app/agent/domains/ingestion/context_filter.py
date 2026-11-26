@@ -1,5 +1,7 @@
 """Context compaction logic for the Ingestion domain."""
 
+from operator import itemgetter
+
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
@@ -48,7 +50,7 @@ def compact_ingestion_context(contents: list[types.Content]) -> list[types.Conte
     checkpoints = [pair for name, pair in pairs.items() if name in checkpoint_names]
     if not checkpoints:
         return contents
-    checkpoint = max(checkpoints, key=lambda pair: pair[1])
+    checkpoint = max(checkpoints, key=itemgetter(1))
 
     first_user = next(
         (

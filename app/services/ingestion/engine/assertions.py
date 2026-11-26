@@ -1,12 +1,11 @@
 """Source assertion comparison used by preview and graph publication."""
 
+import hashlib
 import json
 import re
-import hashlib
 import unicodedata
 from datetime import date
 from typing import Any
-
 
 _YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 

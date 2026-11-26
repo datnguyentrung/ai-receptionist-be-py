@@ -9,8 +9,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.core.config import settings
 from app.commands.provision_fog import write_credential
+from app.core.config import settings
 
 router = APIRouter(prefix="/local/device-provisioning", tags=["Device provisioning"])
 logger = logging.getLogger(__name__)

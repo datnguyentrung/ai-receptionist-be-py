@@ -1,0 +1,14 @@
+[tool.basedpyright]
+# 1. Nâng lên "standard" để khớp với độ nhạy mặc định của Pylance trong IDE
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
+
+# 2. Trỏ thẳng vào Conda environment để CLI đọc đúng type của toàn bộ thư viện
+venvPath = "C:/Users/datng/miniconda3/envs"
+venv = "ai-receptionist"
+
+# 3. Quét toàn bộ project (hoặc thêm các thư mục khác ngoài app nếu có)
+include = ["app"]
+exclude = ["**/__pycache__", ".venv", "venv"]
+reportMissingTypeStubs = false
+reportArgumentType = "error"

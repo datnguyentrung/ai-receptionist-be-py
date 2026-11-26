@@ -22,7 +22,7 @@ def _configure_windows_cuda_dll_search_path() -> None:
 
 _configure_windows_cuda_dll_search_path()
 
-import onnxruntime as ort  # noqa: E402 - CUDA DLL search path must be configured first.
+import onnxruntime as ort
 
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 

@@ -50,8 +50,9 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -76,10 +77,6 @@ from app.services.ingestion.engine.repository import IngestionRepository
 from app.services.ingestion.engine.workflow_policy import evaluate_workflow
 from app.services.ingestion.pipeline.reader import DocumentReader
 from app.services.ingestion.schema.evidence_guard import GraphFragmentEvidenceGuard
-from app.services.ingestion.schema.semantic_validation import (
-    LabelCatalog,
-    SemanticEvidenceGate,
-)
 from app.services.ingestion.schema.graph_patch_compiled import GraphPatchCompiler
 from app.services.ingestion.schema.ontology import (
     COMPILER_VERSION,
@@ -88,6 +85,10 @@ from app.services.ingestion.schema.ontology import (
     validate_coverage_integrity,
 )
 from app.services.ingestion.schema.repair_guard import RepairGuard
+from app.services.ingestion.schema.semantic_validation import (
+    LabelCatalog,
+    SemanticEvidenceGate,
+)
 from app.services.ontology.schema_context import SchemaContextService
 from app.utils import (
     stable_entity_key,

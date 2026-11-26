@@ -41,7 +41,7 @@ def compute_instruction_fingerprint(system_instruction: Any) -> str:
     if isinstance(system_instruction, str):
         raw_text = system_instruction
     elif hasattr(system_instruction, "parts"):
-        parts = getattr(system_instruction, "parts") or []
+        parts = system_instruction.parts or []
         texts: list[str] = []
         for p in parts:
             if hasattr(p, "text") and p.text:

@@ -19,7 +19,8 @@ import asyncio
 import inspect
 import json
 import re
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable
+from typing import TYPE_CHECKING, Any
 
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.events import Event
@@ -27,10 +28,9 @@ from google.adk.events import Event
 if TYPE_CHECKING:
     from google.adk.agents.invocation_context import InvocationContext
 
-from app.schemas.tool_plan import ToolAction, ToolPlan
-
-
 from pydantic import Field, PrivateAttr
+
+from app.schemas.tool_plan import ToolAction, ToolPlan
 
 
 class DeterministicToolExecutor(BaseAgent):
@@ -204,7 +204,7 @@ class DeterministicToolExecutor(BaseAgent):
         elif isinstance(raw_plan, dict):
             try:
                 parsed_plan = ToolPlan.model_validate(raw_plan)
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 error_ctx = {
                     "request_status": "FAILED",
                     "plan_status": "INVALID_SCHEMA",
@@ -226,7 +226,7 @@ class DeterministicToolExecutor(BaseAgent):
                 data = json.loads(clean_str)
                 if isinstance(data, dict):
                     parsed_plan = ToolPlan.model_validate(data)
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 error_ctx = {
                     "request_status": "FAILED",
                     "plan_status": "INVALID_JSON",
@@ -327,7 +327,7 @@ class DeterministicToolExecutor(BaseAgent):
                 try:
                     resolved_args = self._resolve_arguments(act.arguments, results_by_id)
                     rec["resolved_arguments"] = resolved_args
-                except Exception as ex:
+                except (ValueError, TypeError, KeyError, AttributeError, IndexError) as ex:
                     rec["status"] = "FAILED"
                     rec["error"] = f"Lỗi resolve tham số: {ex}"
                     skipped_or_failed_ids.add(act_id)
@@ -341,7 +341,7 @@ class DeterministicToolExecutor(BaseAgent):
                     rec["status"] = "SUCCESS"
                     rec["result"] = tool_output
                     results_by_id[act.id] = tool_output
-                except Exception as ex:
+                except (OSError, ValueError, TypeError, KeyError, RuntimeError) as ex:
                     rec["status"] = "FAILED"
                     rec["error"] = f"Lỗi khi thực thi tool '{act.tool_name}': {ex}"
                     skipped_or_failed_ids.add(act_id)

@@ -17,7 +17,7 @@ from app.services.graphrag.retrieval import (
     EvidenceBundle,
     GraphQaRequest,
     GraphRAGRetriever,
-    _public_passage,
+    _public_passage,  # pyright: ignore[reportPrivateUsage]
 )
 from app.services.ingestion.engine.operations import normalize_document_key
 

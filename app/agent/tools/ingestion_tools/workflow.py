@@ -780,8 +780,8 @@ __all__ = [
     "get_ingestion_preview",
     "get_ingestion_status",
     "list_ingestion_conflicts",
-    "review_ingestion_conflicts",
     "review_entity_resolution",
     "review_entity_resolutions",
     "review_ingestion_conflict",
+    "review_ingestion_conflicts",
 ]

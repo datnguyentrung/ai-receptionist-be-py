@@ -6,7 +6,9 @@ import logging
 from functools import lru_cache
 
 from app.core.config import settings
-from app.services.ingestion.schema.semantic_validation.decision_policy import DecisionPolicy
+from app.services.ingestion.schema.semantic_validation.decision_policy import (
+    DecisionPolicy,
+)
 from app.services.ingestion.schema.semantic_validation.nli import (
     CachingNliVerifier,
     NliVerifier,

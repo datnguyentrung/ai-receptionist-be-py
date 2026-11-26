@@ -6,10 +6,11 @@ Không dùng LLM, không random: cùng một fact luôn sinh cùng một claim.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from app.schemas.ingestion.graph_patch import GraphPatchFragment
 from app.services.ingestion.schema.semantic_validation.models import (
@@ -49,7 +50,7 @@ class LabelCatalog:
     relation_aliases: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @classmethod
-    def from_projection(cls, projection: Any) -> "LabelCatalog":
+    def from_projection(cls, projection: Any) -> LabelCatalog:
         classes: dict[str, str] = {}
         properties: dict[str, str] = {}
         units: dict[str, str] = {}
@@ -128,7 +129,7 @@ class LabelCatalog:
 _EMPTY_CATALOG = LabelCatalog()
 
 
-def _format_number(value: int | float | Decimal) -> str:
+def _format_number(value: float | Decimal) -> str:
     number = Decimal(str(value))
     if number == number.to_integral_value():
         integer = int(number)

@@ -31,19 +31,18 @@ from app.services.ingestion.engine.repository import (
     IngestionRepository,
     Workspace,
 )
-from app.utils.ingestion_helpers import (
-    stable_entity_key,
-    staged_entity_index,
-    workspace_chunks,
-    workspace_fingerprint,
-)
-
 from app.services.ingestion.engine.workflow_policy import (
     TERMINAL_NEXT_ACTION,
     WORKFLOW_POLICY,
     WorkflowDecision,
     evaluate_workflow,
     normalize_status,
+)
+from app.utils.ingestion_helpers import (
+    stable_entity_key,
+    staged_entity_index,
+    workspace_chunks,
+    workspace_fingerprint,
 )
 
 __all__ = [
@@ -65,8 +64,8 @@ __all__ = [
     "get_batch",
     "list_scopes",
     "load_scope",
-    "repair_batch",
     "normalize_status",
+    "repair_batch",
     "rollback_version",
     "stable_entity_key",
     "staged_entity_index",

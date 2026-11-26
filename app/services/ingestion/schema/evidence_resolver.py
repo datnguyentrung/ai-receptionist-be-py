@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable
+from collections.abc import Iterable
 
 from app.schemas.ingestion.coverage import PreparedChunk, ValidationIssue
 from app.schemas.ingestion.document import SourceBlock

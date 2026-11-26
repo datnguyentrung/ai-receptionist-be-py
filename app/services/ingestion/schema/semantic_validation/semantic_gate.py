@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 from app.schemas.ingestion.coverage import PreparedChunk, ValidationIssue
 from app.schemas.ingestion.graph_patch import GraphPatchFragment
@@ -150,7 +151,7 @@ def evidence_windows(claim: Claim, text: str, *, max_windows: int = 3, short: in
 
 
 def _same_quote(quote: str, haystack: str) -> bool:
-    norm = lambda s: _WHITESPACE.sub(" ", s).strip().casefold()  # noqa: E731
+    norm = lambda s: _WHITESPACE.sub(" ", s).strip().casefold()
     return bool(quote.strip()) and norm(quote) in norm(haystack)
 
 
@@ -233,7 +234,7 @@ class SemanticEvidenceGate:
                 except NliUnavailableError as exc:
                     nli_available = False
                     logger.error("SEMANTIC_GATE_NLI_UNAVAILABLE error=%s", exc)
-                except Exception:  # noqa: BLE001 - fail closed, never skip validation
+                except Exception:
                     nli_available = False
                     logger.exception("SEMANTIC_GATE_NLI_ERROR")
         best_scores: dict[int, NliScores] = {}
@@ -295,7 +296,7 @@ class SemanticEvidenceGate:
             source_text = "\n\n".join(
                 chunk_text[idx]
                 for idx in chunk_indices
-                if idx in chunk_text and chunk_text[idx]
+                if chunk_text.get(idx)
             )
             requests.append(
                 FallbackRequest(
@@ -312,7 +313,7 @@ class SemanticEvidenceGate:
             return
         try:
             decisions = await self._llm.judge(requests)
-        except Exception:  # noqa: BLE001 - fail closed: giữ nguyên NEI/UNCERTAIN
+        except Exception:
             logger.exception("SEMANTIC_GATE_LLM_FALLBACK_ERROR")
             return
         for request in requests:

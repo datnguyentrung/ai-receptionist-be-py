@@ -28,4 +28,4 @@ async def disconnect_device_sessions(broker: Broker, device_codes: set[str]) -> 
     """aMQTT has no public per-client close API; isolate the pinned adapter here."""
     for device_code in device_codes:
         if device_code in broker.sessions:
-            await broker._cleanup_session(device_code)  # noqa: SLF001
+            await broker._cleanup_session(device_code)

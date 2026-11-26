@@ -44,4 +44,4 @@ def divide(a: float, b: float) -> dict[str, Any]:
     return {"success": True, "operation": "divide", "a": a, "b": b, "result": result}
 
 
-__all__ = ["add", "subtract", "multiply", "divide"]
+__all__ = ["add", "divide", "multiply", "subtract"]

@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
 import bcrypt
+import httpx
 
 from app.core.config import Settings
 

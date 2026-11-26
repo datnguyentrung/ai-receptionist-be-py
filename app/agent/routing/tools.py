@@ -17,7 +17,7 @@ def ask_clarifying_question(
         options: 2-3 lựa chọn đại diện phương án (mỗi option dưới 8 từ).
         ambiguity_type: Loại mơ hồ (ví dụ: 'domain_overlap', 'vague_intent').
         reasoning: Lý do cần làm rõ.
-        candidate_agents: Danh sách tên các agent đang cạnh tranh xử lý (INGESTION_AGENT, CALCULATION_AGENT, GRAPH_QA_AGENT).
+        candidate_agents: Danh sách tên các agent đang cạnh tranh xử lý (INGESTION_AGENT, ADMISSION_AGENT, TUITION_AGENT, TRAINING_AGENT, CENTER_INFO_AGENT, CHATCHIT_AGENT).
     """
     return {
         "status": "clarification_needed",

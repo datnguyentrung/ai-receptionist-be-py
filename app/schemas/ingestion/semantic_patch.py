@@ -1,6 +1,7 @@
 """LLM extraction contracts (Semantic Layer without business identity)."""
 
 from typing import Any
+
 from pydantic import Field, model_validator
 
 from app.schemas.ingestion.base import IngestionModel

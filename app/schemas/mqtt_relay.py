@@ -9,12 +9,12 @@ from datetime import UTC, datetime
 from amqtt.client import ClientError, MQTTClient
 
 from app.core.config import Settings
-from app.services.device_registry import DeviceRegistry
 from app.mapper.event_mapper import (
     build_check_in_close_event,
     build_check_in_open_event,
     normalize_sensor_event,
 )
+from app.services.device_registry import DeviceRegistry
 
 logger = logging.getLogger(__name__)
 
