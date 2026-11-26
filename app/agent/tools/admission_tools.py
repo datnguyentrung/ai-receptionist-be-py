@@ -53,12 +53,15 @@ def recommend_class(
     """
     query = " ".join(value for value in (goal, schedule_preference) if value).strip()
     try:
-        courses = filter_by_query(list_resource("/courses"), query)
-        course_schedules = filter_by_query(list_resource("/course-schedules"), schedule_preference)
-        plans = list_resource("/training-plans")
-        requirements = list_resource("/training-plan-requirements")
-        # Keep recommendations deterministic: the LLM receives all matching facts and decides transparently.
-        return tool_result(query, {"studentAge": age, "candidateCourses": courses, "courseSchedules": course_schedules, "trainingPlans": plans, "trainingPlanRequirements": requirements}, "Đây là các lớp và điều kiện phù hợp sơ bộ; hãy đối chiếu tuổi với điều kiện của từng gói trước khi tư vấn.")
+        catalog = filter_by_query(
+            get_resource("/training-plans/registration-catalog"), query
+        )
+        return tool_result(
+            query,
+            {"studentAge": age, "registrationCatalog": catalog},
+            "Danh mục gồm giá, cấp độ, số buổi và yêu cầu lịch của từng gói. "
+            "Java chưa có điều kiện độ tuổi hay mục tiêu tập luyện, nên không được khẳng định một lớp phù hợp chỉ từ dữ liệu này.",
+        )
     except JavaCatalogError as exc:
         return tool_error(query, exc)
 
@@ -73,12 +76,22 @@ def search_trial_policy(query: str) -> dict[str, Any]:
 
 
 def search_registration_process(query: str) -> dict[str, Any]:
-    """Tra cứu quy trình, thủ tục và các bước đăng ký nhập học.
+    """Tra cứu các lựa chọn gói và lịch trong bước đăng ký từ Java.
 
     Args:
         query: Câu hỏi hoặc từ khóa về cách thức đăng ký học tại trung tâm.
     """
-    raise NotImplementedError("Chức năng tìm kiếm quy trình đăng ký học chưa được triển khai!")
+    try:
+        catalog = filter_by_query(
+            get_resource("/training-plans/registration-catalog"), query
+        )
+        return tool_result(
+            query,
+            {"registrationCatalog": catalog},
+            "Dữ liệu API bao gồm gói, giá và yêu cầu lịch. Các bước hồ sơ hoặc chính sách đăng ký không có trong API này.",
+        )
+    except JavaCatalogError as exc:
+        return tool_error(query, exc)
 
 
 __all__ = [

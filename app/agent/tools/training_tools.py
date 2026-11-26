@@ -52,12 +52,22 @@ def search_training_knowledge(query: str) -> dict[str, Any]:
 
 
 def search_training_curriculum(query: str) -> dict[str, Any]:
-    """Tra cứu chương trình đào tạo và giáo trình theo từng cấp độ.
+    """Tra cứu cấu trúc chương trình và lịch học theo gói từ Java.
 
     Args:
         query: Từ khóa về lộ trình giảng dạy, nội dung chương trình học.
     """
-    raise NotImplementedError("Chức năng tìm kiếm chương trình đào tạo chưa được triển khai!")
+    try:
+        catalog = filter_by_query(
+            get_resource("/training-plans/registration-catalog"), query
+        )
+        return tool_result(
+            query,
+            {"registrationCatalog": catalog},
+            "API cung cấp cấp độ, thời lượng, số buổi và các loại buổi học; nội dung giáo trình chi tiết vẫn cần tri thức đã kiểm chứng.",
+        )
+    except JavaCatalogError as exc:
+        return tool_error(query, exc)
 
 
 def search_training_benefits(query: str) -> dict[str, Any]:

@@ -25,19 +25,40 @@ def test_training_schedule_combines_all_schedule_sources(monkeypatch):
     assert set(result["resources"]) == {"classSchedules", "courseSchedules", "calendarSessions"}
 
 
-def test_admission_recommendation_uses_all_declared_java_resources(monkeypatch):
+def test_admission_recommendation_uses_registration_catalog(monkeypatch):
     requested = []
 
-    def list_resource(path, params=None):
+    def get_resource(path):
         requested.append(path)
-        return [{"name": path}]
+        return [{"name": "Thiếu nhi", "finalPrice": 500000}]
 
-    monkeypatch.setattr(admission_tools, "list_resource", list_resource)
+    monkeypatch.setattr(admission_tools, "get_resource", get_resource)
 
     result = admission_tools.recommend_class(age=8, goal="thể lực", schedule_preference="tối")
 
     assert result["resources"]["studentAge"] == 8
-    assert requested == ["/courses", "/course-schedules", "/training-plans", "/training-plan-requirements"]
+    assert requested == ["/training-plans/registration-catalog"]
+
+
+def test_registration_process_and_curriculum_use_registration_catalog(monkeypatch):
+    catalog = [{"name": "Thiếu nhi", "durationMonths": 3, "requirements": []}]
+    monkeypatch.setattr(admission_tools, "get_resource", lambda path: catalog)
+    monkeypatch.setattr(training_tools, "get_resource", lambda path: catalog)
+
+    registration = admission_tools.search_registration_process("thiếu nhi")
+    curriculum = training_tools.search_training_curriculum("thiếu nhi")
+
+    assert registration["resources"]["registrationCatalog"] == catalog
+    assert curriculum["resources"]["registrationCatalog"] == catalog
+
+
+def test_contact_information_uses_branch_directory(monkeypatch):
+    monkeypatch.setattr(center_info_tools, "list_resource", lambda path: [{"branchId": 1, "name": "Cơ sở A"}])
+    monkeypatch.setattr(center_info_tools, "get_resource", lambda path: {"branchId": 1, "hotline": "0900"})
+
+    result = center_info_tools.search_contact_information("cơ sở a")
+
+    assert result["resources"]["branches"] == [{"branchId": 1, "hotline": "0900"}]
 
 
 def test_coach_tool_combines_people_positions_and_assignments(monkeypatch):

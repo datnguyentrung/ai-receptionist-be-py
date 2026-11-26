@@ -69,12 +69,25 @@ def search_center_facilities(query: str) -> dict[str, Any]:
 
 
 def search_contact_information(query: str) -> dict[str, Any]:
-    """Tra cứu thông tin liên hệ, hotline, fanpage, Zalo và kênh hỗ trợ nhân viên.
+    """Tra cứu địa chỉ và hotline chính thức theo cơ sở từ Java.
 
     Args:
         query: Câu hỏi về số điện thoại, email, kênh liên hệ hoặc gặp tư vấn viên.
     """
-    raise NotImplementedError("Chức năng tìm kiếm thông tin liên hệ chưa được triển khai!")
+    try:
+        branches = filter_by_query(list_resource("/branches"), query)
+        details = [
+            get_resource(f"/branches/{branch['branchId']}")
+            for branch in branches[:10]
+            if branch.get("branchId")
+        ]
+        return tool_result(
+            query,
+            {"branches": details or branches},
+            "API hiện có địa chỉ và hotline; email, Zalo, Facebook và website chưa được Java quản lý.",
+        )
+    except JavaCatalogError as exc:
+        return tool_error(query, exc)
 
 
 __all__ = [

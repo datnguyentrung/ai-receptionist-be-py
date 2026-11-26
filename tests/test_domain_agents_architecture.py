@@ -207,13 +207,11 @@ def test_domain_agent_tools_skills_and_stub_functions():
     # FunctionTools not backed by a Java API in this rollout remain stubs.
     stub_calls = [
         lambda: search_trial_policy("học thử"),
-        lambda: search_registration_process("đăng ký"),
         lambda: search_tuition_policy("bảo lưu"),
         lambda: search_discount_policy("ưu đãi"),
         lambda: calculate_tuition("gói cơ bản"),
         lambda: search_payment_policy("chuyển khoản"),
         lambda: search_training_knowledge("bài quyền"),
-        lambda: search_training_curriculum("giáo trình"),
         lambda: search_training_benefits("lợi ích"),
         lambda: search_belt_system("hệ thống đai"),
         lambda: search_exam_policy("thi lên đai"),
@@ -221,7 +219,6 @@ def test_domain_agent_tools_skills_and_stub_functions():
         lambda: search_center_knowledge("lịch sử"),
         lambda: search_opening_hours("giờ mở cửa"),
         lambda: search_center_facilities("cơ sở vật chất"),
-        lambda: search_contact_information("hotline"),
     ]
     for call in stub_calls:
         with pytest.raises(NotImplementedError):
