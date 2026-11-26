@@ -28,3 +28,4 @@ pyright-report.json
 .pytest_cache/
 .codegraph**
 .fog/**
+.ruff_cache**
