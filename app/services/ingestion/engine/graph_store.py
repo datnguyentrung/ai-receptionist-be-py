@@ -43,6 +43,7 @@ from typing import Any, cast
 
 from neo4j import AsyncDriver
 
+from app.core.tenant_context import require_tenant_id
 from app.services.graphrag.embeddings import GeminiEmbeddingProvider
 from app.services.ingestion.engine.assertions import assertion_key, temporal_interval
 from app.services.ingestion.engine.repository import Workspace
@@ -395,17 +396,20 @@ class Neo4jIngestionStore:
         Raises:
             RuntimeError: Nếu số lượng đọc lại không khớp với số lượng trong payload.
         """
+        tenant_id = require_tenant_id(payload.get("tenant_id"))
+
         # 1. Ghi thông tin phiên bản tài liệu (TaekwondoSourceVersion)
         await (
             await tx.run(
                 """
-                MERGE (v:TaekwondoSourceVersion {versionId: $version_id})
+                MERGE (v:TaekwondoSourceVersion {versionId: $version_id, tenantId: $tenant_id})
                 SET v.documentId = $document_id,
                     v.documentKey = $document_key,
                     v.documentName = $document_name,
                     v.ontologyVersionId = $ontology_version_id,
                     v.status = 'WRITTEN', v.updatedAt = datetime()
                 """,
+                tenant_id=tenant_id,
                 **_pick(
                     payload,
                     "version_id",
@@ -422,9 +426,9 @@ class Neo4jIngestionStore:
             await tx.run(
                 """
                 UNWIND $chunks AS chunk
-                MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
+                MATCH (v:TaekwondoSourceVersion {versionId: $version_id, tenantId: $tenant_id})
                 MERGE (c:TaekwondoChunk {
-                  versionId: $version_id, chunkId: chunk.chunkId
+                  versionId: $version_id, chunkId: chunk.chunkId, tenantId: $tenant_id
                 })
                 SET c.documentId = $document_id,
                     c.documentName = $document_name,
@@ -447,6 +451,7 @@ class Neo4jIngestionStore:
                 MERGE (v)-[:HAS_CHUNK]->(c)
                 """,
                 chunks=payload["chunks"],
+                tenant_id=tenant_id,
                 **_pick(
                     payload,
                     "version_id",
@@ -463,12 +468,13 @@ class Neo4jIngestionStore:
                 await tx.run(
                     """
                     UNWIND $links AS link
-                    MATCH (a:TaekwondoChunk {versionId: $version_id, chunkId: link.from})
-                    MATCH (b:TaekwondoChunk {versionId: $version_id, chunkId: link.to})
-                    MERGE (a)-[:NEXT_CHUNK {versionId: $version_id}]->(b)
+                    MATCH (a:TaekwondoChunk {versionId: $version_id, chunkId: link.from, tenantId: $tenant_id})
+                    MATCH (b:TaekwondoChunk {versionId: $version_id, chunkId: link.to, tenantId: $tenant_id})
+                    MERGE (a)-[:NEXT_CHUNK {versionId: $version_id, tenantId: $tenant_id}]->(b)
                     """,
                     links=payload["chunk_links"],
                     version_id=payload["version_id"],
+                    tenant_id=tenant_id,
                 )
             ).consume()
 
@@ -477,8 +483,8 @@ class Neo4jIngestionStore:
             await tx.run(
                 """
                 UNWIND $nodes AS node
-                MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
-                MERGE (n:TaekwondoKnowledgeEntity {stableKey: node.stableKey})
+                MATCH (v:TaekwondoSourceVersion {versionId: $version_id, tenantId: $tenant_id})
+                MERGE (n:TaekwondoKnowledgeEntity {stableKey: node.stableKey, tenantId: $tenant_id})
                 ON CREATE SET n.createdAt = datetime(),
                     n.propertiesJson = '{}',
                     n.searchText = node.searchText
@@ -489,6 +495,7 @@ class Neo4jIngestionStore:
                 """,
                 nodes=payload["nodes"],
                 version_id=payload["version_id"],
+                tenant_id=tenant_id,
             )
         ).consume()
 
@@ -498,17 +505,18 @@ class Neo4jIngestionStore:
                 await tx.run(
                     """
                     UNWIND $mentions AS mention
-                    MATCH (n:TaekwondoKnowledgeEntity {stableKey: mention.stableKey})
+                    MATCH (n:TaekwondoKnowledgeEntity {stableKey: mention.stableKey, tenantId: $tenant_id})
                     MATCH (c:TaekwondoChunk {
-                      versionId: $version_id, chunkId: mention.chunkId
+                      versionId: $version_id, chunkId: mention.chunkId, tenantId: $tenant_id
                     })
                     MERGE (n)-[m:MENTIONED_IN {
-                      versionId: $version_id, chunkId: mention.chunkId
+                      versionId: $version_id, chunkId: mention.chunkId, tenantId: $tenant_id
                     }]->(c)
                     SET m.quotes = mention.quotes, m.updatedAt = datetime()
                     """,
                     mentions=payload["mentions"],
                     version_id=payload["version_id"],
+                    tenant_id=tenant_id,
                 )
             ).consume()
 
@@ -518,10 +526,10 @@ class Neo4jIngestionStore:
                 await tx.run(
                     """
                     UNWIND $edges AS edge
-                    MATCH (s:TaekwondoKnowledgeEntity {stableKey: edge.sourceKey})
-                    MATCH (t:TaekwondoKnowledgeEntity {stableKey: edge.targetKey})
+                    MATCH (s:TaekwondoKnowledgeEntity {stableKey: edge.sourceKey, tenantId: $tenant_id})
+                    MATCH (t:TaekwondoKnowledgeEntity {stableKey: edge.targetKey, tenantId: $tenant_id})
                     MERGE (s)-[r:TAEKWONDO_RELATION {
-                      relationshipKey: edge.relationshipKey
+                      relationshipKey: edge.relationshipKey, tenantId: $tenant_id
                     }]->(t)
                     SET r.relationType = edge.edgeName,
                         r.sourceKey = edge.sourceKey,
@@ -533,6 +541,7 @@ class Neo4jIngestionStore:
                     """,
                     edges=payload["edges"],
                     version_id=payload["version_id"],
+                    tenant_id=tenant_id,
                 )
             ).consume()
 
@@ -542,8 +551,8 @@ class Neo4jIngestionStore:
                 await tx.run(
                     """
                     UNWIND $facts AS fact
-                    MATCH (v:TaekwondoSourceVersion {versionId: $version_id})
-                    MERGE (f:TaekwondoKnowledgeFact {factId: fact.factId})
+                    MATCH (v:TaekwondoSourceVersion {versionId: $version_id, tenantId: $tenant_id})
+                    MERGE (f:TaekwondoKnowledgeFact {factId: fact.factId, tenantId: $tenant_id})
                     ON CREATE SET f.factId = fact.factId,
                         f.factType = fact.factType,
                         f.statement = fact.statement,
@@ -658,25 +667,17 @@ class Neo4jIngestionStore:
         return {"commitStatus": "COMMITTED" if publish else "PREPARED", **actual, "readbackVerified": True}
 
     async def search_chunk_vector(
-        self, embedding: list[float], limit: int
+        self, embedding: list[float], limit: int, *, tenant_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        Tìm kiếm các chunk có vector embedding gần nhất theo khoảng cách cosine similarity.
-
-        Args:
-            embedding: Vector embedding truy vấn.
-            limit: Số lượng kết quả tối đa cần lấy.
-
-        Returns:
-            list[dict[str, Any]]: Danh sách các chunk kèm điểm số tương đồng (score).
-        """
         if not embedding or limit <= 0:
             return []
+        resolved_tenant = require_tenant_id(tenant_id)
         return await self._data(
             """
-            CALL db.index.vector.queryNodes($index, $limit, $embedding)
+            CALL db.index.vector.queryNodes($index, $fetch_limit, $embedding)
             YIELD node, score
-            MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})-[:ASSERTS_FACT]->(node)
+            MATCH (v:TaekwondoSourceVersion {versionId: node.versionId, status: 'COMMITTED', tenantId: $tenant_id})
+            WHERE node.tenantId = $tenant_id
             RETURN node.chunkId AS chunkId, node.versionId AS versionId,
                    node.documentId AS documentId, node.documentName AS documentName,
                    node.chunkIndex AS chunkIndex, node.text AS text,
@@ -687,31 +688,25 @@ class Neo4jIngestionStore:
             LIMIT $limit
             """,
             index=CHUNK_VECTOR_INDEX,
+            fetch_limit=max(limit * 5, 50),
             limit=limit,
             embedding=embedding,
+            tenant_id=resolved_tenant,
         )
 
     async def search_fact_vector(
-        self, embedding: list[float], limit: int
+        self, embedding: list[float], limit: int, *, tenant_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        Tìm kiếm các sự kiện tri thức (facts) tương đồng nhất dựa trên vector embedding.
-
-        Args:
-            embedding: Vector embedding truy vấn.
-            limit: Số lượng kết quả tối đa cần lấy.
-
-        Returns:
-            list[dict[str, Any]]: Danh sách các fact kèm điểm số tương đồng (score).
-        """
         if not embedding or limit <= 0:
             return []
+        resolved_tenant = require_tenant_id(tenant_id)
         return await self._data(
             """
-            CALL db.index.vector.queryNodes($index, $limit, $embedding)
+            CALL db.index.vector.queryNodes($index, $fetch_limit, $embedding)
             YIELD node, score
-            MATCH (v:TaekwondoSourceVersion {versionId: node.versionId, status: 'COMMITTED'})
-            OPTIONAL MATCH (node)-[:SUPPORTED_BY]->(chunk:TaekwondoChunk)
+            MATCH (v:TaekwondoSourceVersion {versionId: node.versionId, status: 'COMMITTED', tenantId: $tenant_id})
+            WHERE node.tenantId = $tenant_id
+            OPTIONAL MATCH (node)-[:SUPPORTED_BY]->(chunk:TaekwondoChunk {tenantId: $tenant_id})
             RETURN node.factId AS factId, node.statement AS statement,
                    node.factType AS factType, score,
                    collect(DISTINCT chunk.chunkId) AS chunkIds
@@ -719,30 +714,24 @@ class Neo4jIngestionStore:
             LIMIT $limit
             """,
             index=FACT_VECTOR_INDEX,
+            fetch_limit=max(limit * 5, 50),
             limit=limit,
             embedding=embedding,
+            tenant_id=resolved_tenant,
         )
 
     async def search_chunk_fulltext(
-        self, query: str, limit: int
+        self, query: str, limit: int, *, tenant_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        Tìm kiếm toàn văn (fulltext) trên nội dung các đoạn văn bản (chunks).
-
-        Args:
-            query: Từ khóa tìm kiếm Lucene.
-            limit: Số lượng kết quả tối đa.
-
-        Returns:
-            list[dict[str, Any]]: Danh sách các chunk khớp nội dung tìm kiếm.
-        """
         if not query or not query.strip() or limit <= 0:
             return []
+        resolved_tenant = require_tenant_id(tenant_id)
         return await self._data(
             """
-            CALL db.index.fulltext.queryNodes($index, $query, {limit: $limit})
+            CALL db.index.fulltext.queryNodes($index, $query, {limit: $fetch_limit})
             YIELD node, score
-            MATCH (v:TaekwondoSourceVersion {versionId: node.versionId, status: 'COMMITTED'})
+            MATCH (v:TaekwondoSourceVersion {versionId: node.versionId, status: 'COMMITTED', tenantId: $tenant_id})
+            WHERE node.tenantId = $tenant_id
             RETURN node.chunkId AS chunkId, node.versionId AS versionId,
                    node.documentId AS documentId, node.documentName AS documentName,
                    node.chunkIndex AS chunkIndex, node.text AS text,
@@ -755,30 +744,23 @@ class Neo4jIngestionStore:
             """,
             index=CHUNK_FULLTEXT_INDEX,
             query=query,
+            fetch_limit=max(limit * 5, 50),
             limit=limit,
+            tenant_id=resolved_tenant,
         )
 
     async def search_entity_fulltext(
-        self, query: str, limit: int
+        self, query: str, limit: int, *, tenant_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        Tìm kiếm toàn văn (fulltext) trên văn bản đại diện của các thực thể tri thức.
-
-        Args:
-            query: Từ khóa tìm kiếm.
-            limit: Số lượng kết quả tối đa.
-
-        Returns:
-            list[dict[str, Any]]: Danh sách thực thể khớp tìm kiếm.
-        """
         if not query or not query.strip() or limit <= 0:
             return []
+        resolved_tenant = require_tenant_id(tenant_id)
         return await self._data(
             """
-            CALL db.index.fulltext.queryNodes($index, $query, {limit: $limit})
+            CALL db.index.fulltext.queryNodes($index, $query, {limit: $fetch_limit})
             YIELD node, score
-            WHERE EXISTS {
-              MATCH (:TaekwondoSourceVersion {status: 'COMMITTED'})-[:ASSERTS_ENTITY]->(node)
+            WHERE node.tenantId = $tenant_id AND EXISTS {
+              MATCH (:TaekwondoSourceVersion {status: 'COMMITTED', tenantId: $tenant_id})-[:ASSERTS_ENTITY]->(node)
             }
             RETURN node.stableKey AS stableKey, node.entityType AS entityType,
                    node.searchText AS searchText, score
@@ -787,7 +769,9 @@ class Neo4jIngestionStore:
             """,
             index=ENTITY_FULLTEXT_INDEX,
             query=query,
+            fetch_limit=max(limit * 5, 50),
             limit=limit,
+            tenant_id=resolved_tenant,
         )
 
     async def chunks_for_entities(

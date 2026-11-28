@@ -25,11 +25,17 @@ class JavaCatalogClient:
         base_url: str,
         timeout_seconds: float,
         bearer_token: str = "",
+        tenant_id: str | None = None,
+        internal_service_token: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         headers = {"Accept": "application/json"}
         if bearer_token.strip():
             headers["Authorization"] = f"Bearer {bearer_token.strip()}"
+        if internal_service_token.strip():
+            headers["X-Internal-Service-Token"] = internal_service_token.strip()
+        if tenant_id and tenant_id.strip():
+            headers["X-Tenant-Id"] = tenant_id.strip()
         self._owns_client = client is None
         self._client = client or httpx.Client(
             base_url=base_url.rstrip("/"), timeout=timeout_seconds, headers=headers
@@ -38,6 +44,17 @@ class JavaCatalogClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         try:
             response = self._client.get(path, params=params)
+            if (
+                response.status_code == 401
+                and "Authorization" in self._client.headers
+                and "X-Internal-Service-Token" in self._client.headers
+            ):
+                fallback_headers = {
+                    k: v
+                    for k, v in self._client.headers.items()
+                    if k.lower() != "authorization"
+                }
+                response = self._client.get(path, params=params, headers=fallback_headers)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as exc:

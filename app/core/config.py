@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     # JWT of a read-only Java service account used by ADK catalogue FunctionTools.
     JAVA_AGENT_API_TOKEN: str = ""
     JAVA_REQUEST_TIMEOUT_SECONDS: float = 10.0
+    INTERNAL_GATEWAY_TOKEN: str = ""
+    # Knowledge form publication. This must be a real shared RabbitMQ URL in
+    # deployed environments; localhost only works when the worker is local.
+    KNOWLEDGE_RABBITMQ_URL: str = ""
+    KNOWLEDGE_RABBITMQ_EXCHANGE: str = "taekwondo_knowledge"
+    KNOWLEDGE_RABBITMQ_QUEUE: str = "knowledge_form_publish"
+    KNOWLEDGE_PUBLISH_MAX_ATTEMPTS: int = 3
     FOG_INTERNAL_BASE_URL: str = "http://127.0.0.1:8000"
     FOG_INTERNAL_SECRET: str = ""
 

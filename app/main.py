@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api import api_router
+from app.api.knowledge_api import get_knowledge_workflow_service
 from app.clients.insightface_warmup_client import InsightFaceWarmupClient
 from app.clients.java_attendance_client import JavaAttendanceClient
 from app.core.config import settings
@@ -30,6 +31,7 @@ from app.schemas.mqtt_relay import MqttRelay
 from app.services.broker import create_broker, disconnect_device_sessions
 from app.services.device_registry import DeviceRegistry
 from app.services.mqtt_registry_plugins import set_registry, set_relay_credential
+from app.services.knowledge.publish_broker import KnowledgePublishBroker
 from app.utils.insightface_utils import initialize_face_app, is_face_app_initialized
 
 if isinstance(sys.stdout, io.TextIOWrapper):
@@ -155,8 +157,12 @@ async def lifespan(app: FastAPI):
     app.state.device_registry = registry
     broker_started = False
     relay_started = False
+    knowledge_broker = KnowledgePublishBroker(
+        get_knowledge_workflow_service().apublish_processing_form
+    )
 
     try:
+        await knowledge_broker.start()
         await broker.start()
         broker_started = True
 
@@ -177,26 +183,30 @@ async def lifespan(app: FastAPI):
         # the local broker cannot bind or the relay cannot connect.
         logger.exception("MQTT runtime failed to start")
 
+    sync_task: asyncio.Task[None] | None = None
     try:
-        async def sync_registry() -> None:
-            while True:
-                try:
-                    synced = await registry.sync()
-                    await disconnect_device_sessions(broker, registry.take_invalidated_device_codes())
-                    if not synced:
-                        logger.warning("[Registry] Sync was not completed; retaining the local snapshot")
-                except Exception:
-                    # A malformed cloud response must not permanently stop the
-                    # heartbeat loop or take down local PIR routing.
-                    logger.exception("[Registry] Sync failed; retrying on the next interval")
-                await asyncio.sleep(settings.FOG_SYNC_INTERVAL_SECONDS)
+        if settings.FOG_GATEWAY_DEVICE_CODE:
+            async def sync_registry() -> None:
+                while True:
+                    try:
+                        synced = await registry.sync()
+                        await disconnect_device_sessions(broker, registry.take_invalidated_device_codes())
+                        if not synced:
+                            logger.warning("[Registry] Sync was not completed; retaining the local snapshot")
+                    except Exception:
+                        # A malformed cloud response must not permanently stop the
+                        # heartbeat loop or take down local PIR routing.
+                        logger.exception("[Registry] Sync failed; retrying on the next interval")
+                    await asyncio.sleep(settings.FOG_SYNC_INTERVAL_SECONDS)
 
-        sync_task = asyncio.create_task(sync_registry(), name="device-registry-sync")
+            sync_task = asyncio.create_task(sync_registry(), name="device-registry-sync")
         yield
     finally:
-        sync_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sync_task
+        await knowledge_broker.stop()
+        if sync_task is not None:
+            sync_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sync_task
         if relay_started:
             with contextlib.suppress(Exception):
                 await relay.stop()

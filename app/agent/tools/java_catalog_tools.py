@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 from app.clients.java_catalog_client import JavaCatalogClient, JavaCatalogError
 from app.core.config import settings
+from app.core.tenant_context import get_current_tenant_context
 
 
 def java_catalog_client() -> JavaCatalogClient:
     """Build a short-lived client so FunctionTools remain safe in sync ADK calls."""
+    ctx = get_current_tenant_context()
+    effective_bearer = (
+        settings.JAVA_AGENT_API_TOKEN.strip()
+        or (ctx.user_access_token.strip() if ctx is not None else "")
+    )
     return JavaCatalogClient(
         settings.JAVA_CLOUD_BASE_URL,
         settings.JAVA_REQUEST_TIMEOUT_SECONDS,
-        settings.JAVA_AGENT_API_TOKEN,
+        effective_bearer,
+        tenant_id=ctx.tenant_id if ctx is not None else None,
+        internal_service_token=settings.INTERNAL_GATEWAY_TOKEN,
     )
 
 
@@ -52,24 +63,52 @@ def filter_by_query(items: list[dict[str, Any]], query: str) -> list[dict[str, A
     return matched or items
 
 
+from pydantic import BaseModel
+
+
+class CatalogToolResponse(BaseModel):
+    """Uniform response contract for Java catalog tools."""
+
+    source: str = "java-api"
+    query: str
+    resources: dict[str, Any] | None = None
+    message: str | None = None
+    error: str | None = None
+    status_code: int | None = None
+
+
 def tool_result(query: str, resources: dict[str, Any], message: str | None = None) -> dict[str, Any]:
     """Return a compact, LLM-friendly success/failure contract for every Java tool."""
-    result: dict[str, Any] = {"source": "java-api", "query": query, "resources": resources}
-    if message:
-        result["message"] = message
-    return result
+    return CatalogToolResponse(
+        query=query,
+        resources=resources,
+        message=message or None,
+    ).model_dump(exclude_none=True)
 
 
 def tool_error(query: str, exc: JavaCatalogError) -> dict[str, Any]:
+    ctx = get_current_tenant_context()
+    logger.warning(
+        "JAVA_CATALOG_TOOL_ERROR | path=%s | statusCode=%s | query=%r | tenantId=%s | hasAgentToken=%s",
+        exc.path,
+        exc.status_code,
+        query,
+        ctx.tenant_id if ctx else None,
+        bool(settings.JAVA_AGENT_API_TOKEN.strip()),
+    )
     message = "Không thể lấy dữ liệu từ hệ thống quản lý lớp học. Vui lòng thử lại sau."
     if exc.status_code == 401:
         message = "Dịch vụ agent chưa được cấu hình quyền truy cập dữ liệu Java."
     elif exc.status_code == 403:
         message = "Tài khoản dịch vụ agent chưa có quyền đọc dữ liệu này."
-    return {"source": "java-api", "query": query, "error": message, "status_code": exc.status_code}
+    return CatalogToolResponse(
+        query=query,
+        error=message,
+        status_code=exc.status_code,
+    ).model_dump(exclude_none=True)
 
 
 __all__ = [
-    "calendar_window", "filter_by_query", "get_resource", "list_resource", "tool_error",
-    "tool_result",
+    "CatalogToolResponse", "calendar_window", "filter_by_query", "get_resource", "list_resource",
+    "tool_error", "tool_result",
 ]

@@ -19,7 +19,7 @@ from app.models import (
     OntologyVersion,
 )
 
-COMPILER_VERSION = "ontology-compiler-v2"
+COMPILER_VERSION = "ontology-compiler-v3"
 
 
 class OntologyCompiler:
@@ -100,6 +100,20 @@ class OntologyCompiler:
                 "technicalName": e.technical_name,
                 "displayName": e.display_name or e.technical_name,
                 "domain": str((e.metadata_ or {}).get("domain", "")),
+                "layer": str((e.metadata_ or {}).get("layer", "LAYER_3_DYNAMIC")),
+                "ownership": str((e.metadata_ or {}).get("ownership", "DYNAMIC_INGESTION")),
+                "syncMode": (e.metadata_ or {}).get("sync_mode"),
+                "sourceBinding": (e.metadata_ or {}).get("source_binding"),
+                "governance": {
+                    "layer": str((e.metadata_ or {}).get("layer", "LAYER_3_DYNAMIC")),
+                    "sourceOfTruth": (e.metadata_ or {}).get("sourceOfTruth", "TENANT_EXTENSION"),
+                    "ingestionMode": (e.metadata_ or {}).get("ingestionMode", "ALLOW"),
+                    "extensionMode": (e.metadata_ or {}).get("extensionMode", "TENANT_EXTENSIBLE"),
+                    "visibility": (e.metadata_ or {}).get("visibility", "PUBLIC"),
+                    "ownerAgentKeys": (e.metadata_ or {}).get("ownerAgentKeys", []),
+                    "reviewRequired": bool((e.metadata_ or {}).get("reviewRequired", True)),
+                    "sourceBinding": (e.metadata_ or {}).get("sourceBinding") or (e.metadata_ or {}).get("source_binding"),
+                },
                 "identityStrategy": e.identity_strategy,
                 "allowDynamicProperties": bool((e.metadata_ or {}).get("allow_dynamic_properties", False)),
                 "description": e.description,
@@ -118,6 +132,7 @@ class OntologyCompiler:
                 "required": p.required,
                 "multiValue": p.multi_value,
                 "constraints": p.constraints or {},
+                "governance": (p.constraints or {}).get("governance"),
                 "description": p.description,
             }
             for p in properties
@@ -133,6 +148,7 @@ class OntologyCompiler:
                 "targetEntityType": entity_name_by_id.get(str(r.target_entity_type_id), ""),
                 "cardinality": r.cardinality.value,
                 "constraints": r.constraints or {},
+                "governance": (r.constraints or {}).get("governance"),
                 "description": r.description,
             }
             for r in relationships

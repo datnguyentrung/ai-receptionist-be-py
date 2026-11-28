@@ -5,6 +5,11 @@ from .ingestion_commit_approval import (
 from .ingestion_entity_resolution_review import IngestionEntityResolutionReview
 from .ingestion_fact_conflict import IngestionFactConflict
 from .ingestion_workspace_checkpoint import IngestionWorkspaceCheckpoint
+from .knowledge_governance import (
+    KnowledgeGovernanceItem,
+    KnowledgePublishJob,
+    KnowledgeTenantProposal,
+)
 from .ontology_alias import (
     OntologyAlias,
     OntologyAliasSource,
@@ -36,6 +41,9 @@ __all__ = [
     "IngestionFactConflict",
     "IngestionKnowledgeRevision",
     "IngestionWorkspaceCheckpoint",
+    "KnowledgeGovernanceItem",
+    "KnowledgePublishJob",
+    "KnowledgeTenantProposal",
     "OntologyAlias",
     "OntologyAliasSource",
     "OntologyCompiledSnapshot",

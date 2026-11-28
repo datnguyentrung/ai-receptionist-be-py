@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.artifacts import InMemoryArtifactService
@@ -24,6 +24,11 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from app.agent.agent import app as adk_app
+from app.core.tenant_context import (
+    TrustedTenantContext,
+    require_internal_tenant_context,
+    tenant_context_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +195,7 @@ def _build_user_content(
 async def _stream_agent_events(
     *,
     runner: Runner,
-    user_id: str,
+    tenant_context: TrustedTenantContext,
     session_id: str,
     user_content: types.Content,
     stream_tokens: bool,
@@ -198,19 +203,27 @@ async def _stream_agent_events(
     del stream_tokens  # Non-streaming atomic response; SSE carries status only.
     request_id = f"req_{uuid4().hex[:12]}"
     started_at = time.perf_counter()
+    scoped_user_id = f"{tenant_context.tenant_id}:{tenant_context.user_id}"
+    scoped_session_id = (
+        session_id
+        if session_id.startswith(f"{tenant_context.tenant_id}:")
+        else f"{tenant_context.tenant_id}:{session_id}"
+    )
 
     logger.info(
-        "CHAT_REQUEST_RECEIVED | requestId=%s | sessionId=%s | userId=%s",
+        "CHAT_REQUEST_RECEIVED | requestId=%s | tenantId=%s | sessionId=%s | userId=%s",
         request_id,
-        session_id,
-        user_id,
+        tenant_context.tenant_id,
+        scoped_session_id,
+        tenant_context.user_id,
     )
 
     yield _sse_frame(
         "session",
         {
-            "sessionId": session_id,
-            "userId": user_id,
+            "sessionId": scoped_session_id,
+            "userId": tenant_context.user_id,
+            "tenantId": tenant_context.tenant_id,
             "requestId": request_id,
         },
     )
@@ -223,41 +236,57 @@ async def _stream_agent_events(
     terminal_status = ChatStatus.FAILED
 
     try:
-        async for event in runner.run_async(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=user_content,
-            run_config=run_config,
-        ):
-            content = getattr(event, "content", None)
-            parts = getattr(content, "parts", None) or []
+        with tenant_context_scope(tenant_context):
+            async for event in runner.run_async(
+                user_id=scoped_user_id,
+                session_id=scoped_session_id,
+                new_message=user_content,
+                run_config=run_config,
+            ):
+                content = getattr(event, "content", None)
+                parts = getattr(content, "parts", None) or []
 
-            text_chunks: list[str] = []
-            has_tool_activity = False
+                text_chunks: list[str] = []
+                has_tool_activity = False
 
-            for part in parts:
-                if getattr(part, "thought", False):
-                    continue
-                part_text = getattr(part, "text", None)
-                if isinstance(part_text, str) and part_text:
-                    text_chunks.append(part_text)
+                for part in parts:
+                    if getattr(part, "thought", False):
+                        continue
+                    part_text = getattr(part, "text", None)
+                    if isinstance(part_text, str) and part_text:
+                        text_chunks.append(part_text)
 
-                if (
-                    getattr(part, "function_call", None) is not None
-                    or getattr(part, "function_response", None) is not None
-                ):
-                    has_tool_activity = True
+                    fn_call = getattr(part, "function_call", None)
+                    fn_resp = getattr(part, "function_response", None)
+                    if fn_call is not None:
+                        has_tool_activity = True
+                        logger.info(
+                            "AGENT_TOOL_CALL | requestId=%s | author=%s | tool=%s | args=%s",
+                            request_id,
+                            getattr(event, "author", "unknown"),
+                            getattr(fn_call, "name", "unknown"),
+                            json.dumps(getattr(fn_call, "args", {}) or {}, ensure_ascii=False, default=str)[:500],
+                        )
+                    if fn_resp is not None:
+                        has_tool_activity = True
+                        logger.info(
+                            "AGENT_TOOL_RESPONSE | requestId=%s | author=%s | tool=%s | response=%s",
+                            request_id,
+                            getattr(event, "author", "unknown"),
+                            getattr(fn_resp, "name", "unknown"),
+                            json.dumps(getattr(fn_resp, "response", {}) or {}, ensure_ascii=False, default=str)[:700],
+                        )
 
-            if has_tool_activity and last_status != ChatStatus.SEARCHING:
-                last_status = ChatStatus.SEARCHING
-                yield _status_frame(request_id, ChatStatus.SEARCHING)
+                if has_tool_activity and last_status != ChatStatus.SEARCHING:
+                    last_status = ChatStatus.SEARCHING
+                    yield _status_frame(request_id, ChatStatus.SEARCHING)
 
-            if text_chunks:
-                # Internal draft only — never streamed to Mobile before commit.
-                draft_response = "".join(text_chunks)
-                if last_status != ChatStatus.GENERATING:
-                    last_status = ChatStatus.GENERATING
-                    yield _status_frame(request_id, ChatStatus.GENERATING)
+                if text_chunks:
+                    # Internal draft only — never streamed to Mobile before commit.
+                    draft_response = "".join(text_chunks)
+                    if last_status != ChatStatus.GENERATING:
+                        last_status = ChatStatus.GENERATING
+                        yield _status_frame(request_id, ChatStatus.GENERATING)
 
         final_frame = _commit_final_response(
             request_id=request_id,
@@ -275,10 +304,11 @@ async def _stream_agent_events(
         terminal_status = ChatStatus.FAILED
         total_ms = round((time.perf_counter() - started_at) * 1000)
         logger.exception(
-            "CHAT_REQUEST_FAILED | requestId=%s | sessionId=%s | userId=%s | totalMs=%s | status=FAILED | error=%s",
+            "CHAT_REQUEST_FAILED | requestId=%s | tenantId=%s | sessionId=%s | userId=%s | totalMs=%s | status=FAILED | error=%s",
             request_id,
-            session_id,
-            user_id,
+            tenant_context.tenant_id,
+            scoped_session_id,
+            tenant_context.user_id,
             total_ms,
             exc,
         )
@@ -297,15 +327,19 @@ async def _stream_agent_events(
         {
             "type": "done",
             "requestId": request_id,
-            "sessionId": session_id,
-            "userId": user_id,
+            "sessionId": scoped_session_id,
+            "userId": tenant_context.user_id,
+            "tenantId": tenant_context.tenant_id,
             "status": terminal_status.value,
         },
     )
 
 
 @router.post("/chat/stream")
-async def stream_agent_chat(request: AgentChatRequest) -> StreamingResponse:
+async def stream_agent_chat(
+    request: AgentChatRequest,
+    tenant_context: Annotated[TrustedTenantContext, Depends(require_internal_tenant_context)],
+) -> StreamingResponse:
     """Chat với ADK Agent qua luồng Server-Sent Events (SSE) dùng JSON payload."""
     session_id = (request.session_id or "").strip() or str(uuid4())
     resolved_attachments = [
@@ -318,7 +352,7 @@ async def stream_agent_chat(request: AgentChatRequest) -> StreamingResponse:
     return StreamingResponse(
         _stream_agent_events(
             runner=runner,
-            user_id=request.user_id,
+            tenant_context=tenant_context,
             session_id=session_id,
             user_content=user_content,
             stream_tokens=request.stream_tokens,
@@ -330,8 +364,8 @@ async def stream_agent_chat(request: AgentChatRequest) -> StreamingResponse:
 
 @router.post("/chat/upload/stream")
 async def stream_agent_chat_with_upload(
+    tenant_context: Annotated[TrustedTenantContext, Depends(require_internal_tenant_context)],
     message: Annotated[str, Form()] = "",
-    user_id: Annotated[str, Form()] = "default_user",
     session_id: Annotated[str | None, Form()] = None,
     stream_tokens: Annotated[bool, Form()] = True,
     files: Annotated[list[UploadFile] | None, File()] = None,
@@ -351,7 +385,7 @@ async def stream_agent_chat_with_upload(
     return StreamingResponse(
         _stream_agent_events(
             runner=runner,
-            user_id=user_id,
+            tenant_context=tenant_context,
             session_id=resolved_session_id,
             user_content=user_content,
             stream_tokens=stream_tokens,
@@ -364,23 +398,30 @@ async def stream_agent_chat_with_upload(
 @router.get("/sessions/{session_id}")
 async def get_agent_session(
     session_id: str,
-    user_id: Annotated[str, Query(min_length=1)] = "default_user",
+    tenant_context: Annotated[TrustedTenantContext, Depends(require_internal_tenant_context)],
 ) -> dict[str, Any]:
     """Lấy trạng thái (`state`) và số lượng sự kiện của một phiên chat ADK."""
     runner = get_agent_runner()
+    scoped_user_id = f"{tenant_context.tenant_id}:{tenant_context.user_id}"
+    scoped_session_id = (
+        session_id
+        if session_id.startswith(f"{tenant_context.tenant_id}:")
+        else f"{tenant_context.tenant_id}:{session_id}"
+    )
     session = await runner.session_service.get_session(
         app_name=runner.app_name,
-        user_id=user_id,
-        session_id=session_id,
+        user_id=scoped_user_id,
+        session_id=scoped_session_id,
     )
     if session is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session '{session_id}' not found for user '{user_id}'.",
+            detail=f"Session '{session_id}' not found.",
         )
     return {
         "sessionId": session.id,
-        "userId": session.user_id,
+        "userId": tenant_context.user_id,
+        "tenantId": tenant_context.tenant_id,
         "appName": session.app_name,
         "state": dict(session.state),
         "eventCount": len(session.events),

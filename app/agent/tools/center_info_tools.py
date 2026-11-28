@@ -2,6 +2,10 @@
 
 from typing import Any
 
+from app.agent.tools.graphrag_tools import (
+    retrieve_scope_knowledge,
+    retrieve_scope_knowledge_sync,
+)
 from app.agent.tools.java_catalog_tools import (
     JavaCatalogError,
     filter_by_query,
@@ -10,15 +14,16 @@ from app.agent.tools.java_catalog_tools import (
     tool_error,
     tool_result,
 )
+from app.services.ontology.seeds.layer2_core import TOOL_SCOPE_MAP
 
 
-def search_center_knowledge(query: str) -> dict[str, Any]:
+async def search_center_knowledge(query: str) -> dict[str, Any]:
     """Tra cứu thông tin giới thiệu chung, lịch sử hình thành và tầm nhìn của trung tâm.
 
     Args:
         query: Câu hỏi hoặc từ khóa về võ đường, lịch sử, sứ mệnh trung tâm.
     """
-    raise NotImplementedError("Chức năng tìm kiếm thông tin trung tâm chưa được triển khai!")
+    return await retrieve_scope_knowledge(query, TOOL_SCOPE_MAP["search_center_knowledge"])
 
 
 def search_center_locations(query: str) -> dict[str, Any]:
@@ -35,13 +40,13 @@ def search_center_locations(query: str) -> dict[str, Any]:
         return tool_error(query, exc)
 
 
-def search_opening_hours(query: str) -> dict[str, Any]:
+async def search_opening_hours(query: str) -> dict[str, Any]:
     """Tra cứu thời gian hoạt động, giờ mở cửa của trung tâm theo ngày trong tuần.
 
     Args:
         query: Câu hỏi về giờ làm việc, giờ mở cửa hoặc ngày nghỉ lễ.
     """
-    raise NotImplementedError("Chức năng tìm kiếm thời gian hoạt động chưa được triển khai!")
+    return await retrieve_scope_knowledge(query, TOOL_SCOPE_MAP["search_opening_hours"])
 
 
 def search_coach_information(query: str) -> dict[str, Any]:
@@ -59,21 +64,25 @@ def search_coach_information(query: str) -> dict[str, Any]:
         return tool_error(query, exc)
 
 
-def search_center_facilities(query: str) -> dict[str, Any]:
+async def search_center_facilities(query: str) -> dict[str, Any]:
     """Tra cứu thông tin cơ sở vật chất, thảm tập, trang thiết bị và tiện ích phòng tập.
 
     Args:
         query: Câu hỏi về trang thiết bị, phòng tập hoặc tiện ích của trung tâm.
     """
-    raise NotImplementedError("Chức năng tìm kiếm thông tin cơ sở vật chất chưa được triển khai!")
+    return await retrieve_scope_knowledge(query, TOOL_SCOPE_MAP["search_center_facilities"])
 
 
 def search_contact_information(query: str) -> dict[str, Any]:
-    """Tra cứu địa chỉ và hotline chính thức theo cơ sở từ Java.
+    """Tra cứu địa chỉ và hotline chính thức theo cơ sở từ Java kết hợp kênh liên hệ từ GraphRAG.
 
     Args:
         query: Câu hỏi về số điện thoại, email, kênh liên hệ hoặc gặp tư vấn viên.
     """
+    graph_context = retrieve_scope_knowledge_sync(
+        query or "kênh liên hệ email Zalo Facebook website",
+        TOOL_SCOPE_MAP["search_contact_information"],
+    )
     try:
         branches = filter_by_query(list_resource("/branches"), query)
         details = [
@@ -83,10 +92,22 @@ def search_contact_information(query: str) -> dict[str, Any]:
         ]
         return tool_result(
             query,
-            {"branches": details or branches},
-            "API hiện có địa chỉ và hotline; email, Zalo, Facebook và website chưa được Java quản lý.",
+            {
+                "branches": details or branches,
+                "graphKnowledge": graph_context,
+            },
+            "Kết hợp địa chỉ/hotline từ Java API và email, Zalo, Facebook, website từ GraphRAG.",
         )
     except JavaCatalogError as exc:
+        if graph_context.get("passages") or graph_context.get("facts"):
+            return tool_result(
+                query,
+                {
+                    "branches": [],
+                    "graphKnowledge": graph_context,
+                },
+                "Trả về kênh liên hệ từ GraphRAG (Java Catalog tạm thời không khả dụng).",
+            )
         return tool_error(query, exc)
 
 

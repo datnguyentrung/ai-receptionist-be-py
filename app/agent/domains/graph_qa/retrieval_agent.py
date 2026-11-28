@@ -10,6 +10,7 @@ from google.adk.events import Event
 from pydantic import PrivateAttr
 
 from app.agent.tools.graphrag_tools import retrieve_graph_qa_evidence
+from app.core.tenant_context import require_tenant_id
 from app.services.graphrag.retrieval import (
     INSUFFICIENT_EVIDENCE,
     EvidenceBundle,
@@ -55,11 +56,19 @@ class GraphQaRetrievalAdapter(BaseAgent):
                 abstention_message=INSUFFICIENT_EVIDENCE,
             )
         else:
-            request = GraphQaRequest(question=question)
-            if self._retriever is not None:
-                evidence = await self._retriever.retrieve(request)
+            try:
+                tenant_id = require_tenant_id()
+            except (ValueError, PermissionError):
+                evidence = EvidenceBundle(
+                    status=EvidenceStatus.INSUFFICIENT,
+                    abstention_message=INSUFFICIENT_EVIDENCE,
+                )
             else:
-                evidence = await retrieve_graph_qa_evidence(request)
+                request = GraphQaRequest(question=question, tenant_id=tenant_id)
+                if self._retriever is not None:
+                    evidence = await self._retriever.retrieve(request)
+                else:
+                    evidence = await retrieve_graph_qa_evidence(request)
 
         payload = evidence.model_dump(mode="json")
         ctx.session.state[QUESTION_STATE_KEY] = question

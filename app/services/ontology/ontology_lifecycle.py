@@ -38,6 +38,62 @@ from app.services.ingestion.schema.ontology import OntologyCache
 from app.services.ontology.ontology_compiler import OntologyCompiler
 
 
+PROTECTED_OWNERSHIPS = frozenset({"BUSINESS_API", "CORE_KNOWLEDGE"})
+
+
+def is_protected_entity(entity: OntologyEntityType) -> bool:
+    """Return True if an entity type belongs to Layer 1 (BUSINESS_API) or Layer 2 (CORE_KNOWLEDGE)."""
+    ownership = str((entity.metadata_ or {}).get("ownership", "")).strip().upper()
+    return ownership in PROTECTED_OWNERSHIPS
+
+
+def assert_proposal_respects_protected_layers(
+    proposal_kind: SchemaProposalType,
+    payload: dict[str, Any],
+    existing_entities: list[OntologyEntityType],
+    *,
+    tenant_id: str | None = None,
+) -> None:
+    """Block Layer 3 proposals from modifying, shadowing, or bypassing Layer 1 & Layer 2."""
+    from app.services.ontology.ownership_registry import OwnershipRegistry
+
+    protected_by_name = {
+        e.technical_name.casefold(): e
+        for e in existing_entities
+        if is_protected_entity(e)
+    }
+    target_name = str(payload.get("technicalName") or "").strip().casefold()
+    entity_name = str(payload.get("entityType") or "").strip().casefold()
+
+    if proposal_kind in {
+        SchemaProposalType.MODIFY_ENTITY_TYPE,
+        SchemaProposalType.MODIFY_PROPERTY,
+        SchemaProposalType.NEW_PROPERTY,
+    }:
+        owner_entity = protected_by_name.get(entity_name or target_name)
+        if owner_entity is not None:
+            ownership = (owner_entity.metadata_ or {}).get("ownership")
+            raise ValueError(
+                f"Protected {ownership} entity '{owner_entity.technical_name}' cannot be modified by Layer 3 proposals."
+            )
+
+    if proposal_kind == SchemaProposalType.NEW_ENTITY_TYPE and target_name in protected_by_name:
+        owner_entity = protected_by_name[target_name]
+        ownership = (owner_entity.metadata_ or {}).get("ownership")
+        raise ValueError(
+            f"Protected {ownership} entity '{owner_entity.technical_name}' cannot be shadowed by Layer 3 proposals."
+        )
+
+    decision = OwnershipRegistry.from_seeds().check_layer3_proposal(
+        proposal_kind.value,
+        payload,
+        tenant_id=tenant_id or "system-check",
+        approved=True,
+    )
+    if not decision.allowed:
+        raise ValueError(decision.reason)
+
+
 class SchemaObjectAlreadyExistsError(ValueError):
     """Recoverable duplicate detected against the ingestion ontology version."""
 
@@ -179,6 +235,18 @@ class OntologyLifecycle:
                     OntologyVersion.status == OntologyVersionStatus.DRAFT,
                 ))
                 version_id = version.id if version else uuid.UUID(ontology_version_id)
+                existing_version_entities = list(
+                    (
+                        await session.scalars(
+                            select(OntologyEntityType).where(
+                                OntologyEntityType.ontology_version_id == version_id
+                            )
+                        )
+                    ).all()
+                )
+                assert_proposal_respects_protected_layers(
+                    proposal_kind, payload, existing_version_entities
+                )
                 if proposal_kind == SchemaProposalType.NEW_RELATIONSHIP:
                     source_entity, target_entity = await self._entities_by_names(
                         session,

@@ -14,6 +14,7 @@ from app.agent.domains.graph_qa.retrieval_agent import (
     QUESTION_STATE_KEY,
     GraphQaRetrievalAdapter,
 )
+from app.core.tenant_context import TrustedTenantContext, tenant_context_scope
 from app.services.graphrag.retrieval import (
     EvidenceBundle,
     EvidenceStatus,
@@ -71,7 +72,9 @@ def _chunk_result(value):
 async def test_hybrid_retrieval_returns_safe_grounded_bundle() -> None:
     retriever, store = _retriever()
 
-    result = await retriever.retrieve(GraphQaRequest(question="Có bao nhiêu cơ sở?"))
+    result = await retriever.retrieve(
+        GraphQaRequest(question="Có bao nhiêu cơ sở?", tenant_id="tenant-test")
+    )
 
     assert result.status is EvidenceStatus.READY
     assert result.passages[0].content == "Hệ thống có 6 cơ sở tại Hà Đông."
@@ -88,7 +91,9 @@ async def test_hybrid_retrieval_degrades_to_lexical_evidence_when_embedding_fail
 ):
     retriever, store = _retriever(embedding_side_effect=RuntimeError("embedding down"))
 
-    result = await retriever.retrieve(GraphQaRequest(question="cơ sở ở đâu"))
+    result = await retriever.retrieve(
+        GraphQaRequest(question="cơ sở ở đâu", tenant_id="tenant-test")
+    )
 
     assert result.status is EvidenceStatus.READY
     assert len(result.passages) == 1
@@ -101,7 +106,9 @@ async def test_hybrid_retrieval_abstains_when_all_paths_have_no_evidence() -> No
     retriever, store = _retriever(fulltext_result=[])
     store.search_chunk_vector = AsyncMock(return_value=[])
 
-    result = await retriever.retrieve(GraphQaRequest(question="không có dữ liệu"))
+    result = await retriever.retrieve(
+        GraphQaRequest(question="không có dữ liệu", tenant_id="tenant-test")
+    )
 
     assert result.status is EvidenceStatus.INSUFFICIENT
     assert result.passages == []
@@ -130,7 +137,9 @@ async def test_fact_vector_promotes_its_grounded_supporting_chunk() -> None:
     )
     store.chunks_by_ids = AsyncMock(return_value=[fact_chunk])
 
-    result = await retriever.retrieve(GraphQaRequest(question="học ngoài trời bao nhiêu"))
+    result = await retriever.retrieve(
+        GraphQaRequest(question="học ngoài trời bao nhiêu", tenant_id="tenant-test")
+    )
 
     assert result.status is EvidenceStatus.READY
     assert result.passages[0].content == fact_chunk["text"]
@@ -164,7 +173,10 @@ async def test_retrieval_adapter_calls_the_retriever_once_and_stores_safe_bundle
         user_content=types.Content(role="user", parts=[types.Part(text="CLB tên gì?")]),
     )
 
-    _ = [event async for event in adapter.run_async(ctx)]
+    with tenant_context_scope(
+        TrustedTenantContext(tenant_id="tenant-test", user_id="user-1")
+    ):
+        _ = [event async for event in adapter.run_async(ctx)]
 
     assert fake.calls == 1
     assert session.state[QUESTION_STATE_KEY] == "CLB tên gì?"

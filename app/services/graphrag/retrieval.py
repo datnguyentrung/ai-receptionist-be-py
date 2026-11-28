@@ -34,6 +34,7 @@ class GraphQaRequest(BaseModel):
     """Trusted request accepted by the Graph QA retrieval seam."""
 
     question: str = Field(min_length=1, max_length=2000)
+    tenant_id: str = Field(min_length=1, max_length=100)
     scope_key: str | None = None
 
 
@@ -114,6 +115,7 @@ class GraphRAGRetriever:
                 abstention_message=INSUFFICIENT_EVIDENCE,
             )
         scope_key = request.scope_key
+        tenant_id = request.tenant_id
         top_k = self._default_top_k
         started = time.perf_counter()
         lucene_query = _lucene_query(query)
@@ -126,7 +128,7 @@ class GraphRAGRetriever:
             self._optional_path(
                 "chunk_fulltext",
                 self._graph_store.search_chunk_fulltext(
-                    lucene_query, self._candidate_limit
+                    lucene_query, self._candidate_limit, tenant_id=tenant_id
                 ),
             )
         )
@@ -134,7 +136,7 @@ class GraphRAGRetriever:
             self._optional_path(
                 "entity_fulltext",
                 self._graph_store.search_entity_fulltext(
-                    lucene_query, self._candidate_limit
+                    lucene_query, self._candidate_limit, tenant_id=tenant_id
                 ),
             )
         )
@@ -153,6 +155,7 @@ class GraphRAGRetriever:
             query_vector = None
 
         if query_vector:
+            vector_limit = max(self._candidate_limit * 5, 50)
             (
                 (chunk_vector, vector_available),
                 (fact_hits, fact_available),
@@ -160,13 +163,13 @@ class GraphRAGRetriever:
                 self._optional_path(
                     "chunk_vector",
                     self._graph_store.search_chunk_vector(
-                        query_vector, self._candidate_limit
+                        query_vector, vector_limit, tenant_id=tenant_id
                     ),
                 ),
                 self._optional_path(
                     "fact_vector",
                     self._graph_store.search_fact_vector(
-                        query_vector, self._candidate_limit
+                        query_vector, vector_limit, tenant_id=tenant_id
                     ),
                 ),
             )
@@ -196,19 +199,19 @@ class GraphRAGRetriever:
             self._optional_path(
                 "entity_traversal",
                 self._graph_store.chunks_for_entities(
-                    entity_keys, self._candidate_limit
+                    entity_keys, self._candidate_limit, tenant_id=tenant_id
                 ),
             ),
             self._optional_path(
                 "fact_support",
                 self._graph_store.chunks_by_ids(
-                    fact_chunk_ids, include_historical=False
+                    fact_chunk_ids, tenant_id=tenant_id, include_historical=False
                 ),
             ),
             self._optional_path(
                 "conflict_peers",
                 self._graph_store.chunks_by_ids(
-                    peer_chunk_ids, include_historical=True
+                    peer_chunk_ids, tenant_id=tenant_id, include_historical=True
                 ),
             ),
         )

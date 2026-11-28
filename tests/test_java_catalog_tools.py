@@ -67,3 +67,37 @@ def test_coach_tool_combines_people_positions_and_assignments(monkeypatch):
     result = center_info_tools.search_coach_information("huấn luyện viên")
 
     assert set(result["resources"]) == {"persons", "positions", "courseStaffAssignments"}
+
+
+def test_search_admission_knowledge_includes_graphrag_and_gracefully_handles_java_401(monkeypatch):
+    fake_graph = {
+        "source": "graphrag",
+        "scopeKey": "admission_onboarding",
+        "status": "ANSWERED",
+        "passages": [{"text": "Đối với học viên dưới 6 tuổi, cần đạt yêu cầu sát hạch của CLB."}],
+        "facts": [{"statement": "Điều kiện tiếp nhận học viên dưới 6 tuổi: cần đạt yêu cầu sát hạch."}],
+    }
+    monkeypatch.setattr(
+        admission_tools,
+        "retrieve_scope_knowledge_sync",
+        lambda q, scope: fake_graph,
+    )
+    monkeypatch.setattr(
+        admission_tools,
+        "list_resource",
+        lambda path: [{"sessionType": "MAIN", "sessionsPerWeek": 3}],
+    )
+
+    ok_res = admission_tools.search_admission_knowledge("trẻ em dưới 6 tuổi")
+    assert ok_res["resources"]["graphKnowledge"] == fake_graph
+    assert ok_res["resources"]["trainingPlanRequirements"] == [{"sessionType": "MAIN", "sessionsPerWeek": 3}]
+
+    def _raise_401(path):
+        raise admission_tools.JavaCatalogError(path, 401)
+
+    monkeypatch.setattr(admission_tools, "list_resource", _raise_401)
+    fallback_res = admission_tools.search_admission_knowledge("trẻ em dưới 6 tuổi")
+    assert "error" not in fallback_res
+    assert fallback_res["resources"]["graphKnowledge"] == fake_graph
+    assert fallback_res["resources"]["trainingPlanRequirements"] == []
+
